@@ -1,11 +1,13 @@
 """
-Verifies backtest simulation mechanics (entry/exit resolution, position
-sizing cap, summary stats) against deterministic synthetic candles — no
-network calls. Indicator math itself is covered by test_signal_generation.py;
-this covers scripts/backtest.py's simulate()/summarize() logic layered on top.
+Verifies backtest simulation mechanics (entry/exit resolution, fee
+modeling, position sizing cap, calibration/validation split, diagnostics)
+against deterministic synthetic candles — no network calls. Indicator math
+itself is covered by test_signal_generation.py; this covers
+scripts/backtest.py's simulate()/summarize()/run_walk_forward() logic
+layered on top.
 """
 from src.data_ingestion import Candle
-from scripts.backtest import simulate, summarize, Trade
+from scripts.backtest import simulate, summarize, diagnose, run_walk_forward, Trade
 
 
 def _crossover_candles():
@@ -33,12 +35,16 @@ def test_simulate_exits_at_take_profit_when_high_reaches_it():
     # without its low touching the stop, so the trade should close on a win.
     candles.append(Candle("BTC/USD", "t30", open=101, high=110, low=99, close=105, volume=10))
 
-    trades, equity_curve = simulate(candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0, capital=100.0)
+    trades, equity_curve = simulate(
+        candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0,
+        capital=100.0, fee_pct=0.0, slippage_bps=0.0,
+    )
 
     assert len(trades) == 1
     trade = trades[0]
     assert trade.entry_index == 29
     assert trade.exit_index == 30
+    assert trade.exit_reason == "take_profit"
     assert trade.pnl > 0
     assert equity_curve[-1] > 100.0
 
@@ -49,10 +55,14 @@ def test_simulate_exits_at_stop_loss_when_low_reaches_it():
     # instead — the trade should close on a loss.
     candles.append(Candle("BTC/USD", "t30", open=99, high=101, low=90, close=95, volume=10))
 
-    trades, equity_curve = simulate(candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0, capital=100.0)
+    trades, equity_curve = simulate(
+        candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0,
+        capital=100.0, fee_pct=0.0, slippage_bps=0.0,
+    )
 
     assert len(trades) == 1
     trade = trades[0]
+    assert trade.exit_reason == "stop"
     assert trade.pnl < 0
     assert trade.exit_price < trade.entry_price
     assert equity_curve[-1] < 100.0
@@ -67,6 +77,7 @@ def test_simulate_prefers_stop_when_both_hit_in_same_bar():
     trades, _ = simulate(candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0, capital=100.0)
 
     assert len(trades) == 1
+    assert trades[0].exit_reason == "stop"
     assert trades[0].pnl < 0
 
 
@@ -78,12 +89,12 @@ def test_simulate_caps_position_size_at_max_notional():
 
     trades, _ = simulate(
         candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=0.1,
-        capital=100.0, risk_pct=1.0, max_position_pct=25.0,
+        capital=100.0, risk_pct=1.0, max_position_pct=25.0, fee_pct=0.0, slippage_bps=0.0,
     )
 
     assert len(trades) == 1
     trade = trades[0]
-    implied_position_size = trade.pnl / (trade.exit_price - trade.entry_price)
+    implied_position_size = trade.gross_pnl / (trade.exit_price - trade.entry_price)
     max_notional = 100.0 * 0.25
     assert implied_position_size * trade.entry_price <= max_notional + 1e-6
 
@@ -101,11 +112,38 @@ def test_simulate_holds_position_open_and_skips_overlapping_signal():
     assert len(trades) == 1
 
 
+def test_simulate_applies_fees_and_slippage_to_reduce_net_pnl():
+    candles = _crossover_candles()
+    candles.append(Candle("BTC/USD", "t30", open=101, high=110, low=99, close=105, volume=10))
+
+    trades_with_fees, _ = simulate(
+        candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0,
+        capital=100.0, fee_pct=0.25, slippage_bps=5.0,
+    )
+    trades_no_fees, _ = simulate(
+        candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0,
+        capital=100.0, fee_pct=0.0, slippage_bps=0.0,
+    )
+
+    assert len(trades_with_fees) == 1 and len(trades_no_fees) == 1
+    with_fees, no_fees = trades_with_fees[0], trades_no_fees[0]
+
+    # Same gross P&L (fees don't affect trigger levels), but net P&L is lower
+    # by exactly the modeled round-trip cost: 0.25% + 5bps = 0.30% per leg.
+    assert with_fees.gross_pnl == no_fees.gross_pnl
+    cost_frac_per_leg = 0.25 / 100 + 5.0 / 10000
+    position_size = with_fees.gross_pnl / (with_fees.exit_price - with_fees.entry_price)
+    expected_fees = position_size * (with_fees.entry_price + with_fees.exit_price) * cost_frac_per_leg
+    assert round(with_fees.fees_paid, 6) == round(expected_fees, 6)
+    assert round(with_fees.pnl, 6) == round(with_fees.gross_pnl - expected_fees, 6)
+    assert with_fees.pnl < no_fees.pnl
+
+
 def test_summarize_computes_win_rate_return_and_drawdown():
     trades = [
-        Trade(0, 1, "t0", "t1", entry_price=100, exit_price=110, pnl=10.0, r_multiple=1.0),
-        Trade(2, 3, "t2", "t3", entry_price=110, exit_price=100, pnl=-15.0, r_multiple=-1.5),
-        Trade(4, 5, "t4", "t5", entry_price=100, exit_price=105, pnl=5.0, r_multiple=0.5),
+        Trade(0, 1, "t0", "t1", entry_price=100, exit_price=110, exit_reason="take_profit", gross_pnl=10.0, fees_paid=0.0, pnl=10.0, r_multiple=1.0),
+        Trade(2, 3, "t2", "t3", entry_price=110, exit_price=100, exit_reason="stop", gross_pnl=-15.0, fees_paid=0.0, pnl=-15.0, r_multiple=-1.5),
+        Trade(4, 6, "t4", "t6", entry_price=100, exit_price=105, exit_reason="eol", gross_pnl=5.0, fees_paid=0.0, pnl=5.0, r_multiple=0.5),
     ]
     # Equity path: 100 -> 110 (peak) -> 95 (trough) -> 100
     equity_curve = [100.0, 110.0, 95.0, 100.0]
@@ -117,6 +155,10 @@ def test_summarize_computes_win_rate_return_and_drawdown():
     assert stats["total_return_pct"] == 0.0  # ended flat vs. starting capital
     assert round(stats["max_drawdown_pct"], 4) == round((110 - 95) / 110 * 100, 4)
     assert round(stats["avg_r_multiple"], 4) == round((1.0 - 1.5 + 0.5) / 3, 4)
+    assert round(stats["stop_rate_pct"], 2) == round(1 / 3 * 100, 2)
+    assert round(stats["take_profit_rate_pct"], 2) == round(1 / 3 * 100, 2)
+    assert round(stats["eol_rate_pct"], 2) == round(1 / 3 * 100, 2)
+    assert stats["avg_holding_bars"] == (1 + 1 + 2) / 3
 
 
 def test_summarize_handles_no_trades():
@@ -124,3 +166,43 @@ def test_summarize_handles_no_trades():
     assert stats["trade_count"] == 0
     assert stats["win_rate_pct"] == 0.0
     assert stats["total_return_pct"] == 0.0
+
+
+def test_diagnose_reports_buy_hold_return_and_signal_count():
+    candles = _crossover_candles()
+    diag = diagnose(candles)
+
+    expected_buy_hold = (candles[-1].close - candles[0].close) / candles[0].close * 100
+    assert round(diag["buy_hold_return_pct"], 6) == round(expected_buy_hold, 6)
+    assert diag["raw_crossover_signal_count"] == 1  # the one crossover built into the fixture
+    assert diag["candle_count"] == len(candles)
+    assert diag["avg_atr_pct_of_price"] > 0
+
+
+def test_run_walk_forward_splits_trades_by_entry_timestamp():
+    # Two independent crossover setups back to back: the first resolves
+    # entirely before the cutoff (calibration), the second fires and
+    # resolves after it (validation).
+    candles = _crossover_candles()
+    candles.append(Candle("BTC/USD", "t30", open=101, high=110, low=99, close=105, volume=10))  # calibration trade resolves here
+
+    # A second decline+rise cycle, offset in price, to produce a second,
+    # later crossover.
+    price = candles[-1].close
+    for i in range(31, 56):
+        price -= 1.0
+        candles.append(Candle("BTC/USD", f"t{i}", open=price + 1, high=price + 1.5, low=price - 0.5, close=price, volume=10))
+    for i in range(56, 61):
+        price += 5.0
+        candles.append(Candle("BTC/USD", f"t{i}", open=price - 5, high=price + 0.5, low=price - 5.5, close=price, volume=10 if i < 59 else 100))
+    candles.append(Candle("BTC/USD", "t61", open=price + 1, high=price + 20, low=price - 1, close=price + 15, volume=10))  # validation trade resolves here
+
+    # Cutoff is any timestamp between the two trades' entries.
+    cutoff_ts = candles[40].timestamp
+
+    calibration, validation = run_walk_forward(
+        candles, cutoff_ts, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0, capital=100.0,
+    )
+
+    assert calibration["trade_count"] == 1
+    assert validation["trade_count"] == 1
