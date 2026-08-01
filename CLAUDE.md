@@ -30,12 +30,32 @@ spec section it implements — `execution.py`, `position_management.py`,
 `risk_filter.py`'s real checks, and `data_ingestion.py`'s live fetch are
 untouched.
 
-`scripts/backtest.py` ran a 1-year sweep of BTC/USD + ETH/USD 1h candles
-across EMA pairs (9/21, 12/26, 8/17) x ATR multipliers (1.5-3.0) —
-results are in chat history from the 2026-08-01 session, not yet
-transcribed into `session-playbook-v6.md` §7. EMA/ATR values in `.env`
-are still unlocked pending a human decision on which combo to use; don't
-treat the backtest's numbers as a locked decision until that happens.
+`scripts/backtest.py` now models transaction costs (Alpaca crypto Tier 1
+taker fee, 0.25%/leg + an assumed 5bps/leg slippage) and does a proper
+calibration (first 270d) / held-out validation (last 90d) split rather
+than reporting in-sample-optimized numbers.
+
+**2026-08-01 session finding, important:** over the most recent 1-year
+window, no EMA/ATR combo tested is convincingly net-profitable on either
+symbol after fees. ETH's best calibration combo (12/26, 2.5x ATR) is
+roughly breakeven out-of-sample (+0.06% over 90d); BTC's best combo stays
+net-negative in both calibration and validation. Gross-of-fees, ETH's
+best combo is clearly positive (+4.47% calibration) while BTC's best
+gross combo is still ~flat (-1.71%) — so fees make things worse but
+aren't the root cause for BTC specifically. Diagnostics point to a
+signal-quality gap rather than a volatility or fee-drag explanation: BTC
+and ETH get an identical number of raw crossover signals (56 each) and
+BTC's average ATR-as-%-of-price is actually *lower* than ETH's, yet BTC's
+stop-hit rate is far higher (58-69% vs 39-52%) — BTC's crossovers just
+don't follow through on 1h in this window. Full sweep/validation tables
+are in chat history from this session, not yet transcribed into
+`session-playbook-v6.md` §7.
+
+EMA/ATR values in `.env` remain unlocked. Given the above, "lock in 9/21"
+is not supported by this data — a human decision is needed on how to
+proceed (different params, drop BTC from initial live pairs, try a
+different timeframe, or conclude the strategy needs rework before going
+live at all). Don't treat any single combo as a locked decision.
 
 **Next milestone:** none decided yet — likely either iterating on backtest
 calibration (e.g. testing a stop/take-profit asymmetry, since v1 backtest
