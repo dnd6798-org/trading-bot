@@ -7,8 +7,10 @@ doesn't redefine them.
 
 ## Status
 
-Scaffold only. No trading logic implemented yet. Next real milestone is
-`scripts/backtest.py` (see `session-playbook-v6.md` §9).
+EMA/ATR signal generation, historical data ingestion, and
+`scripts/backtest.py` are implemented and tested. Execution, position
+management, and the real risk-filter checks are still stubs — see
+`CLAUDE.md` for current details.
 
 ## Setup
 

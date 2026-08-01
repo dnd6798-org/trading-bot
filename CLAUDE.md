@@ -21,13 +21,27 @@ detail on.
 
 ## Current status
 
-Scaffold only. `src/config.py`, `src/halt_state.py`, and
-`tests/test_config.py` are real and working. Everything else in `src/` is
-a stub with a docstring pointing to the spec section it implements.
+`src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
+volume + long-only crossover detection), `src/data_ingestion.py`'s
+historical fetch (`fetch_historical_candles`, via Alpaca crypto market
+data), and `scripts/backtest.py` are real and working, with passing tests.
+Everything else in `src/` is still a stub with a docstring pointing to the
+spec section it implements — `execution.py`, `position_management.py`,
+`risk_filter.py`'s real checks, and `data_ingestion.py`'s live fetch are
+untouched.
 
-**Next milestone: `scripts/backtest.py`** — validates the EMA/ATR signal
-against historical data. Do this before touching any live-loop code
-(`data_ingestion.py`'s live fetch, `execution.py`, `position_management.py`).
+`scripts/backtest.py` ran a 1-year sweep of BTC/USD + ETH/USD 1h candles
+across EMA pairs (9/21, 12/26, 8/17) x ATR multipliers (1.5-3.0) —
+results are in chat history from the 2026-08-01 session, not yet
+transcribed into `session-playbook-v6.md` §7. EMA/ATR values in `.env`
+are still unlocked pending a human decision on which combo to use; don't
+treat the backtest's numbers as a locked decision until that happens.
+
+**Next milestone:** none decided yet — likely either iterating on backtest
+calibration (e.g. testing a stop/take-profit asymmetry, since v1 backtest
+assumes symmetric 1:1 ATR-based exits) or resolving the crypto
+bracket-order design gap so `execution.py` can be built. Confirm with the
+user before starting either.
 
 ## Hard rules — never do these
 
