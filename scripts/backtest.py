@@ -65,7 +65,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run directly: python scripts/backtest.py
 
-from src.data_ingestion import fetch_historical_candles, TRADING_PAIRS
+from src.data_ingestion import fetch_historical_candles, Candle, TRADING_PAIRS
 from src.signal_generation import compute_ema, compute_atr
 
 DEFAULT_EMA_PAIRS = [(9, 21), (12, 26), (8, 17)]
@@ -73,6 +73,7 @@ DEFAULT_ATR_MULTIPLIERS = [1.5, 2.0, 2.5, 3.0]
 DEFAULT_CALIBRATION_DAYS = 270
 DEFAULT_VALIDATION_DAYS = 90
 DEFAULT_CAPITAL = 100.0
+DEFAULT_CANDLE_HOURS = 1
 TOP_N_FOR_VALIDATION = 2
 
 # Alpaca crypto Tier 1 taker fee (docs.alpaca.markets/us/docs/crypto-fees),
@@ -106,6 +107,33 @@ class Trade:
     fees_paid: float
     pnl: float  # net of fees
     r_multiple: float
+
+
+def resample_candles(candles, hours_per_candle):
+    """
+    Diagnostic-only aggregation of consecutive 1h candles into coarser
+    N-hour bars (open of first, high of max, low of min, close of last,
+    volume summed) — for testing whether the signal is sensitive to
+    timeframe noise. Never touches data_ingestion.py: the live pipeline's
+    locked timeframe is 1h (spec §2); this is a backtest-side experiment
+    only. Trailing candles that don't complete a full group are dropped.
+    """
+    if hours_per_candle <= 1:
+        return candles
+    resampled = []
+    usable_length = len(candles) - (len(candles) % hours_per_candle)
+    for i in range(0, usable_length, hours_per_candle):
+        group = candles[i:i + hours_per_candle]
+        resampled.append(Candle(
+            symbol=group[0].symbol,
+            timestamp=group[0].timestamp,
+            open=group[0].open,
+            high=max(c.high for c in group),
+            low=min(c.low for c in group),
+            close=group[-1].close,
+            volume=sum(c.volume for c in group),
+        ))
+    return resampled
 
 
 def _volume_confirms_series(candles, lookback=VOLUME_LOOKBACK):
@@ -346,6 +374,10 @@ def parse_args():
     parser.add_argument("--fee-pct", type=float, default=DEFAULT_TAKER_FEE_PCT, help="per-leg taker fee, percent")
     parser.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS, help="per-leg slippage estimate, bps")
     parser.add_argument("--no-fees", action="store_true", help="zero out fees/slippage for comparison")
+    parser.add_argument(
+        "--candle-hours", type=int, default=DEFAULT_CANDLE_HOURS,
+        help="aggregate fetched 1h candles into N-hour bars before running the signal (diagnostic only, doesn't touch the locked 1h data source)",
+    )
     args = parser.parse_args()
 
     if args.ema_pairs:
@@ -379,13 +411,16 @@ def main():
         if not candles:
             print(f"{symbol}: no candle data returned, skipping")
             continue
+        if args.candle_hours != 1:
+            candles = resample_candles(candles, args.candle_hours)
 
-        diag = diagnose(candles)
-        print(f"\n=== {symbol} ===")
+        diag = diagnose(candles, ema_fast_period=args.ema_pairs[0][0], ema_slow_period=args.ema_pairs[0][1])
+        print(f"\n=== {symbol} ({args.candle_hours}h candles) ===")
+        print(f"range: {candles[0].timestamp} to {candles[-1].timestamp}  ({len(candles)} candles)")
         print(
             f"buy&hold return over period: {diag['buy_hold_return_pct']:.2f}%  |  "
             f"avg ATR as % of price: {diag['avg_atr_pct_of_price']:.2f}%  |  "
-            f"raw 9/21 crossover signals: {diag['raw_crossover_signal_count']} "
+            f"raw {args.ema_pairs[0][0]}/{args.ema_pairs[0][1]} crossover signals: {diag['raw_crossover_signal_count']} "
             f"over {diag['candle_count']} candles"
         )
 

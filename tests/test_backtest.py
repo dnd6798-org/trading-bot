@@ -8,7 +8,7 @@ layered on top.
 """
 from src.data_ingestion import Candle
 from src.signal_generation import volume_confirms
-from scripts.backtest import simulate, summarize, diagnose, run_walk_forward, Trade, _volume_confirms_series, VOLUME_LOOKBACK
+from scripts.backtest import simulate, summarize, diagnose, run_walk_forward, resample_candles, Trade, _volume_confirms_series, VOLUME_LOOKBACK
 
 
 def _crossover_candles():
@@ -178,6 +178,46 @@ def test_diagnose_reports_buy_hold_return_and_signal_count():
     assert diag["raw_crossover_signal_count"] == 1  # the one crossover built into the fixture
     assert diag["candle_count"] == len(candles)
     assert diag["avg_atr_pct_of_price"] > 0
+
+
+def test_resample_candles_aggregates_ohlcv_correctly_and_drops_partial_trailing_group():
+    candles = [
+        Candle("BTC/USD", "t0", open=100, high=105, low=99, close=102, volume=10),
+        Candle("BTC/USD", "t1", open=102, high=110, low=101, close=108, volume=20),
+        Candle("BTC/USD", "t2", open=108, high=109, low=95, close=97, volume=15),
+        Candle("BTC/USD", "t3", open=97, high=100, low=96, close=99, volume=5),
+        # Second group of 4
+        Candle("BTC/USD", "t4", open=99, high=101, low=98, close=100, volume=8),
+        Candle("BTC/USD", "t5", open=100, high=103, low=99, close=101, volume=7),
+        Candle("BTC/USD", "t6", open=101, high=104, low=100, close=103, volume=6),
+        Candle("BTC/USD", "t7", open=103, high=106, low=102, close=105, volume=9),
+        # Incomplete trailing group — should be dropped
+        Candle("BTC/USD", "t8", open=105, high=107, low=104, close=106, volume=3),
+    ]
+
+    resampled = resample_candles(candles, hours_per_candle=4)
+
+    assert len(resampled) == 2
+    first, second = resampled
+    assert first.symbol == "BTC/USD"
+    assert first.timestamp == "t0"
+    assert first.open == 100          # open of the group's first candle
+    assert first.high == 110          # max high across the group
+    assert first.low == 95            # min low across the group
+    assert first.close == 99          # close of the group's last candle
+    assert first.volume == 10 + 20 + 15 + 5
+
+    assert second.timestamp == "t4"
+    assert second.open == 99
+    assert second.high == 106
+    assert second.low == 98
+    assert second.close == 105
+    assert second.volume == 8 + 7 + 6 + 9
+
+
+def test_resample_candles_is_a_noop_for_1h():
+    candles = [Candle("BTC/USD", "t0", 1, 2, 0.5, 1.5, 10)]
+    assert resample_candles(candles, hours_per_candle=1) is candles
 
 
 def test_backtest_volume_confirmation_matches_signal_generation_reference():
