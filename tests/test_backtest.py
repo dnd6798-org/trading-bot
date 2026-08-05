@@ -8,7 +8,11 @@ layered on top.
 """
 from src.data_ingestion import Candle
 from src.signal_generation import volume_confirms
-from scripts.backtest import simulate, summarize, diagnose, run_walk_forward, resample_candles, Trade, _volume_confirms_series, VOLUME_LOOKBACK
+from scripts.backtest import (
+    simulate, summarize, diagnose, run_walk_forward, resample_candles,
+    compute_sma, compute_trend_filtered_signal_indices, compute_signal_indices,
+    Trade, _volume_confirms_series, VOLUME_LOOKBACK,
+)
 
 
 def _crossover_candles():
@@ -218,6 +222,76 @@ def test_resample_candles_aggregates_ohlcv_correctly_and_drops_partial_trailing_
 def test_resample_candles_is_a_noop_for_1h():
     candles = [Candle("BTC/USD", "t0", 1, 2, 0.5, 1.5, 10)]
     assert resample_candles(candles, hours_per_candle=1) is candles
+
+
+def test_compute_sma_basic():
+    values = [1, 2, 3, 4, 5, 6]
+    sma = compute_sma(values, period=3)
+    assert sma[:2] == [None, None]
+    assert sma[2] == 2  # avg(1,2,3)
+    assert sma[3] == 3  # avg(2,3,4)
+    assert sma[4] == 4
+    assert sma[5] == 5
+
+
+def test_compute_sma_insufficient_data_returns_all_none():
+    assert compute_sma([1, 2], period=5) == [None, None]
+
+
+def test_simulate_uses_precomputed_signals_override():
+    candles = _crossover_candles()
+    candles.append(Candle("BTC/USD", "t30", open=101, high=110, low=99, close=105, volume=10))
+    base_indices, atr = compute_signal_indices(candles, 9, 21)
+    assert base_indices == [29]  # sanity: the base signal does fire here
+
+    # An empty override should suppress the trade even though the base
+    # signal would have fired — proves simulate() actually uses the
+    # override rather than silently recomputing compute_signal_indices.
+    trades, _ = simulate(
+        candles, ema_fast_period=9, ema_slow_period=21, atr_multiplier=2.0,
+        capital=100.0, precomputed_signals=([], atr),
+    )
+    assert trades == []
+
+
+def test_compute_trend_filtered_signal_indices_keeps_signal_above_sma():
+    candles = _crossover_candles()  # base signal fires at index 29, entry close = 100.0
+    higher_tf_candles = [Candle("BTC/USD", f"d{i}", 90, 91, 89, close=90, volume=1) for i in range(5)]
+
+    filtered, atr = compute_trend_filtered_signal_indices(
+        candles, ema_fast_period=9, ema_slow_period=21,
+        higher_tf_candles=higher_tf_candles, higher_tf_sma_period=2, bars_per_higher_tf_unit=6,
+    )
+
+    assert filtered == [29]  # price (100) is above the daily SMA (90) -> kept
+
+
+def test_compute_trend_filtered_signal_indices_drops_signal_below_sma():
+    candles = _crossover_candles()
+    higher_tf_candles = [Candle("BTC/USD", f"d{i}", 110, 111, 109, close=110, volume=1) for i in range(5)]
+
+    filtered, atr = compute_trend_filtered_signal_indices(
+        candles, ema_fast_period=9, ema_slow_period=21,
+        higher_tf_candles=higher_tf_candles, higher_tf_sma_period=2, bars_per_higher_tf_unit=6,
+    )
+
+    assert filtered == []  # price (100) is below the daily SMA (110) -> dropped
+
+
+def test_compute_trend_filtered_signal_indices_is_causal_rejects_still_forming_bar():
+    # Only one higher-tf candle exists — as of the lower-tf signal at index
+    # 29 (higher-tf bar index 29 // 6 = 4), the most recently CLOSED
+    # higher-tf bar would be index 3, which doesn't exist yet. The filter
+    # must reject rather than fall back to some other bar (no lookahead).
+    candles = _crossover_candles()
+    higher_tf_candles = [Candle("BTC/USD", "d0", 90, 91, 89, close=90, volume=1)]
+
+    filtered, atr = compute_trend_filtered_signal_indices(
+        candles, ema_fast_period=9, ema_slow_period=21,
+        higher_tf_candles=higher_tf_candles, higher_tf_sma_period=1, bars_per_higher_tf_unit=6,
+    )
+
+    assert filtered == []
 
 
 def test_backtest_volume_confirmation_matches_signal_generation_reference():

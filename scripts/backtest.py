@@ -179,6 +179,56 @@ def compute_signal_indices(candles, ema_fast_period, ema_slow_period):
     return indices, atr
 
 
+def compute_sma(values, period):
+    """Plain simple moving average — used for the higher-timeframe trend filter's SMA line."""
+    n = len(values)
+    out = [None] * n
+    if n < period:
+        return out
+    window_sum = sum(values[:period])
+    out[period - 1] = window_sum / period
+    for i in range(period, n):
+        window_sum += values[i] - values[i - period]
+        out[i] = window_sum / period
+    return out
+
+
+def compute_trend_filtered_signal_indices(candles, ema_fast_period, ema_slow_period, higher_tf_candles, higher_tf_sma_period, bars_per_higher_tf_unit):
+    """
+    EXPERIMENTAL — not part of the locked v1 signal (spec §2). Layers a
+    higher-timeframe trend filter on top of the existing signal
+    (compute_signal_indices): a crossover only survives if `candles`'
+    close is above the SMA(higher_tf_sma_period) computed on
+    `higher_tf_candles` (e.g. daily bars while `candles` is 4h).
+
+    Causal by construction: bars_per_higher_tf_unit is the number of
+    `candles` bars per one `higher_tf_candles` bar (e.g. 6 for 4h-under-
+    daily), so signal index i falls in higher-tf bar (i // bars_per_higher_
+    tf_unit); using index - 1 for the SMA lookup means only the most
+    recently FULLY CLOSED higher-timeframe bar is used, never one still
+    forming as of the signal candle.
+
+    v1 is long-only, so only the long half of the classic trend-filter
+    rule ("skip bearish crossovers below the SMA") is testable — bearish/
+    short signals aren't generated at all yet (playbook v6 §7).
+    """
+    base_indices, atr = compute_signal_indices(candles, ema_fast_period, ema_slow_period)
+    higher_tf_closes = [c.close for c in higher_tf_candles]
+    higher_tf_sma = compute_sma(higher_tf_closes, higher_tf_sma_period)
+
+    filtered = []
+    for i in base_indices:
+        higher_tf_index = i // bars_per_higher_tf_unit - 1
+        if higher_tf_index < 0 or higher_tf_index >= len(higher_tf_sma):
+            continue
+        sma_value = higher_tf_sma[higher_tf_index]
+        if sma_value is None:
+            continue
+        if candles[i].close > sma_value:
+            filtered.append(i)
+    return filtered, atr
+
+
 def simulate(
     candles,
     ema_fast_period,
@@ -189,14 +239,24 @@ def simulate(
     max_position_pct=DEFAULT_MAX_POSITION_PCT,
     fee_pct=DEFAULT_TAKER_FEE_PCT,
     slippage_bps=DEFAULT_SLIPPAGE_BPS,
+    precomputed_signals=None,
 ):
     """
     Walk-forward simulation of one (ema_pair, atr_multiplier) combo over
     one symbol's candles, continuous across the full range passed in
     (calibration/validation splitting happens post-hoc on the returned
     trades/equity_curve — see run_walk_forward).
+
+    precomputed_signals: optional (signal_indices, atr) tuple — lets an
+    experiment (e.g. compute_trend_filtered_signal_indices) swap in a
+    filtered signal set without touching any of the trade-execution
+    mechanics below, so results stay directly comparable to every other
+    run using this same simulate().
     """
-    signal_indices, atr = compute_signal_indices(candles, ema_fast_period, ema_slow_period)
+    if precomputed_signals is not None:
+        signal_indices, atr = precomputed_signals
+    else:
+        signal_indices, atr = compute_signal_indices(candles, ema_fast_period, ema_slow_period)
     cost_frac_per_leg = fee_pct / 100 + slippage_bps / 10000
 
     trades = []
@@ -336,6 +396,7 @@ def run_walk_forward(
     capital=DEFAULT_CAPITAL,
     fee_pct=DEFAULT_TAKER_FEE_PCT,
     slippage_bps=DEFAULT_SLIPPAGE_BPS,
+    precomputed_signals=None,
 ):
     """
     Runs one continuous simulate() pass, then splits the resulting trades
@@ -347,6 +408,7 @@ def run_walk_forward(
     trades, equity_curve = simulate(
         candles, ema_fast_period, ema_slow_period, atr_multiplier,
         capital=capital, fee_pct=fee_pct, slippage_bps=slippage_bps,
+        precomputed_signals=precomputed_signals,
     )
     split_idx = sum(1 for t in trades if t.entry_timestamp < cutoff_timestamp)
 
