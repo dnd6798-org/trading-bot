@@ -389,73 +389,60 @@ def main():
             f"over {diag['candle_count']} candles"
         )
 
-        calibration_rows = []
+        # Every combo gets both calibration AND validation reported together —
+        # not just the calibration "winners" — so the originally-specified
+        # 9/21 pair is directly comparable to the sweep, and validation trade
+        # counts are visible for judging whether a result is a real signal or
+        # a thin, noisy sample.
+        rows = []
         for ema_fast, ema_slow in args.ema_pairs:
             for atr_multiplier in args.atr_multipliers:
-                calib_net, _ = run_walk_forward(
+                net_calib, net_valid = run_walk_forward(
                     candles, cutoff_ts, ema_fast, ema_slow, atr_multiplier,
                     capital=args.capital, fee_pct=args.fee_pct, slippage_bps=args.slippage_bps,
                 )
-                calib_gross, _ = run_walk_forward(
+                gross_calib, gross_valid = run_walk_forward(
                     candles, cutoff_ts, ema_fast, ema_slow, atr_multiplier,
                     capital=args.capital, fee_pct=0.0, slippage_bps=0.0,
                 )
-                calibration_rows.append({
-                    "ema": f"{ema_fast}/{ema_slow}", "ema_pair": (ema_fast, ema_slow),
+                rows.append({
+                    "ema": f"{ema_fast}/{ema_slow}",
                     "atr_mult": atr_multiplier,
-                    "trades": calib_net["trade_count"],
-                    "win%": f"{calib_net['win_rate_pct']:.1f}",
-                    "net_return%": f"{calib_net['total_return_pct']:.2f}",
-                    "gross_return%": f"{calib_gross['total_return_pct']:.2f}",
-                    "maxdd%": f"{calib_net['max_drawdown_pct']:.2f}",
-                    "avg_R": f"{calib_net['avg_r_multiple']:.2f}",
-                    "stop%": f"{calib_net['stop_rate_pct']:.0f}",
-                    "tp%": f"{calib_net['take_profit_rate_pct']:.0f}",
-                    "_net_return_raw": calib_net["total_return_pct"],
+                    "cal_n": net_calib["trade_count"],
+                    "cal_win%": f"{net_calib['win_rate_pct']:.1f}",
+                    "cal_net%": f"{net_calib['total_return_pct']:.2f}",
+                    "cal_gross%": f"{gross_calib['total_return_pct']:.2f}",
+                    "val_n": net_valid["trade_count"],
+                    "val_win%": f"{net_valid['win_rate_pct']:.1f}",
+                    "val_net%": f"{net_valid['total_return_pct']:.2f}",
+                    "val_gross%": f"{gross_valid['total_return_pct']:.2f}",
+                    "is_v1_baseline": (ema_fast, ema_slow) == (9, 21),
+                    "_cal_net_raw": net_calib["total_return_pct"],
+                    "_cal_trades_raw": net_calib["trade_count"],
                 })
 
-        print(f"\n-- calibration period (first {args.calibration_days}d) --")
-        print(f"(fee model: {args.fee_pct:.2f}% taker + {args.slippage_bps:.0f}bps slippage per leg, net vs. gross shown)")
-        _print_table(calibration_rows, [
-            ("ema", "ema"), ("atr_mult", "atr_mult"), ("trades", "trades"), ("win%", "win%"),
-            ("net_return%", "net_return%"), ("gross_return%", "gross_return%"),
-            ("maxdd%", "maxdd%"), ("avg_R", "avg_R"), ("stop%", "stop%"), ("tp%", "tp%"),
-        ])
+        print(f"\n(fee model: {args.fee_pct:.2f}% taker + {args.slippage_bps:.0f}bps slippage per leg, net vs. gross shown)")
+        print(f"(calibration = first {args.calibration_days}d, validation = held-out last {args.validation_days}d)")
 
-        top_combos = sorted(
-            (r for r in calibration_rows if r["trades"] > 0),
-            key=lambda r: r["_net_return_raw"], reverse=True,
-        )[:TOP_N_FOR_VALIDATION]
+        top_keys = {
+            id(r) for r in sorted(
+                (r for r in rows if r["_cal_trades_raw"] > 0),
+                key=lambda r: r["_cal_net_raw"], reverse=True,
+            )[:TOP_N_FOR_VALIDATION]
+        }
+        for row in rows:
+            flags = []
+            if row["is_v1_baseline"]:
+                flags.append("v1-baseline")
+            if id(row) in top_keys:
+                flags.append("cal-top")
+            row["flags"] = ",".join(flags)
 
-        if not top_combos:
-            print(f"\nNo combo took any trades in the calibration period for {symbol} — skipping validation.")
-            continue
-
-        print(f"\n-- out-of-sample validation (last {args.validation_days}d), top {len(top_combos)} calibration combos --")
-        validation_rows = []
-        for combo in top_combos:
-            ema_fast, ema_slow = combo["ema_pair"]
-            _, valid_net = run_walk_forward(
-                candles, cutoff_ts, ema_fast, ema_slow, combo["atr_mult"],
-                capital=args.capital, fee_pct=args.fee_pct, slippage_bps=args.slippage_bps,
-            )
-            _, valid_gross = run_walk_forward(
-                candles, cutoff_ts, ema_fast, ema_slow, combo["atr_mult"],
-                capital=args.capital, fee_pct=0.0, slippage_bps=0.0,
-            )
-            validation_rows.append({
-                "ema": combo["ema"], "atr_mult": combo["atr_mult"],
-                "trades": valid_net["trade_count"],
-                "win%": f"{valid_net['win_rate_pct']:.1f}",
-                "net_return%": f"{valid_net['total_return_pct']:.2f}",
-                "gross_return%": f"{valid_gross['total_return_pct']:.2f}",
-                "maxdd%": f"{valid_net['max_drawdown_pct']:.2f}",
-                "avg_R": f"{valid_net['avg_r_multiple']:.2f}",
-            })
-        _print_table(validation_rows, [
-            ("ema", "ema"), ("atr_mult", "atr_mult"), ("trades", "trades"), ("win%", "win%"),
-            ("net_return%", "net_return%"), ("gross_return%", "gross_return%"),
-            ("maxdd%", "maxdd%"), ("avg_R", "avg_R"),
+        _print_table(rows, [
+            ("ema", "ema"), ("atr_mult", "atr_mult"),
+            ("cal_n", "cal_n"), ("cal_win%", "cal_win%"), ("cal_net%", "cal_net%"), ("cal_gross%", "cal_gross%"),
+            ("val_n", "val_n"), ("val_win%", "val_win%"), ("val_net%", "val_net%"), ("val_gross%", "val_gross%"),
+            ("flags", "flags"),
         ])
 
 

@@ -7,7 +7,8 @@ scripts/backtest.py's simulate()/summarize()/run_walk_forward() logic
 layered on top.
 """
 from src.data_ingestion import Candle
-from scripts.backtest import simulate, summarize, diagnose, run_walk_forward, Trade
+from src.signal_generation import volume_confirms
+from scripts.backtest import simulate, summarize, diagnose, run_walk_forward, Trade, _volume_confirms_series, VOLUME_LOOKBACK
 
 
 def _crossover_candles():
@@ -177,6 +178,26 @@ def test_diagnose_reports_buy_hold_return_and_signal_count():
     assert diag["raw_crossover_signal_count"] == 1  # the one crossover built into the fixture
     assert diag["candle_count"] == len(candles)
     assert diag["avg_atr_pct_of_price"] > 0
+
+
+def test_backtest_volume_confirmation_matches_signal_generation_reference():
+    """
+    scripts/backtest.py computes volume confirmation with an incremental
+    rolling sum for performance (compute_signal_indices, O(n) over a year of
+    hourly bars), rather than signal_generation.volume_confirms's per-slice
+    O(n) reslice. This locks the two implementations to the same semantics
+    — spec §2's volume-above-average confirmation filter — so the backtest
+    can't silently drift from the live pipeline's actual signal logic.
+    """
+    volumes = [10, 12, 8, 15, 20, 9, 11, 30, 7, 14, 18, 22, 5, 16, 13, 19, 25, 6, 17, 21,
+               40, 8, 9, 33, 12, 14, 60, 10, 11, 12, 3, 45, 22, 18, 9, 27]
+    candles = [Candle("BTC/USD", f"t{i}", 1, 1, 1, 1, volume=v) for i, v in enumerate(volumes)]
+
+    fast_series = _volume_confirms_series(candles, lookback=VOLUME_LOOKBACK)
+
+    for i in range(VOLUME_LOOKBACK, len(candles)):
+        reference = volume_confirms(candles[:i + 1], lookback=VOLUME_LOOKBACK)
+        assert fast_series[i] == reference, f"mismatch at index {i}"
 
 
 def test_run_walk_forward_splits_trades_by_entry_timestamp():
