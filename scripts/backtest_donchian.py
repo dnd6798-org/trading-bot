@@ -45,9 +45,19 @@ equity, pool everything from fold 1's test start onward) — it isn't
 imported only because that function couples the slicing to a simulate()
 call this strategy can't use.
 
+--long-only gates out short entries entirely (skip/ignore, not simulate-
+and-discard) while leaving simulate_donchian()/slice_trades_by_folds()
+untouched — Alpaca does not support short-selling crypto, so the
+both-directions numbers in CLAUDE.md finding 6 aren't directly tradeable
+as-is; this flag reruns the same grid with only the long side active, for
+a number that could actually be executed. Default (flag omitted) still
+runs both directions, so `python scripts/backtest_donchian.py` with no
+arguments continues to reproduce finding 6 exactly.
+
 Usage:
     python scripts/backtest_donchian.py
     python scripts/backtest_donchian.py --channel-lengths 20 55 --atr-multipliers 2.0 2.5 3.0
+    python scripts/backtest_donchian.py --long-only
 """
 import argparse
 import sys
@@ -289,6 +299,10 @@ def parse_args():
     parser.add_argument("--atr-multipliers", nargs="+", type=float, default=ATR_MULTIPLIERS)
     parser.add_argument("--folds", type=int, default=DEFAULT_NUM_FOLDS)
     parser.add_argument("--initial-train-days", type=int, default=DEFAULT_INITIAL_TRAIN_DAYS)
+    parser.add_argument(
+        "--long-only", action="store_true",
+        help="gate out short entries (Alpaca doesn't support crypto shorting) — see module docstring",
+    )
     return parser.parse_args()
 
 
@@ -310,7 +324,8 @@ def main():
             actual_start, actual_end, num_folds=args.folds, initial_train_days=args.initial_train_days
         )
 
-        print(f"\n=== {symbol}: Donchian breakout + ATR trailing stop, {args.folds}-fold anchored walk-forward ===")
+        mode_label = "long-only" if args.long_only else "long+short"
+        print(f"\n=== {symbol}: Donchian breakout ({mode_label}) + ATR trailing stop, {args.folds}-fold anchored walk-forward ===")
         print(f"history: {actual_start.date()} to {actual_end.date()}  ({len(candles_daily)} daily candles)")
         print(f"fold boundaries (initial train {args.initial_train_days}d, then {args.folds} contiguous test windows):")
         for fold in folds:
@@ -322,6 +337,8 @@ def main():
 
         for channel_length in args.channel_lengths:
             long_indices, short_indices, atr = compute_donchian_signal_indices(candles_daily, channel_length)
+            if args.long_only:
+                short_indices = []  # gate out shorts only — simulate_donchian()/slice_trades_by_folds() untouched
             for atr_multiplier in args.atr_multipliers:
                 net_trades, net_curve = simulate_donchian(
                     candles_daily, channel_length, atr_multiplier,

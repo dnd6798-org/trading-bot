@@ -98,6 +98,26 @@ and `data_ingestion.py`'s live fetch are untouched.
    a sample-size caveat, not yet independently verified. **No adopt/reject
    verdict has been rendered on this — the requesting session explicitly
    asked for raw numbers only, decision deferred to the user/spec chat.**
+7. Finding 6 simulated shorts, but Alpaca doesn't support short-selling
+   crypto — so those numbers aren't directly tradeable. Added a
+   `--long-only` flag to `scripts/backtest_donchian.py` (gates out
+   `short_indices` at the call site; `simulate_donchian()` and
+   `slice_trades_by_folds()` untouched) and reran the same 12-combo grid,
+   long-only. Raw pooled net-of-fees / gross-of-fees / folds-net-positive:
+   BTC 20d/2.0x +4.56%/+7.48%/2-5, 20d/2.5x +2.53%/+4.67%/2-5,
+   20d/3.0x +0.62%/+2.25%/2-5, 55d/2.0x +3.80%/+5.37%/2-5,
+   55d/2.5x +3.48%/+4.57%/2-5, 55d/3.0x +3.55%/+4.33%/2-5. ETH
+   20d/2.0x +8.77%/+10.77%/3-5, 20d/2.5x +4.86%/+6.29%/3-5,
+   20d/3.0x +6.10%/+7.22%/3-5, 55d/2.0x +8.62%/+9.62%/3-5,
+   55d/2.5x +5.67%/+6.37%/3-5, 55d/3.0x +7.35%/+7.90%/3-5. Every long-only
+   pooled net% stayed positive (unlike finding 5's crossover work), but
+   trade counts dropped sharply from finding 6 — BTC 55d combos in
+   particular are now critically thin: fold 1 has only 1 trade and fold 5
+   only 1-2 trades, for every BTC 55d/ATR combo. ETH 55d combos are
+   similarly thin (fold 1: 2 trades, fold 5: 1 trade, across all three ATR
+   multiples). 20d combos are healthier (BTC 4-11/fold, ETH 3-6/fold) but
+   still thinner than finding 6's both-directions numbers. **No
+   adopt/reject verdict rendered — raw numbers only, per instruction.**
 
 ### Code state
 
@@ -116,20 +136,25 @@ can't express a trailing stop; imports `compute_fold_boundaries()`
 unchanged but does NOT call `run_multi_fold_walk_forward()`, since that
 function is hardwired to call `simulate()` — instead duplicates its
 fold-slicing/pooling logic as `slice_trades_by_folds()`, same approach,
-parallel code, documented in the module docstring), `scripts/
-sanity_check_daily_signal.py` (independent one-off check, not meant to be
-maintained). No `.env` or locked spec parameters touched. Nothing merged
-or promoted — still `paper` branch working state.
+parallel code, documented in the module docstring; also has a
+`--long-only` flag, added for finding 7, that empties `short_indices`
+at the call site — `simulate_donchian()`/`slice_trades_by_folds()`
+unchanged, default behavior with no flag still reproduces finding 6),
+`scripts/sanity_check_daily_signal.py` (independent one-off check, not
+meant to be maintained). No `.env` or locked spec parameters touched.
+Nothing merged or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
 Finding 5 resolves the daily-50-filter question that milestone was
-chasing (does not clear the adopt bar). Finding 6 (Donchian breakout) has
-raw results but **no verdict** — whether any combo clears an adopt bar,
-whether to add a volume filter, investigate the small-sample 55d combos
-further, or something else, is still open. **This decision is being made
-in a separate spec/planning chat, not here. Check for updated guidance
-before starting new backtest work.**
+chasing (does not clear the adopt bar). Findings 6 (Donchian, long+short —
+not directly tradeable, Alpaca has no crypto shorting) and 7 (same grid,
+long-only — tradeable as-is) both have raw results but **no verdict** —
+whether any long-only combo clears an adopt bar, whether the 55d combos'
+now-critical trade-count thinness rules them out regardless of return,
+whether to add a volume filter, or something else, is still open. **This
+decision is being made in a separate spec/planning chat, not here. Check
+for updated guidance before starting new backtest work.**
 
 ### Pre-coding checklist state
 

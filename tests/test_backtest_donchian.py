@@ -155,6 +155,31 @@ def test_simulate_donchian_applies_fees_to_reduce_net_pnl():
     assert with_fees[0].fees_paid > 0
 
 
+def test_simulate_donchian_with_empty_short_indices_produces_long_only_trades():
+    # Locks in the exact mechanism backtest_donchian.py's --long-only flag
+    # relies on: passing an empty short_indices list via precomputed_signals
+    # gates out shorts without touching simulate_donchian() itself. Uses
+    # the same candles as the short-ratchet test above (which fires a real
+    # short at index 20 when short_indices isn't emptied) to prove the
+    # short is actually suppressed, not just absent by construction.
+    candles = _seasoned_flat_candles(20) + [
+        _candle(20, 75, high=80, low=70),
+        _candle(21, 72, high=77, low=67),
+        _candle(22, 69, high=74, low=64),
+        _candle(23, 71, high=94, low=67),
+    ]
+    long_indices, short_indices, atr = compute_donchian_signal_indices(candles, channel_length=5)
+    assert short_indices == [20]  # sanity: the base signal does fire a short here
+
+    trades, _ = simulate_donchian(
+        candles, channel_length=5, atr_multiplier=2.0, capital=100.0,
+        precomputed_signals=(long_indices, [], atr),
+    )
+
+    assert trades == []
+    assert all(t.direction == "long" for t in trades)
+
+
 def test_simulate_donchian_caps_position_size_at_max_notional():
     candles = _seasoned_flat_candles(20) + [
         _candle(20, 125, high=130, low=120),
