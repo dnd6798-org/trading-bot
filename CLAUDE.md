@@ -164,6 +164,15 @@ and `data_ingestion.py`'s live fetch are untouched.
    findings 4-7) gives the daily series for free from the same hourly
    fetch. **No adopt/reject verdict rendered — raw numbers only, per
    instruction; decision deferred to the planning chat.**
+   **UPDATE (separate planning chat, post-session): formally REJECTED.**
+   Both symbols failed on both legs of the adopt bar — pooled net-of-fees
+   sharply negative (BTC -67.06%, ETH -66.87%) despite mildly positive
+   gross (+7.84% / +3.05%), and 0/5 folds net-positive on either symbol.
+   Root cause: severe fee drag from the high-turnover price-action exit
+   (exiting on the first red hourly candle), not a fold-consistency
+   near-miss like findings 5/7 — this is a clearer, harder rejection than
+   either prior closed line. MACD D1H1 is now a closed line alongside the
+   EMA crossover and Donchian breakout (long-only).
 
 ### Code state
 
@@ -201,19 +210,22 @@ or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
-Three strategy families now have raw backtest results and no live/paper
-adoption: the EMA crossover (+ daily-50 SMA filter, finding 5 — does not
-clear the adopt bar, **closed/rejected**), Donchian breakout long-only
-(finding 7 — pooled returns positive but folds-consistency never clears,
-**closed/rejected**), and MACD D1H1 (finding 8 — raw numbers only, no
-verdict rendered here; pooled net-of-fees was sharply negative on both
-symbols with 0/5 folds positive, but per this session's explicit
-instruction the adopt/reject call is deferred to the planning chat, not
-made here). Which strategy family to try next — including whether MACD
-D1H1 is worth a variant (e.g. a less-twitchy exit) or is also closed — is
-being decided in a **separate planning chat, not here — do not start any
-new strategy variant on your own initiative.** Wait for a scoped brief
-before starting new backtest work.
+Three strategy families are now closed/rejected: the EMA crossover
+(+ daily-50 SMA filter, finding 5 — does not clear the adopt bar), Donchian
+breakout long-only (finding 7 — pooled returns positive but
+folds-consistency never clears), and MACD D1H1 (finding 8 — pooled
+net-of-fees sharply negative on both symbols, 0/5 folds positive on
+either, severe fee drag from the high-turnover price-action exit).
+
+**Next milestone (from the planning chat, not yet started): regime-
+filtered mean-reversion.** Daily entry when RSI(14) < 30, gated by a
+price-above-200-day-SMA regime filter (same "regime filter" shape as
+finding 4/8's daily filters, but now a mean-reversion entry instead of a
+trend-following one). Exit at RSI(14) > 50 OR a 10-day time-stop,
+whichever comes first. No code has been written for this yet this
+session — do not start it without a fresh scoped brief confirming fee
+model, fold boundaries, and RSI period/thresholds are locked (same
+reuse-unless-flagged approach as findings 6-8).
 
 ### Pre-coding checklist state
 
@@ -231,8 +243,10 @@ checking for updated guidance first.
 decision above before it makes sense to start — on top of its own
 separate crypto bracket-order design gap (see "Hard rules" below).
 
-**Next milestone:** none decided — do not start without checking the
-separate spec/planning chat first.
+**Next milestone:** regime-filtered mean-reversion (RSI(14) < 30 daily
+entry, price-above-200-SMA regime filter, exit at RSI > 50 or a 10-day
+time-stop) — named in the planning chat, not yet started. Confirm a
+scoped brief before beginning.
 
 ## Hard rules — never do these
 
