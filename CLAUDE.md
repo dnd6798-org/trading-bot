@@ -118,6 +118,12 @@ and `data_ingestion.py`'s live fetch are untouched.
    multiples). 20d combos are healthier (BTC 4-11/fold, ETH 3-6/fold) but
    still thinner than finding 6's both-directions numbers. **No
    adopt/reject verdict rendered — raw numbers only, per instruction.**
+   **UPDATE (separate planning chat, post-session): formally REJECTED.**
+   Every pooled net return was positive, but the folds-consistency leg of
+   the pre-committed adopt bar never cleared on any of the 12 combos (BTC
+   2/5 folds positive on all six combos, ETH 3/5 on all six) — same
+   failure mode as the EMA crossover in finding 5. Donchian breakout
+   (long-only) is now a closed line, same status as the crossover family.
 
 ### Code state
 
@@ -146,15 +152,13 @@ Nothing merged or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
-Finding 5 resolves the daily-50-filter question that milestone was
-chasing (does not clear the adopt bar). Findings 6 (Donchian, long+short —
-not directly tradeable, Alpaca has no crypto shorting) and 7 (same grid,
-long-only — tradeable as-is) both have raw results but **no verdict** —
-whether any long-only combo clears an adopt bar, whether the 55d combos'
-now-critical trade-count thinness rules them out regardless of return,
-whether to add a volume filter, or something else, is still open. **This
-decision is being made in a separate spec/planning chat, not here. Check
-for updated guidance before starting new backtest work.**
+Two strategy families are now closed: the EMA crossover (+ daily-50 SMA
+filter, finding 5 — does not clear the adopt bar) and Donchian breakout
+long-only (finding 7 — pooled returns positive but folds-consistency
+never clears, same failure mode). Which strategy family to try next is
+being decided in a **separate planning chat, not here — do not start any
+new strategy variant on your own initiative.** Wait for a scoped brief
+before starting new backtest work.
 
 ### Pre-coding checklist state
 
