@@ -59,6 +59,26 @@ and `data_ingestion.py`'s live fetch are untouched.
    shows partial, thin improvement (BTC calibration losses roughly halved;
    ETH 2 of 4 ATR variants turn slightly net-positive in validation), but
    sample sizes (5-8 validation trades) are too small to call validated.
+5. Built a 5-fold anchored walk-forward harness (`scripts/
+   backtest_walkforward.py`) to get past finding 4's thin sample size —
+   ~1yr initial training window, then 5 contiguous ~1yr test folds across
+   2022-01-03 → 2026-08-06, same daily-50 filter/fee model/ATR sweep
+   unchanged. Result: **daily-50 filter does NOT clear the adopt bar**
+   (pooled net-of-fees positive AND ≥4/5 folds positive). Every symbol ×
+   ATR-multiplier combo (8 total) had a negative pooled net-of-fees
+   return. Best cases: BTC 1.5x (pooled net -4.77% on 37 trades, gross
+   +0.66%, 2/5 folds positive) and ETH 3.0x (pooled net -1.93% on 37
+   trades, gross +2.19%, 4/5 folds positive — majority-positive but
+   pooled still net-negative, so still fails). Fee drag consistently
+   turns a roughly-flat-to-weakly-positive gross result net-negative,
+   consistent with finding 3. Fold 3 (2023-11-04→2024-10-04) was the
+   worst fold for both symbols, especially ETH (-5.6% to -7.8% net on
+   most ATR variants) — a possible adverse-regime concentration worth
+   flagging, not investigated further this session. Fold 5 (most recent
+   ~1yr) sat 81-84% below the daily-200 SMA for both symbols, consistent
+   with finding 4's daily-200 holdout result. Per-fold trade counts
+   (5-10) are still thin individually, but pooled counts (32-43 per
+   combo) are a real improvement over finding 4's 5-8.
 
 ### Code state
 
@@ -66,18 +86,24 @@ and `data_ingestion.py`'s live fetch are untouched.
 validation split + `--candle-hours` resampling), `scripts/
 backtest_trend_filter.py` (SMA filter variant, reuses `backtest.py`'s
 trade mechanics unchanged via `simulate()`'s `precomputed_signals`
-override), `scripts/sanity_check_daily_signal.py` (independent one-off
-check, not meant to be maintained). No `.env` or locked spec parameters
-touched. Nothing merged or promoted — still `paper` branch working state.
+override), `scripts/backtest_walkforward.py` (5-fold anchored
+walk-forward harness, reuses `backtest.py`'s `simulate()`/`summarize()`
+and `backtest_trend_filter.py`'s daily-50 filter unchanged — only adds
+`compute_fold_boundaries()` and `run_multi_fold_walk_forward()`),
+`scripts/sanity_check_daily_signal.py` (independent one-off check, not
+meant to be maintained). No `.env` or locked spec parameters touched.
+Nothing merged or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
-Whether to extend the validation window, try an ADX-based filter instead
-of/alongside the SMA filter, formally propose the daily-50 filter as a
-spec amendment, or reconsider the strategy family entirely if no filter
-produces a validated edge. **This decision is being made in a separate
-spec/planning chat, not here — check for updated guidance before
-starting new backtest work.**
+Finding 5 resolves the daily-50-filter question this milestone was
+chasing: it does not clear the adopt bar, so it should NOT be folded into
+the spec as-is. What's still open — whether to try an ADX-based filter
+instead of/alongside the SMA filter, investigate fold 3's concentrated
+losses, or reconsider the strategy family entirely (the underlying bare
+crossover still has no validated edge per finding 1) — **is being decided
+in a separate spec/planning chat, not here. Check for updated guidance
+before starting new backtest work.**
 
 ### Pre-coding checklist state
 
