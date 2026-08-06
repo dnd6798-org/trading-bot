@@ -21,47 +21,82 @@ detail on.
 
 ## Current status
 
+**Milestone: backtest / signal-validation (spec §2, playbook v6 §7) —
+IN PROGRESS, not complete, no decision locked yet.**
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
-data), and `scripts/backtest.py` are real and working, with passing tests.
-Everything else in `src/` is still a stub with a docstring pointing to the
-spec section it implements — `execution.py`, `position_management.py`,
-`risk_filter.py`'s real checks, and `data_ingestion.py`'s live fetch are
-untouched.
+data), `scripts/backtest.py`, and `scripts/backtest_trend_filter.py` are
+real and working, with passing tests. Everything else in `src/` is still
+a stub with a docstring pointing to the spec section it implements —
+`execution.py`, `position_management.py`, `risk_filter.py`'s real checks,
+and `data_ingestion.py`'s live fetch are untouched.
 
-`scripts/backtest.py` now models transaction costs (Alpaca crypto Tier 1
-taker fee, 0.25%/leg + an assumed 5bps/leg slippage) and does a proper
-calibration (first 270d) / held-out validation (last 90d) split rather
-than reporting in-sample-optimized numbers.
+### Findings so far (2026-08 session, spans several rounds)
 
-**2026-08-01 session finding, important:** over the most recent 1-year
-window, no EMA/ATR combo tested is convincingly net-profitable on either
-symbol after fees. ETH's best calibration combo (12/26, 2.5x ATR) is
-roughly breakeven out-of-sample (+0.06% over 90d); BTC's best combo stays
-net-negative in both calibration and validation. Gross-of-fees, ETH's
-best combo is clearly positive (+4.47% calibration) while BTC's best
-gross combo is still ~flat (-1.71%) — so fees make things worse but
-aren't the root cause for BTC specifically. Diagnostics point to a
-signal-quality gap rather than a volatility or fee-drag explanation: BTC
-and ETH get an identical number of raw crossover signals (56 each) and
-BTC's average ATR-as-%-of-price is actually *lower* than ETH's, yet BTC's
-stop-hit rate is far higher (58-69% vs 39-52%) — BTC's crossovers just
-don't follow through on 1h in this window. Full sweep/validation tables
-are in chat history from this session, not yet transcribed into
-`session-playbook-v6.md` §7.
+1. Baseline 9/21 EMA crossover + volume confirmation, fee-aware (Alpaca
+   0.25%/leg taker + 5bps/leg slippage placeholder), is net-negative on
+   both BTC/USD and ETH/USD across every ATR multiplier tested
+   (1.5x-3.0x), at every timeframe tested (1h, 4h, daily), over the full
+   available history (2021-01-03 → present, ~5.6 years).
+2. Ruled out: insufficient data, a bad/unrepresentative time window, and
+   a signal-generation bug. An independent, from-scratch daily sanity
+   check (`scripts/sanity_check_daily_signal.py`, deliberately not
+   reusing any of `backtest.py`'s logic) confirmed the crossover/volume
+   logic — 17 vs. 19 signals, with the gap fully explained by
+   day-boundary alignment, not a bug.
+3. Root cause identified: gross-of-fees returns are roughly flat-to-weak
+   *everywhere* (best result found: BTC daily +3.44% gross over 5.5yr) —
+   this is a genuine weak/absent edge in the bare crossover, not
+   primarily a fee-drag artifact, though fee drag does compound it badly
+   at 1h (net -38% to -52% on ~300-380 trades/symbol over the full
+   history).
+4. Tested a higher-timeframe trend filter (daily 50-SMA and daily 200-SMA)
+   on top of the 4h signal (`scripts/backtest_trend_filter.py`): daily-200
+   is untestable with the current validation window — price stayed below
+   it for the entire 180-day holdout (zero trades, not disproven). Daily-50
+   shows partial, thin improvement (BTC calibration losses roughly halved;
+   ETH 2 of 4 ATR variants turn slightly net-positive in validation), but
+   sample sizes (5-8 validation trades) are too small to call validated.
 
-EMA/ATR values in `.env` remain unlocked. Given the above, "lock in 9/21"
-is not supported by this data — a human decision is needed on how to
-proceed (different params, drop BTC from initial live pairs, try a
-different timeframe, or conclude the strategy needs rework before going
-live at all). Don't treat any single combo as a locked decision.
+### Code state
 
-**Next milestone:** none decided yet — likely either iterating on backtest
-calibration (e.g. testing a stop/take-profit asymmetry, since v1 backtest
-assumes symmetric 1:1 ATR-based exits) or resolving the crypto
-bracket-order design gap so `execution.py` can be built. Confirm with the
-user before starting either.
+`scripts/backtest.py` (baseline signal + fee model + calibration/
+validation split + `--candle-hours` resampling), `scripts/
+backtest_trend_filter.py` (SMA filter variant, reuses `backtest.py`'s
+trade mechanics unchanged via `simulate()`'s `precomputed_signals`
+override), `scripts/sanity_check_daily_signal.py` (independent one-off
+check, not meant to be maintained). No `.env` or locked spec parameters
+touched. Nothing merged or promoted — still `paper` branch working state.
+
+### Not yet decided (blocks next steps)
+
+Whether to extend the validation window, try an ADX-based filter instead
+of/alongside the SMA filter, formally propose the daily-50 filter as a
+spec amendment, or reconsider the strategy family entirely if no filter
+produces a validated edge. **This decision is being made in a separate
+spec/planning chat, not here — check for updated guidance before
+starting new backtest work.**
+
+### Pre-coding checklist state
+
+**Not cleared for a new coding milestone.** Per this file's own
+convention (a session's "Done" = tests passing + code committed +
+spec/playbook updated *on an actual decision*), no decision was locked
+this session — so `session-playbook-v6.md`'s pre-coding checklist should
+be treated as not satisfied until the open decision above is resolved
+elsewhere. Don't start `execution.py` or any other new milestone without
+checking for updated guidance first.
+
+### Blocked/pending, unrelated to backtest
+
+`execution.py`'s OCO-fallback design is still waiting on the signal
+decision above before it makes sense to start — on top of its own
+separate crypto bracket-order design gap (see "Hard rules" below).
+
+**Next milestone:** none decided — do not start without checking the
+separate spec/planning chat first.
 
 ## Hard rules — never do these
 
