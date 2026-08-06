@@ -124,6 +124,46 @@ and `data_ingestion.py`'s live fetch are untouched.
    2/5 folds positive on all six combos, ETH 3/5 on all six) — same
    failure mode as the EMA crossover in finding 5. Donchian breakout
    (long-only) is now a closed line, same status as the crossover family.
+8. New strategy family: MACD(12,26,9) daily-regime + hourly-entry
+   ("D1H1"), long-only, price-action trailing-stop exit (hold while each
+   new hourly candle closes green; exit at the close of the first that
+   closes red) — replacing Donchian long-only after finding 7's rejection.
+   Added `compute_macd()` to `src/signal_generation.py` and built
+   `scripts/backtest_macd_d1h1.py`; ran BTC/USD and ETH/USD through the
+   same 5-fold anchored walk-forward harness, fee model, and fold-boundary
+   function as findings 5-7 (2021-01-03 → present), unchanged — this is a
+   single fixed-rule strategy, not a parameter grid (MACD 12/26/9 is the
+   standard convention, not tuned this round). Raw pooled net-of-fees /
+   gross-of-fees / folds-net-positive: BTC -67.06%/+7.84%/0-5 (790 pooled
+   trades), ETH -66.87%/+3.05%/0-5 (756 pooled trades). Per-fold trade
+   counts are large and none are thin this time (BTC 133-174/fold, ETH
+   134-162/fold), but win rates are low (8.0-16.0%) — exiting on the very
+   first red hourly candle is a tight, high-frequency exit rule, and fee
+   drag on that much turnover turns a roughly-flat-to-weak gross edge
+   sharply net-negative (same fee-drag mechanism as finding 3, far more
+   pronounced here because of trade frequency). Confirmed: the daily
+   regime is evaluated once per calendar day off the most recently fully
+   closed daily candle (causal lag `i // 24 - 1`, same pattern finding 4's
+   SMA filter already used), never recomputed intraday — this alignment
+   property has explicit test coverage
+   (`test_hourly_index_maps_to_prior_daily_index_and_is_constant_within_a_day`
+   in `tests/test_backtest_macd_d1h1.py`), not just asserted. Judgment
+   calls (flagged, not self-adjudicated — full detail in the module
+   docstring): (a) position sizing has no natural stop-distance to size a
+   1%-risk position off, since the exit is price-action-based with no
+   fixed initial stop — sized flat at `max_position_pct` (25% of equity)
+   instead; `r_multiple` on each trade is a nominal scorecard against the
+   standard 1%-of-equity risk amount, not tied to actual sizing. (b) Fold
+   boundaries used the same `compute_fold_boundaries()` call/params/
+   dataset as findings 5-7, but anchored off the hourly candle series'
+   actual start/end (the primary traded timeframe here) rather than a
+   resampled daily/4h series — can only shift boundaries by a sub-day
+   amount out of 5.6 years, but flagged rather than silently decided.
+   Dual-timeframe ingestion turned out not to need new fetch
+   infrastructure: `resample_candles(hourly, 24)` (already used by
+   findings 4-7) gives the daily series for free from the same hourly
+   fetch. **No adopt/reject verdict rendered — raw numbers only, per
+   instruction; decision deferred to the planning chat.**
 
 ### Code state
 
@@ -146,16 +186,31 @@ parallel code, documented in the module docstring; also has a
 `--long-only` flag, added for finding 7, that empties `short_indices`
 at the call site — `simulate_donchian()`/`slice_trades_by_folds()`
 unchanged, default behavior with no flag still reproduces finding 6),
-`scripts/sanity_check_daily_signal.py` (independent one-off check, not
-meant to be maintained). No `.env` or locked spec parameters touched.
-Nothing merged or promoted — still `paper` branch working state.
+`scripts/backtest_macd_d1h1.py` (MACD D1H1 — daily-regime filter +
+hourly-entry + price-action trailing-stop exit; new indicator
+`compute_macd()` added to `src/signal_generation.py`; new trade-
+simulation loop `simulate_macd_d1h1()` since neither `simulate()` nor
+`simulate_donchian()` can express a dual-timeframe entry gate or a
+price-action exit; imports `compute_fold_boundaries()` unchanged but
+duplicates fold-slicing/pooling as its own `slice_trades_by_folds()`,
+same approach and rationale as `backtest_donchian.py`'s copy — see finding
+8 and the module docstring for the judgment calls made), `scripts/
+sanity_check_daily_signal.py` (independent one-off check, not meant to be
+maintained). No `.env` or locked spec parameters touched. Nothing merged
+or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
-Two strategy families are now closed: the EMA crossover (+ daily-50 SMA
-filter, finding 5 — does not clear the adopt bar) and Donchian breakout
-long-only (finding 7 — pooled returns positive but folds-consistency
-never clears, same failure mode). Which strategy family to try next is
+Three strategy families now have raw backtest results and no live/paper
+adoption: the EMA crossover (+ daily-50 SMA filter, finding 5 — does not
+clear the adopt bar, **closed/rejected**), Donchian breakout long-only
+(finding 7 — pooled returns positive but folds-consistency never clears,
+**closed/rejected**), and MACD D1H1 (finding 8 — raw numbers only, no
+verdict rendered here; pooled net-of-fees was sharply negative on both
+symbols with 0/5 folds positive, but per this session's explicit
+instruction the adopt/reject call is deferred to the planning chat, not
+made here). Which strategy family to try next — including whether MACD
+D1H1 is worth a variant (e.g. a less-twitchy exit) or is also closed — is
 being decided in a **separate planning chat, not here — do not start any
 new strategy variant on your own initiative.** Wait for a scoped brief
 before starting new backtest work.
