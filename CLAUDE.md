@@ -79,6 +79,25 @@ and `data_ingestion.py`'s live fetch are untouched.
    with finding 4's daily-200 holdout result. Per-fold trade counts
    (5-10) are still thin individually, but pooled counts (32-43 per
    combo) are a real improvement over finding 4's 5-8.
+6. New strategy family: Donchian channel breakout (long AND short,
+   `close` vs. prior-N-day highest-high/lowest-low) with an ATR
+   trailing-stop exit (not a fixed opposite-band exit), replacing the
+   crossover family after finding 5. Built `scripts/backtest_donchian.py`
+   and ran the full pre-registered grid — channel N ∈ {20, 55}d, ATR
+   trail multiple ∈ {2.0x, 2.5x, 3.0x}, BTC/USD + ETH/USD, same fee model
+   and same 5-fold walk-forward boundaries as finding 5, unchanged — 12
+   combos. Raw pooled net-of-fees / gross-of-fees / folds-net-positive:
+   BTC 20d/2.0x +2.38%/+7.30%/3-5, 20d/2.5x -4.14%/-0.68%/2-5,
+   20d/3.0x -3.98%/-1.44%/3-5, 55d/2.0x +2.53%/+5.11%/3-5,
+   55d/2.5x +0.17%/+2.03%/2-5, 55d/3.0x +2.02%/+3.40%/3-5. ETH
+   20d/2.0x +15.23%/+18.87%/5-5, 20d/2.5x +7.75%/+10.28%/3-5,
+   20d/3.0x +11.56%/+13.38%/4-5, 55d/2.0x +17.84%/+19.72%/5-5,
+   55d/2.5x +11.87%/+13.19%/5-5, 55d/3.0x +11.10%/+12.15%/5-5. ETH results
+   are notably stronger than anything seen in findings 1-5, but several of
+   the best combos (55d channel especially) run on only 3-8 trades/fold —
+   a sample-size caveat, not yet independently verified. **No adopt/reject
+   verdict has been rendered on this — the requesting session explicitly
+   asked for raw numbers only, decision deferred to the user/spec chat.**
 
 ### Code state
 
@@ -90,18 +109,25 @@ override), `scripts/backtest_walkforward.py` (5-fold anchored
 walk-forward harness, reuses `backtest.py`'s `simulate()`/`summarize()`
 and `backtest_trend_filter.py`'s daily-50 filter unchanged — only adds
 `compute_fold_boundaries()` and `run_multi_fold_walk_forward()`),
-`scripts/sanity_check_daily_signal.py` (independent one-off check, not
-meant to be maintained). No `.env` or locked spec parameters touched.
-Nothing merged or promoted — still `paper` branch working state.
+`scripts/backtest_donchian.py` (Donchian breakout + ATR trailing stop —
+long+short, new trade-simulation loop `simulate_donchian()` since the
+crossover family's `simulate()` is long-only with a fixed stop/TP and
+can't express a trailing stop; imports `compute_fold_boundaries()`
+unchanged but does NOT call `run_multi_fold_walk_forward()`, since that
+function is hardwired to call `simulate()` — instead duplicates its
+fold-slicing/pooling logic as `slice_trades_by_folds()`, same approach,
+parallel code, documented in the module docstring), `scripts/
+sanity_check_daily_signal.py` (independent one-off check, not meant to be
+maintained). No `.env` or locked spec parameters touched. Nothing merged
+or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
-Finding 5 resolves the daily-50-filter question this milestone was
-chasing: it does not clear the adopt bar, so it should NOT be folded into
-the spec as-is. What's still open — whether to try an ADX-based filter
-instead of/alongside the SMA filter, investigate fold 3's concentrated
-losses, or reconsider the strategy family entirely (the underlying bare
-crossover still has no validated edge per finding 1) — **is being decided
+Finding 5 resolves the daily-50-filter question that milestone was
+chasing (does not clear the adopt bar). Finding 6 (Donchian breakout) has
+raw results but **no verdict** — whether any combo clears an adopt bar,
+whether to add a volume filter, investigate the small-sample 55d combos
+further, or something else, is still open. **This decision is being made
 in a separate spec/planning chat, not here. Check for updated guidance
 before starting new backtest work.**
 
