@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from src.signal_generation import (
     compute_ema,
     compute_atr,
+    compute_macd,
     volume_confirms,
     generate_signal,
     SignalDirection,
@@ -50,6 +51,40 @@ def test_compute_atr_seeds_with_average_tr_then_wilder_smooths():
     assert atr[0] is None and atr[1] is None
     assert atr[2] == 2   # avg(TR1, TR2) = avg(2, 2)
     assert atr[3] == 3   # (2*(2-1) + 4) / 2
+
+
+def test_compute_macd_hand_checked_values():
+    # fast=3 (alpha=0.5), slow=6 (alpha=2/7), signal=2 (alpha=2/3) — small
+    # periods so every value is hand-checkable. A decline (10 down to 3)
+    # then a sharp rise (4 up to 24) forces a real macd/signal crossover,
+    # not just a converging-toward-a-constant series.
+    prices = [10, 9, 8, 7, 6, 5, 4, 3, 4, 6, 9, 13, 18, 24]
+    macd, signal, hist = compute_macd(prices, fast_period=3, slow_period=6, signal_period=2)
+
+    # ema_fast seeds at index 2 (SMA of 10,9,8=9), ema_slow seeds at index 5
+    # (SMA of 10..5=7.5) -> macd_line only defined from index 5 onward.
+    assert macd[:5] == [None] * 5
+    assert signal[:6] == [None] * 6  # signal needs one more bar to seed its own 2-period EMA
+    assert round(macd[5], 6) == -1.5
+    assert signal[6] == -1.5  # signal seeded as SMA(macd[5], macd[6]) = avg(-1.5, -1.5)
+
+    # Hand-computed forward: ema_fast[8]=4, ema_slow[8]=5.071429 -> macd=-1.071429;
+    # signal[8] = macd[8]*2/3 + signal[7]*1/3 = -1.071429*0.666667 + -1.5*0.333333 = -1.214286
+    assert round(macd[8], 6) == -1.071429
+    assert round(signal[8], 6) == -1.214286
+    assert round(hist[8], 6) == round(macd[8] - signal[8], 6)
+
+    # macd <= signal through index 7 (both -1.5), macd > signal from index 8
+    # onward — a clean crossover at index 8, driven by the sharp rise.
+    assert macd[7] <= signal[7]
+    assert macd[8] > signal[8]
+
+
+def test_compute_macd_insufficient_data_returns_all_none():
+    macd, signal, hist = compute_macd([1, 2, 3], fast_period=12, slow_period=26, signal_period=9)
+    assert macd == [None, None, None]
+    assert signal == [None, None, None]
+    assert hist == [None, None, None]
 
 
 def test_volume_confirms_true_when_above_average():

@@ -86,6 +86,41 @@ def compute_atr(candles, period: int = 14):
     return atr
 
 
+def compute_macd(prices, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9):
+    """
+    Standard MACD: macd_line = EMA(fast) - EMA(slow), signal_line =
+    EMA(macd_line, signal_period) — computed by feeding the macd_line's
+    valid (non-None) tail back through compute_ema(), so the signal line
+    is seeded via SMA of its first `signal_period` values exactly like any
+    other EMA in this module (same seeding convention as compute_ema,
+    applied recursively). Returns (macd_line, signal_line, histogram),
+    each the same length as `prices`, with leading Nones wherever the
+    underlying EMAs aren't seeded yet.
+    """
+    n = len(prices)
+    ema_fast = compute_ema(prices, fast_period)
+    ema_slow = compute_ema(prices, slow_period)
+
+    macd_line = [None] * n
+    for i in range(n):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            macd_line[i] = ema_fast[i] - ema_slow[i]
+
+    first_valid = next((i for i, v in enumerate(macd_line) if v is not None), None)
+    signal_line = [None] * n
+    if first_valid is not None:
+        signal_tail = compute_ema(macd_line[first_valid:], signal_period)
+        for offset, value in enumerate(signal_tail):
+            signal_line[first_valid + offset] = value
+
+    histogram = [None] * n
+    for i in range(n):
+        if macd_line[i] is not None and signal_line[i] is not None:
+            histogram[i] = macd_line[i] - signal_line[i]
+
+    return macd_line, signal_line, histogram
+
+
 def volume_confirms(candles, lookback: int = 20) -> bool:
     """
     Volume above recent average — spec §2 confirmation filter. Compares the
