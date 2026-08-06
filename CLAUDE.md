@@ -19,10 +19,18 @@ Process/session discipline: `session-playbook-v6.md`. Both live in project
 knowledge — read them if this file references something you need more
 detail on.
 
+**NOTE (2026-08 session, finding 10): the BTC/USD + ETH/USD-only universe
+described above is being reopened** — see "Current status" and finding 10
+below. Treat the 2-asset scope as under active revision, not settled,
+until the new milestone lands.
+
 ## Current status
 
-**Milestone: backtest / signal-validation (spec §2, playbook v6 §7) —
-IN PROGRESS, not complete, no decision locked yet.**
+**Milestone: 10-asset rotational Donchian ensemble (finding 10, spec §2
+scope reopened) — IN PROGRESS, just started, no code written yet.**
+Pivots off the closed/inconclusive single-/dual-asset strategy findings
+below (5, 7, 8, 9) — see "Not yet decided" for the full rationale and
+scope.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -242,6 +250,41 @@ and `data_ingestion.py`'s live fetch are untouched.
    decision deferred to the planning chat. Given the near-zero trade
    count, the planning chat may want "insufficient sample size to
    evaluate" as a distinct outcome from adopt/reject.**
+10. **Step back further** (separate planning-chat review, not a new
+    backtest — no code written for this entry). After finding 9 left RSI
+    mean-reversion inconclusive rather than cleanly rejected, a review
+    across findings 5, 7, 8, and 9 identified a common structural gap:
+    every one of those families shared a fixed 1-2 asset universe
+    (BTC/USD + ETH/USD only), not necessarily a bad indicator each time.
+    Research reviewed — the Zarattini/Pagani/Barbon SFI paper on crypto
+    trend-following, and Man Group institutional research — points at
+    portfolio breadth (trading a basket of 10-15 liquid coins, not 1-2)
+    as the mechanism that clears crypto's transaction-cost hurdle for
+    trend-following: enough uncorrelated entries/exits in flight that fee
+    drag stops dominating a thin trade count, the failure mode common to
+    findings 1, 3, 5, 7, and 8. **This reopens the BTC/USD +
+    ETH/USD-only universe locked since the original spec — the user has
+    explicitly signed off on this scope change.** This does not reverse
+    any prior adopt/reject verdict (findings 5, 7, 8 stay rejected on
+    their own terms; finding 9 stays inconclusive) — it's a scope
+    decision for what gets tested next, not a re-litigation of what's
+    already closed.
+
+    **NEW MILESTONE, IN PROGRESS: pivot to a 10-asset rotational Donchian
+    ensemble.** No code written yet this session. New infrastructure
+    needed, nothing in the codebase currently handles either:
+    (a) multi-symbol data ingestion — `data_ingestion.py`'s
+        `fetch_historical_candles`/`TRADING_PAIRS` are BTC/ETH-only today;
+    (b) rotational position-slot management, capped at 4 concurrent
+        positions across the 10-asset universe.
+
+    **Known future blocker, explicitly NOT this milestone:** the existing
+    correlation / open-risk-budget guardrail (spec §4.3) was designed for
+    a 2-asset universe and does not generalize to 10 assets. Does not
+    block backtesting this milestone — a simple 4-position-cap
+    placeholder is used instead — but WILL block any live-trading
+    promotion of this strategy family until the guardrail is redesigned.
+    Do not attempt to solve this now; flagged for awareness only.
 
 ### Code state
 
@@ -290,43 +333,55 @@ or promoted — still `paper` branch working state.
 
 ### Not yet decided (blocks next steps)
 
-Three strategy families are now closed/rejected: the EMA crossover
-(+ daily-50 SMA filter, finding 5 — does not clear the adopt bar), Donchian
-breakout long-only (finding 7 — pooled returns positive but
-folds-consistency never clears), and MACD D1H1 (finding 8 — pooled
+Four strategy families tested against the original BTC/USD + ETH/USD,
+1-2 asset universe are closed or inconclusive on their own terms — none
+of these verdicts are reversed by finding 10's scope pivot below: the EMA
+crossover (+ daily-50 SMA filter, finding 5 — does not clear the adopt
+bar), Donchian breakout long-only (finding 7 — pooled returns positive
+but folds-consistency never clears), MACD D1H1 (finding 8 — pooled
 net-of-fees sharply negative on both symbols, 0/5 folds positive on
-either, severe fee drag from the high-turnover price-action exit).
+either, severe fee drag from the high-turnover price-action exit), and
+RSI(14) regime-filtered mean-reversion (finding 9 — inconclusive,
+sample-starved: 3 pooled BTC trades, 0 ETH trades over 5.6 years).
 
-A fourth family, RSI(14) regime-filtered mean-reversion, was backtested
-in finding 9 but is **not** closed — the joint entry condition (RSI<30
-cross + above daily-200-SMA) produced only 3 pooled trades on BTC and 0 on
-ETH over 5.6 years, too thin to render any adopt/reject verdict against.
-No code has been written for a next strategy yet — the planning chat needs
-to decide whether to (a) treat finding 9 as inconclusive and propose a
-different next family, (b) request a sensitivity check on finding 9's
-fixed parameters to see if the signal-starvation problem is specific to
-30/50/200/10, or (c) something else. Don't start new backtest code without
-a fresh scoped brief.
+Finding 10 (step-back review, see above) identified the common thread
+across all four as a fixed 1-2 asset universe, not necessarily a bad
+indicator each time — crypto trend-following research (Zarattini/Pagani/
+Barbon SFI paper; Man Group) points at portfolio breadth (10-15 liquid
+coins) as the mechanism that clears the transaction-cost hurdle.
+**Current milestone (in progress): pivot to a 10-asset rotational
+Donchian ensemble** — reopens the BTC/USD + ETH/USD-only universe locked
+since the original spec; the user has explicitly signed off on this
+scope change. See finding 10 for the two new infrastructure pieces
+needed (multi-symbol ingestion, rotational position-slot management) and
+the known future guardrail-generalization blocker (explicitly deferred,
+not this milestone).
 
 ### Pre-coding checklist state
 
-**Not cleared for a new coding milestone.** Per this file's own
-convention (a session's "Done" = tests passing + code committed +
-spec/playbook updated *on an actual decision*), no decision was locked
-this session — so `session-playbook-v6.md`'s pre-coding checklist should
-be treated as not satisfied until the open decision above is resolved
-elsewhere. Don't start `execution.py` or any other new milestone without
-checking for updated guidance first.
+**Cleared to begin the 10-asset rotational Donchian ensemble milestone.**
+The scope decision (reopening the 1-2 asset cap) was made and signed off
+by the user this session — see finding 10. No code has been written for
+it yet. Two new infrastructure pieces need to be built as part of this
+milestone (multi-symbol data ingestion; rotational position-slot
+management capped at 4 concurrent positions) — the correlation/
+open-risk-budget guardrail redesign is explicitly OUT of scope for this
+milestone (known future blocker, see finding 10); don't attempt it now.
 
 ### Blocked/pending, unrelated to backtest
 
-`execution.py`'s OCO-fallback design is still waiting on the signal
-decision above before it makes sense to start — on top of its own
-separate crypto bracket-order design gap (see "Hard rules" below).
+`execution.py`'s OCO-fallback design is still waiting on a strategy
+family reaching an adopt decision before it makes sense to start — on
+top of its own separate crypto bracket-order design gap (see "Hard
+rules" below). The correlation/open-risk-budget guardrail redesign
+needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
+blocked/pending — not started, and explicitly not part of the current
+milestone.
 
-**Next milestone:** not yet named. Finding 9 (RSI mean-reversion) needs a
-planning-chat read (see "Not yet decided" above) before any next backtest
-milestone is scoped. Confirm a scoped brief before beginning.
+**Next milestone:** 10-asset rotational Donchian ensemble (finding 10,
+in progress) — multi-symbol ingestion and rotational position-slot
+management (4-position cap) are the two infrastructure pieces needed
+first; see finding 10 and "Not yet decided" above for full scope.
 
 ## Hard rules — never do these
 
