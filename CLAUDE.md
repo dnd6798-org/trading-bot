@@ -173,6 +173,75 @@ and `data_ingestion.py`'s live fetch are untouched.
    near-miss like findings 5/7 — this is a clearer, harder rejection than
    either prior closed line. MACD D1H1 is now a closed line alongside the
    EMA crossover and Donchian breakout (long-only).
+9. New strategy family: RSI(14) regime-filtered mean-reversion, daily
+   candles, long-only — replacing MACD D1H1 after finding 8's rejection,
+   and the first mean-reversion strategy tried in this repo (findings 1-8
+   were all trend-following). Entry: RSI(14) on daily candles crosses down
+   below 30, gated by a daily-200-SMA regime filter (close above the SMA
+   at entry — restricts entries to dips within an uptrend, per the
+   session's brief, a from-the-start design choice referencing external
+   research on why naive mean-reversion fails, not a filter added after
+   seeing results). Exit: RSI(14) reverts above 50 OR a 10-day time-stop,
+   whichever comes first — a third, distinct exit philosophy from the ATR
+   fixed stop/TP (findings 1-7) and finding 8's price-action trailing
+   exit, implemented as its own function (`resolve_exit()`) per
+   instruction, kept separate from the trade-simulation loop. Added
+   `compute_rsi()` to `src/signal_generation.py` and built `scripts/
+   backtest_rsi_meanreversion.py`; ran BTC/USD and ETH/USD through the
+   same 5-fold anchored walk-forward harness and fee model as findings
+   5-8 (2021-01-03 → present), unchanged — fixed-rule strategy, not a
+   parameter grid (RSI(14)/30/50/200-SMA/10-day are the specified
+   parameters, not tuned this round).
+
+   **Result: signal starvation, not a fee-drag or edge-quality result.**
+   Raw daily RSI<30 cross-downs over the full 5.6yr history: BTC 25, ETH
+   28 (days at the RSI<30 *level*, not just the cross: BTC 82, ETH 98).
+   But requiring the joint condition (cross-down AND close above the
+   daily-200 SMA) collapses this to BTC 5 raw signals, ETH 0. Days above
+   the 200-SMA are roughly a coin flip on their own (BTC 53.0%, ETH 47.6%
+   of the 1,842-day seeded history) — the scarcity isn't the regime filter
+   being restrictive in general, it's that severe/sharp oversold RSI
+   dips specifically cluster in the *below*-200-SMA regime (genuine
+   bear-market drawdowns), not as pullbacks within uptrends. Confirmed via
+   a standalone diagnostic against the real fetched data, not just the
+   backtest's own trade count.
+
+   BTC pooled net-of-fees / gross-of-fees: +3.25% / +3.72% on 3 pooled
+   trades, 1/5 folds net-positive, 2/5 net-negative, 2/5 no trades at all.
+   Per-fold: fold 1 0 trades; fold 2 1 trade, 100% win, rsi_revert exit,
+   net +5.57%; fold 3 1 trade, 0% win, time_stop exit, net -1.59%; fold 4
+   1 trade, 0% win, time_stop exit, net -0.61%; fold 5 0 trades. ETH: 0
+   trades in every fold and pooled — the joint entry condition never
+   fired once across 5.6 years of ETH daily data.
+
+   3 trades (BTC) and 0 trades (ETH) over 5.6 years is far too thin to
+   support any conclusion about edge, positive or negative — not
+   comparable to findings 5-8's much larger pooled trade counts, and this
+   result should be read as "insufficient sample size," not as evidence
+   for or against the underlying rule. Judgment calls (flagged, not
+   self-adjudicated — full detail in the module docstring):
+   (a) Entry implemented as a downward RSI *cross* (RSI[i-1]>=30,
+       RSI[i]<30), not a bare "RSI<30" level check — matches the brief's
+       "drops below 30" language and the crossing convention every other
+       entry signal in this repo already uses. A level check would allow
+       more raw signals (the 82/98 level-day counts above) but wasn't
+       what was specified.
+   (b) Position sizing has the same gap as finding 8 — no natural
+       stop-distance for the spec §4.1 1%-risk formula, since this exit
+       is RSI-level/time-based, not price-based. Sized flat at
+       `max_position_pct` (25% of equity), identical resolution to
+       finding 8; `r_multiple` is a nominal scorecard only, not tied to
+       actual sizing.
+   (c) Fold boundaries anchored off the daily candle series directly —
+       this strategy trades daily bars only, so there's no dual-timeframe
+       anchor ambiguity the way finding 8 had to flag.
+   (d) The 10-day time-stop is read as 10 daily candles ("trading days"),
+       consistent with how findings 4 and 8 already treat one daily
+       candle as one trading day for 24/7 crypto.
+   **No adopt/reject verdict rendered — raw numbers only, per instruction;
+   decision deferred to the planning chat. Given the near-zero trade
+   count, the planning chat may want "insufficient sample size to
+   evaluate" as a distinct outcome from adopt/reject.**
 
 ### Code state
 
@@ -204,6 +273,17 @@ price-action exit; imports `compute_fold_boundaries()` unchanged but
 duplicates fold-slicing/pooling as its own `slice_trades_by_folds()`,
 same approach and rationale as `backtest_donchian.py`'s copy — see finding
 8 and the module docstring for the judgment calls made), `scripts/
+backtest_rsi_meanreversion.py` (RSI(14) regime-filtered mean-reversion —
+daily-only, long-only; new indicator `compute_rsi()` added to
+`src/signal_generation.py`; new trade-simulation loop
+`simulate_rsi_meanreversion()` plus a standalone `resolve_exit()` function
+for the RSI-revert-OR-time-stop exit, kept separate per instruction so all
+three exit philosophies (ATR fixed, price-action trailing, RSI/time-stop)
+stay independently readable; imports `compute_fold_boundaries()`
+unchanged but duplicates fold-slicing/pooling as its own
+`slice_trades_by_folds()`, same approach as `backtest_donchian.py`'s and
+`backtest_macd_d1h1.py`'s copies — see finding 9 and the module docstring
+for the judgment calls made), `scripts/
 sanity_check_daily_signal.py` (independent one-off check, not meant to be
 maintained). No `.env` or locked spec parameters touched. Nothing merged
 or promoted — still `paper` branch working state.
@@ -217,15 +297,16 @@ folds-consistency never clears), and MACD D1H1 (finding 8 — pooled
 net-of-fees sharply negative on both symbols, 0/5 folds positive on
 either, severe fee drag from the high-turnover price-action exit).
 
-**Next milestone (from the planning chat, not yet started): regime-
-filtered mean-reversion.** Daily entry when RSI(14) < 30, gated by a
-price-above-200-day-SMA regime filter (same "regime filter" shape as
-finding 4/8's daily filters, but now a mean-reversion entry instead of a
-trend-following one). Exit at RSI(14) > 50 OR a 10-day time-stop,
-whichever comes first. No code has been written for this yet this
-session — do not start it without a fresh scoped brief confirming fee
-model, fold boundaries, and RSI period/thresholds are locked (same
-reuse-unless-flagged approach as findings 6-8).
+A fourth family, RSI(14) regime-filtered mean-reversion, was backtested
+in finding 9 but is **not** closed — the joint entry condition (RSI<30
+cross + above daily-200-SMA) produced only 3 pooled trades on BTC and 0 on
+ETH over 5.6 years, too thin to render any adopt/reject verdict against.
+No code has been written for a next strategy yet — the planning chat needs
+to decide whether to (a) treat finding 9 as inconclusive and propose a
+different next family, (b) request a sensitivity check on finding 9's
+fixed parameters to see if the signal-starvation problem is specific to
+30/50/200/10, or (c) something else. Don't start new backtest code without
+a fresh scoped brief.
 
 ### Pre-coding checklist state
 
@@ -243,10 +324,9 @@ checking for updated guidance first.
 decision above before it makes sense to start — on top of its own
 separate crypto bracket-order design gap (see "Hard rules" below).
 
-**Next milestone:** regime-filtered mean-reversion (RSI(14) < 30 daily
-entry, price-above-200-SMA regime filter, exit at RSI > 50 or a 10-day
-time-stop) — named in the planning chat, not yet started. Confirm a
-scoped brief before beginning.
+**Next milestone:** not yet named. Finding 9 (RSI mean-reversion) needs a
+planning-chat read (see "Not yet decided" above) before any next backtest
+milestone is scoped. Confirm a scoped brief before beginning.
 
 ## Hard rules — never do these
 
