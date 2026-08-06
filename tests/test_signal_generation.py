@@ -9,6 +9,7 @@ from src.signal_generation import (
     compute_ema,
     compute_atr,
     compute_macd,
+    compute_rsi,
     volume_confirms,
     generate_signal,
     SignalDirection,
@@ -85,6 +86,30 @@ def test_compute_macd_insufficient_data_returns_all_none():
     assert macd == [None, None, None]
     assert signal == [None, None, None]
     assert hist == [None, None, None]
+
+
+def test_compute_rsi_hand_checked_values():
+    # period=3, small integers so gains/losses/averages are hand-checkable
+    # as exact fractions (verified independently before writing this test).
+    prices = [10, 12, 11, 13, 16, 14, 18]
+    rsi = compute_rsi(prices, period=3)
+
+    assert rsi[:3] == [None, None, None]  # needs period+1=4 prices to seed
+    assert round(rsi[3], 6) == 80.0             # avg_gain=4/3, avg_loss=1/3 -> rs=4
+    assert round(rsi[4], 6) == round(1700 / 19, 6)   # ~89.473684
+    assert round(rsi[5], 6) == round(1700 / 28, 6)   # ~60.714286
+    assert round(rsi[6], 6) == 80.0             # rs=176/44=4.0 exactly again
+
+
+def test_compute_rsi_insufficient_data_returns_all_none():
+    assert compute_rsi([1, 2, 3], period=14) == [None, None, None]
+
+
+def test_compute_rsi_returns_100_when_avg_loss_is_zero():
+    # Monotonically rising prices -> zero losses in the smoothing window.
+    prices = [10, 11, 12, 13, 14]
+    rsi = compute_rsi(prices, period=3)
+    assert rsi[3] == 100.0
 
 
 def test_volume_confirms_true_when_above_average():

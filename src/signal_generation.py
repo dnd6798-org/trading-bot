@@ -121,6 +121,46 @@ def compute_macd(prices, fast_period: int = 12, slow_period: int = 26, signal_pe
     return macd_line, signal_line, histogram
 
 
+def compute_rsi(prices, period: int = 14):
+    """
+    Wilder's RSI: seeded with a simple average of gains/losses over the
+    first `period` price changes (mirrors compute_atr's seeding — the
+    first `period` entries are None, since `period` changes require
+    `period + 1` prices), then Wilder-smoothed forward exactly like ATR's
+    `(prev * (period - 1) + new) / period` recurrence. Returns a list the
+    same length as `prices`. A zero average loss (no down days in the
+    smoothing window) returns RSI 100 rather than dividing by zero.
+    """
+    if period <= 0:
+        raise ValueError("period must be positive")
+    n = len(prices)
+    rsi = [None] * n
+    if n <= period:
+        return rsi
+
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        change = prices[i] - prices[i - 1]
+        gains[i] = max(change, 0.0)
+        losses[i] = max(-change, 0.0)
+
+    def _rsi_from_averages(avg_gain, avg_loss):
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - 100 / (1 + rs)
+
+    avg_gain = sum(gains[1:period + 1]) / period
+    avg_loss = sum(losses[1:period + 1]) / period
+    rsi[period] = _rsi_from_averages(avg_gain, avg_loss)
+    for i in range(period + 1, n):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        rsi[i] = _rsi_from_averages(avg_gain, avg_loss)
+    return rsi
+
+
 def volume_confirms(candles, lookback: int = 20) -> bool:
     """
     Volume above recent average — spec §2 confirmation filter. Compares the
