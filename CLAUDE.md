@@ -13,11 +13,24 @@ conversation history to carry context forward.
 ## What this project is
 
 Automated crypto day-trading bot. BTC/USD + ETH/USD, 9/21 EMA crossover on
-1h candles, ATR-based exits, trend-following. Starting on $100 paper-proven
-test capital via Alpaca. Full architecture: `trading-bot-spec-v6.md`.
-Process/session discipline: `session-playbook-v6.md`. Both live in project
-knowledge — read them if this file references something you need more
-detail on.
+1h candles, ATR-based exits, trend-following. Full architecture:
+`trading-bot-spec-v6.md`. Process/session discipline:
+`session-playbook-v6.md`. Both live in project knowledge — read them if
+this file references something you need more detail on.
+
+**NOTE (2026-08 session, capital reframing, separate decision from the
+findings below):** paper-validation notional is locked at **$10,000**
+(percentage-based backtest results, including all findings below, are
+unaffected by this — it does not invalidate anything already run).
+Real-money go-live capital stays at **$100** for a short initial period,
+but that period is explicitly for validating the *operational pipeline*
+(execution, risk filters, halt/resume, promotion flow), not the strategy
+itself. The project's near-term goal is now stated explicitly (spec
+updated separately): validating a strategy, not generating near-term
+income — $100 was never going to produce meaningful monthly income at any
+realistic return rate. Treat "starting capital" language elsewhere in this
+file as referring to the old $100-only framing where it hasn't been
+updated yet; the $10,000/$100 split above is the current decision.
 
 **NOTE (2026-08 session, finding 10): the BTC/USD + ETH/USD-only universe
 described above is being reopened** — see "Current status" and finding 10
@@ -26,16 +39,25 @@ until the new milestone lands.
 
 ## Current status
 
-**Milestone: finding 12's redesigned rotational Donchian ensemble retry has
-been EXECUTED** (single 55-day channel, 8-slot cap at 12.5%/slot, ADA/PEPE
-dropped and backfilled with DOGE/USD and BCH/USD). Raw result: pooled
-net-of-fees -6.72%, 2/5 folds net-positive — same fold-count as finding 11
-but a smaller pooled loss. **No adopt/reject verdict rendered — raw
-numbers only, per instruction; decision deferred to the planning chat**,
-same convention as finding 11. Per the finding-12 "IMPORTANT CONSTRAINT"
-below, this was a bounded, one-time retry — do not start a finding 13
-breadth variant without a fresh, explicit instruction, regardless of what
-the planning chat decides. See finding 12 below for full detail.
+**Milestone: finding 12's redesigned rotational Donchian ensemble retry was
+formally REJECTED** (pooled net-of-fees -6.72%, pooled gross-of-fees
+-1.65%, 2/5 folds net-positive against a pre-committed bar of ≥4/5).
+Diagnosis (planning chat, post-session): the slot-cap fix worked
+completely (skipped signals dropped from 169 to 11). The single-lookback
+and full-history-universe fixes worked *partially* — gross-of-fees drag
+shrank sharply from finding 11's -5.23% to -1.65%, meaning the signal is
+now close to fee-neutral before costs. This reframes the problem: it is
+no longer primarily a fee-drag issue, it's now closer to a **signal-quality
+issue** — the strategy isn't capturing enough of the underlying trend.
+**Finding 13, IN PROGRESS: the final planned iteration on this strategy
+family** — tests the two remaining untested pieces of the original
+reference research (volatility-based position sizing, and weekly rather
+than daily entry evaluation; exits still monitored daily). A verification
+step (confirming finding 12's actual position-sizing behavior per symbol,
+not an informal "flat sizing" assumption) is required before any new code.
+**If finding 13 also fails the adopt bar, no fourth attempt is planned** —
+next step is a broader planning-chat conversation, not another variant.
+See finding 12's UPDATE and finding 13 below for full detail.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -500,17 +522,69 @@ and `data_ingestion.py`'s live fetch are untouched.
     XRP/USD (1) — far lower magnitude than finding 11's skip counts across
     the board.
 
-    **No adopt/reject verdict rendered — raw numbers only, per
-    instruction; decision deferred to the planning chat**, same convention
-    as findings 6, 8, 9, and 11.
+    **No adopt/reject verdict rendered at execution time — raw numbers
+    only, per instruction; decision deferred to the planning chat**, same
+    convention as findings 6, 8, 9, and 11.
 
     **IMPORTANT CONSTRAINT, still binding regardless of the planning
     chat's verdict on this result:** this was a bounded, ONE-TIME retry,
-    not an open-ended tuning loop. Do not propose or build a finding 13
+    not an open-ended tuning loop. Do not propose or build a finding-12
     breadth variant (a third slot-cap/entry-window/universe tweak) without
-    a fresh, explicit instruction to do so — if this result is also
-    rejected, the next step is a broader strategic conversation in the
-    planning chat, not another variant.
+    a fresh, explicit instruction to do so — see finding 13 below for what
+    was authorized instead.
+
+    **UPDATE (separate planning chat, post-session): formally REJECTED.**
+    Pooled net-of-fees -6.72%, pooled gross-of-fees -1.65%, 2/5 folds
+    net-positive against the pre-committed bar of ≥4/5 — an improvement
+    over finding 11 (-11.11% net, -5.23% gross) but not a pass.
+
+    **Root-cause diagnosis (planning chat):** the three fixes had uneven
+    effect. (1) The 8-slot cap fix worked completely — skipped signals
+    dropped from finding 11's 169 to 11, confirming that flaw is resolved.
+    (2) The single-lookback and full-history-universe fixes worked only
+    *partially* — gross-of-fees drag shrank sharply (-5.23% → -1.65%),
+    meaning the underlying signal is now close to fee-neutral before
+    costs. This changes the diagnosis: the dominant problem is **no longer
+    primarily fee drag** (findings 1-11's recurring failure mode) — it's
+    now closer to a **signal-quality problem**, i.e. the strategy isn't
+    capturing enough of the underlying trend to clear the bar even before
+    costs are heavy. This is a materially different failure mode than
+    every prior rejection in this session, not a rerun of the same issue.
+
+13. **NEW MILESTONE, IN PROGRESS: final planned iteration on the
+    multi-asset Donchian ensemble family**, testing the two remaining
+    untested pieces of the original reference research (Turtle/SFI-style
+    trend systems) that findings 11-12 deliberately deferred:
+    (a) volatility-based position sizing, replacing the flat per-trade
+        risk-based formula (finding 7's `risk_amount / stop_distance`,
+        capped at a fixed % of equity) that every strategy in this repo
+        has used unchanged since finding 7;
+    (b) lower trade frequency — weekly entry evaluation instead of daily
+        (exits/trailing-stop still monitored daily, only entries move to
+        a weekly cadence).
+    Motivated directly by finding 12's signal-quality diagnosis above: if
+    fee drag is no longer the dominant problem, the next candidates to
+    test are the two design elements likely to change *signal quality*
+    itself, not portfolio mechanics (slot cap, universe) which are now
+    working as intended.
+
+    **Required verification step before any new code:** confirm the
+    *actual* position-sizing behavior finding 12 produced (average and
+    range of position size/notional per symbol, specifically contrasting
+    BCH/USD against XRP/USD) directly from finding 12's run data. The
+    working assumption going in was that sizing is effectively "flat"
+    (every position sized near the `SLOT_MAX_POSITION_PCT` notional cap
+    rather than varying meaningfully with each symbol's ATR) — this has
+    not yet been checked against what finding 7's formula actually
+    produced, and volatility-based sizing (a) only makes sense as a
+    distinct fix if current sizing is in fact close to flat. Not
+    self-adjudicated; verify before building.
+
+    **IMPORTANT CONSTRAINT: finding 13 is the final planned iteration on
+    this strategy family.** If it also fails the pre-committed adopt bar,
+    no fourth attempt is planned — the next step is a broader strategic
+    conversation in the planning chat, not another variant. This applies
+    regardless of how close or far finding 13's numbers land from the bar.
 
 ### Code state
 
@@ -589,34 +663,47 @@ coins) as the mechanism that clears the transaction-cost hurdle. Finding
 construction flaws (redundant OR-entry, over-tight slot cap, thin-history
 symbols), not a rejection of the portfolio-breadth thesis itself.
 
-**Finding 12 (executed, bounded one-time retry)** fixed those three flaws
-directly: single 55-day Donchian channel, 8-slot cap at 12.5%/slot,
-ADA/PEPE dropped and backfilled with DOGE/USD and BCH/USD. Raw result:
-pooled net-of-fees -6.72%, pooled gross-of-fees -1.65%, 2/5 folds
-net-positive — an improvement over finding 11's -11.11% but still 2/5 on
-the folds-consistency leg, same failure mode as finding 11. **No
-adopt/reject verdict rendered — raw numbers only, decision deferred to
-the planning chat.** Per finding 12's binding "IMPORTANT CONSTRAINT," this
-was the one-time retry — **no third breadth iteration (finding 13) is to
-be started without a fresh, explicit instruction**, regardless of what the
-planning chat decides on this result; the next step would be a broader
-planning-chat conversation about strategy direction, not another
-universe/cap/entry variant.
+**Finding 12 (executed, bounded one-time retry) was formally REJECTED.**
+Single 55-day Donchian channel, 8-slot cap at 12.5%/slot, ADA/PEPE dropped
+and backfilled with DOGE/USD and BCH/USD. Pooled net-of-fees -6.72%,
+pooled gross-of-fees -1.65%, 2/5 folds net-positive — an improvement over
+finding 11 (-11.11% net, -5.23% gross) but not a pass. Diagnosis: the
+slot-cap fix fully resolved finding 11's binding-cap flaw (skips 169→11),
+and the single-lookback/full-history-universe fixes shrank gross drag
+sharply — the problem is **no longer primarily fee drag**, it's now a
+**signal-quality problem** (not capturing enough of the underlying trend).
+Per finding 12's binding "IMPORTANT CONSTRAINT," no further slot-cap/
+entry-window/universe variant of this ensemble is authorized.
+
+**Finding 13 (in progress) is the final planned iteration** on this
+strategy family, motivated directly by finding 12's signal-quality
+diagnosis: volatility-based position sizing and weekly (vs. daily) entry
+evaluation — the two reference-research pieces findings 11-12 deliberately
+deferred, and the two most likely to change signal quality rather than
+portfolio mechanics. Requires a verification step first (confirm finding
+12's actual per-symbol position-sizing behavior, BCH vs. XRP especially,
+rather than assume it was flat) before any new code. **If finding 13 also
+fails the adopt bar, no fourth attempt is planned** — next step is a
+broader planning-chat conversation about strategy direction, not another
+variant, regardless of how close finding 13 lands.
 
 ### Pre-coding checklist state
 
 **Finding 11 (10-asset rotational Donchian ensemble, 4-slot/25%, 20d-OR-
 55d entry) is CLOSED — rejected.** **Finding 12 (redesigned retry:
 55d-only entry, 8-slot/12.5% cap, ADA/PEPE backfilled with DOGE/BCH) is
-EXECUTED** — pooled net-of-fees -6.72%, 2/5 folds net-positive, no
-adopt/reject verdict rendered (raw numbers only, per instruction; deferred
-to the planning chat). This was a bounded, one-time retry per the
-"IMPORTANT CONSTRAINT" in finding 12 above — **do not spin up a further
-breadth variant (finding 13) without a fresh, explicit instruction to do
-so**, regardless of the planning chat's verdict on this result. The
-correlation/open-risk-budget guardrail redesign (spec §4.3, 2-asset →
-10-asset) remains explicitly OUT of scope regardless of finding 12's
-outcome — do not attempt it without a separate, current instruction.
+CLOSED — rejected** (pooled net-of-fees -6.72%, 2/5 folds net-positive;
+diagnosis: signal-quality problem, not fee drag — see finding 12's UPDATE
+above). **Finding 13 (volatility-based sizing + weekly entry evaluation)
+is the active milestone, IN PROGRESS** — the required position-sizing
+verification step (finding 12 data, BCH vs. XRP) has not yet been run;
+no new code written yet. This is understood to be the final planned
+iteration on this strategy family per finding 13's binding "IMPORTANT
+CONSTRAINT" — do not propose a finding 14 variant if finding 13 also
+fails, without a fresh instruction. The correlation/open-risk-budget
+guardrail redesign (spec §4.3, 2-asset → 10-asset) remains explicitly OUT
+of scope regardless of finding 13's outcome — do not attempt it without a
+separate, current instruction.
 
 ### Blocked/pending, unrelated to backtest
 
@@ -628,13 +715,13 @@ needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
 blocked/pending — not started, and explicitly not part of the current
 milestone.
 
-**Next milestone:** none currently active. Finding 12's redesigned
-rotational Donchian ensemble retry (executed) is awaiting an adopt/reject
-verdict from the planning chat — see finding 12 and "Not yet decided"
-above. Per finding 12's binding constraint, do not start a finding 13
-breadth variant without a fresh, explicit instruction; the next backtest
-milestone should come from the planning chat's direction, not be
-self-initiated.
+**Next milestone:** finding 13 (in progress) — volatility-based position
+sizing and weekly entry evaluation, the final planned iteration on the
+multi-asset Donchian ensemble family. Start with the required verification
+step (finding 12's actual per-symbol position-sizing behavior) before any
+new code — see finding 13 above. If finding 13 also fails the adopt bar,
+do not start a finding 14 variant without a fresh, explicit instruction;
+the next step would be a broader planning-chat conversation.
 
 ## Hard rules — never do these
 
