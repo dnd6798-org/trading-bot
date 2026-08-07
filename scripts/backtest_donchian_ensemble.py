@@ -11,6 +11,67 @@ construction flaws (redundant 20d/55d OR-entry, over-tight 4-slot cap,
 thin-history ADA/PEPE) — finding 12 fixes those three directly, same
 strategy family and same portfolio-breadth thesis, not a new signal idea.
 
+FINDING 13 UPDATE (final planned iteration on this family, executed in
+place per the same "repair, not rebuild" convention finding 12 used on
+finding 11's file): finding 12 was formally REJECTED (pooled net-of-fees
+-6.72%, 2/5 folds positive) and diagnosed as a signal-quality problem, not
+fee drag. Finding 13 tests the two remaining untested pieces of the
+original reference research — required verification step first, run via
+the separate one-off scripts/verify_finding12_sizing.py (not this file):
+re-derived finding 12's actual per-trade position sizes from its own
+unchanged formula. Result: sizing was NOT flat (informal "flat sizing"
+assumption was wrong) — 154 entries ranged 2.91%-12.50% of equity
+(mean 6.99%, stdev 2.11%), and the 12.5% notional cap bound only 7/154
+times (4.5%), concentrated almost entirely on BTC/USD (6/20 = 30% of its
+trades; every other symbol capped 0-1 times, XRP/USD never). The
+risk-based formula (position_size = 1%-equity-risk / ATR-stop-distance)
+was already close to equal-dollar-risk-per-trade whenever uncapped — the
+cap's failure mode was narrow and BTC-specific, not the broad "flat
+notional sizing" the milestone kickoff assumed.
+
+Two changes made this round, both fixed-rule (not swept):
+  (a) Position sizing: the flat per-slot NOTIONAL cap
+      (SLOT_MAX_POSITION_PCT, 12.5% of equity, finding 12's mechanism —
+      the thing verification showed was distorting BTC's risk
+      contribution specifically) is replaced with a portfolio-level TOTAL
+      RISK BUDGET cap. Same 1%-of-equity risk target per trade as before
+      (DEFAULT_RISK_PER_TRADE_PCT, unchanged, still spec §4.1's locked
+      number) — but when the sum of currently-open positions' committed
+      risk plus this new trade's target risk would exceed
+      TOTAL_PORTFOLIO_RISK_BUDGET_PCT (8% = MAX_CONCURRENT_POSITIONS(8) x
+      1%, the same worst-case aggregate risk envelope finding 12's flat
+      12.5% x 8 slots design implied), the new trade's risk — not anyone
+      else's, positions already open are never resized — is shrunk to
+      whatever budget remains, rather than hitting an arbitrary per-slot
+      % ceiling unrelated to how much risk the portfolio has already
+      committed elsewhere. A loose 100%-of-equity notional backstop stays
+      underneath this purely as a leverage/numerical sanity check (guards
+      the pathological near-zero-ATR case only — essentially never binds
+      for these liquid symbols) — NOT a reintroduction of finding 12's
+      per-slot design, flagged as a separate, distinct judgment call. The
+      MAX_CONCURRENT_POSITIONS=8 count-based structural cap is untouched,
+      per instruction.
+  (b) Entry cadence: entry signals are evaluated once per week (fixed
+      calendar weekday, Monday — arbitrary but deterministic, same
+      judgment-call convention as findings 11-12's slot-priority
+      tie-break) instead of every day. Exit/trailing-stop monitoring is
+      unchanged — still evaluated daily for every open position. Fold
+      boundaries and compute_fold_boundaries() are untouched.
+Backward-compatible: simulate_rotational_ensemble()'s new
+`total_risk_budget_pct` and `entry_eval_dates` parameters both default to
+finding-12-equivalent behavior (None -> derived 8%-budget cap; None ->
+every day is an entry-evaluation day) so finding 12's existing tests
+needed only the one sizing-cap test rewritten, not a rebuild.
+
+Universe, channel, ATR multiplier, long-only, fee model — all unchanged
+from finding 12 (see below). Notional: this run uses $10,000 (the
+locked paper-validation notional, CLAUDE.md 2026-08 capital reframing),
+not finding 12's $100 — percentage results are unaffected by that switch,
+it only makes position-size dollar reporting realistic; see
+PAPER_VALIDATION_CAPITAL below (a local override, NOT a change to
+backtest.py's shared DEFAULT_CAPITAL, which other findings' $100 numbers
+still depend on).
+
 Universe (finding 11's list, ADA/USD and PEPE/USD dropped for
 insufficient history and backfilled with the next-most-liquid full-history
 candidates from scripts/select_universe.py's ranked output — see finding
@@ -61,23 +122,27 @@ guardrail, which remains explicitly out of scope):
   - New signals that fire while all 8 slots are occupied are SKIPPED and
     logged, not queued — a skipped signal is gone, it does not enter
     later when a slot frees up, per instruction, unchanged from finding 11.
-  - Position sizing: finding 7's existing per-trade risk-based formula
+  - Position sizing (FINDING 13: see module docstring update above for
+    the full rationale): finding 7's per-trade risk-based formula
     (risk_amount = current portfolio equity * 1%, position_size =
-    risk_amount / (2.5 * entry ATR), capped at SLOT_MAX_POSITION_PCT of
-    current portfolio equity notional — 12.5%, halved from finding 11's
-    25% so that 8 slots x 12.5%/slot keeps the same ~100% max gross
-    exposure finding 11's 4 slots x 25%/slot had), applied per-asset off
-    the SHARED equity value at the moment each position opens. No
-    portfolio-level vol-targeted sizing this round, per instruction.
-    Judgment call, flagged, unchanged from finding 11: this does NOT
-    enforce a hard "total deployed notional <= 100% of equity" check
-    across concurrently open positions — each position is sized and
-    capped independently off current equity, same simplification findings
-    1-9 already made (spec §4.3's real cross-symbol risk budget isn't
-    implemented yet regardless). With a 12.5% per-position cap and an
-    8-slot maximum, worst-case simultaneous exposure is still bounded at
-    ~100% of equity, same as finding 11 — a reasonable backtest
-    placeholder, not a load-bearing guarantee.
+    risk_amount / (2.5 * entry ATR)) is unchanged, but the ceiling that
+    shrinks a trade when necessary switched from finding 12's flat
+    per-slot NOTIONAL cap (SLOT_MAX_POSITION_PCT, 12.5%) to a
+    portfolio-level TOTAL RISK BUDGET cap (TOTAL_PORTFOLIO_RISK_BUDGET_PCT,
+    8% = 8 slots x 1%): a new trade's risk is shrunk to whatever budget
+    remains after subtracting all currently-open positions' already-
+    committed risk, not to an arbitrary fixed % of equity unrelated to
+    portfolio occupancy. Applied per-asset off the SHARED equity value at
+    the moment each position opens, same as finding 12. A loose
+    100%-of-equity notional backstop remains underneath as a leverage/
+    numerical sanity check only (near-zero-ATR edge case) — with an 8%
+    total risk budget and an 8-slot maximum, worst-case simultaneous risk
+    exposure is bounded at ~8% of equity (not ~100% notional exposure the
+    way finding 11/12's notional-cap framing was) — a materially tighter,
+    risk-denominated bound than finding 12's notional-denominated one.
+  - Entry cadence (FINDING 13): entries evaluated weekly (fixed Monday
+    evaluation day) instead of daily — see module docstring update.
+    Exits/trailing-stop still evaluated daily, unchanged.
   - Slot-filling priority when more signals fire on the same day than
     slots are available: universe list order (BTC, ETH, then the 8
     ranked-liquidity/backfill symbols in that order) — an arbitrary but
@@ -154,7 +219,23 @@ UNIVERSE = [
 CHANNEL_LENGTH = 55           # finding 12: single channel, 20d leg removed (see docstring)
 ATR_MULTIPLIER = 2.5          # fixed — finding 7's middle grid value, not swept
 MAX_CONCURRENT_POSITIONS = 8  # finding 12: widened from finding 11's 4
-SLOT_MAX_POSITION_PCT = 12.5  # finding 12: halved from finding 11's 25% so 8 x 12.5% = 100% max gross exposure, unchanged
+# Finding 13: replaces finding 12's flat SLOT_MAX_POSITION_PCT (12.5%) —
+# verification showed that cap bound almost exclusively on BTC/USD (see
+# module docstring). TOTAL_PORTFOLIO_RISK_BUDGET_PCT caps aggregate RISK
+# across open positions instead of NOTIONAL per slot; derived as
+# MAX_CONCURRENT_POSITIONS x DEFAULT_RISK_PER_TRADE_PCT (8 x 1% = 8%),
+# same worst-case aggregate risk envelope finding 12's design implied.
+TOTAL_PORTFOLIO_RISK_BUDGET_PCT = MAX_CONCURRENT_POSITIONS * DEFAULT_RISK_PER_TRADE_PCT
+# Loose leverage/numerical sanity backstop only (near-zero-ATR edge case)
+# — NOT a per-slot design choice, see module docstring's finding 13 note.
+NOTIONAL_SANITY_CAP_PCT = 100.0
+# Finding 13: weekly entry evaluation (fixed Monday, weekday()==0) —
+# arbitrary but deterministic, flagged per module docstring.
+WEEKLY_ENTRY_WEEKDAY = 0
+# Finding 13: $10,000 locked paper-validation notional (CLAUDE.md 2026-08
+# capital reframing), NOT backtest.py's shared $100 DEFAULT_CAPITAL —
+# other findings' $100 numbers are untouched by this local override.
+PAPER_VALIDATION_CAPITAL = 10_000.0
 
 
 @dataclass
@@ -222,9 +303,11 @@ def simulate_rotational_ensemble(
     atr_multiplier=ATR_MULTIPLIER,
     capital=DEFAULT_CAPITAL,
     risk_pct=DEFAULT_RISK_PER_TRADE_PCT,
-    max_position_pct=SLOT_MAX_POSITION_PCT,
+    total_risk_budget_pct=None,
+    notional_sanity_cap_pct=NOTIONAL_SANITY_CAP_PCT,
     fee_pct=DEFAULT_TAKER_FEE_PCT,
     slippage_bps=DEFAULT_SLIPPAGE_BPS,
+    entry_eval_dates=None,
 ):
     """
     Day-by-day portfolio walk-forward across the shared daily calendar
@@ -232,10 +315,22 @@ def simulate_rotational_ensemble(
     the exits-before-entries ordering, slot-priority tie-break, and
     sizing-off-shared-equity judgment calls.
 
+    Finding 13: `total_risk_budget_pct` (defaults to
+    max_positions * risk_pct if not given, e.g. 8 * 1% = 8%) replaces
+    finding 12's flat max_position_pct notional cap — a new trade's risk
+    is shrunk to whatever's left of the shared risk budget after
+    currently-open positions' committed risk, not to a fixed per-slot %.
+    `notional_sanity_cap_pct` is a separate, loose leverage backstop only.
+    `entry_eval_dates`, if given, restricts entry evaluation (NOT exit/
+    stop monitoring, which always runs daily) to that date set — None
+    (default) preserves finding 12's every-day behavior.
+
     Returns (trades, equity_curve, skipped_log) — trades/equity_curve in
     EXIT-chronological order (equity only moves on a realized close, same
     convention as every other backtest in this repo).
     """
+    if total_risk_budget_pct is None:
+        total_risk_budget_pct = max_positions * risk_pct
     cost_frac_per_leg = fee_pct / 100 + slippage_bps / 10000
     calendar = sorted(set().union(*(s["date_index"].keys() for s in symbol_data.values())))
 
@@ -286,6 +381,10 @@ def simulate_rotational_ensemble(
                 pos["extreme_close"] = max(pos["extreme_close"], candle.close)
 
         # 2. Entries, in fixed universe-order priority when slots are scarce.
+        #    Finding 13: entry evaluation is gated to entry_eval_dates when
+        #    given (weekly cadence) — exits above are unaffected, still daily.
+        if entry_eval_dates is not None and date not in entry_eval_dates:
+            continue
         for symbol in universe_order:
             if symbol in open_positions:
                 continue
@@ -303,15 +402,30 @@ def simulate_rotational_ensemble(
             if entry_atr is None or entry_atr <= 0:
                 continue
 
-            risk_amount = equity * (risk_pct / 100)
+            # Finding 13: equal-risk-contribution sizing — target risk_pct
+            # of equity per trade (unchanged), shrunk to whatever's left of
+            # the shared portfolio risk budget rather than a flat per-slot
+            # notional %. See module docstring.
+            committed_risk = sum(p["risk_amount"] for p in open_positions.values())
+            available_risk_budget = equity * (total_risk_budget_pct / 100) - committed_risk
+            if available_risk_budget <= 0:
+                skipped_log.append({"date": date, "symbol": symbol, "reason": "no_risk_budget_available"})
+                continue
+
+            target_risk_amount = equity * (risk_pct / 100)
+            risk_amount = min(target_risk_amount, available_risk_budget)
             stop_distance = atr_multiplier * entry_atr
             if stop_distance <= 0:
                 continue
             position_size = risk_amount / stop_distance
-            max_notional = equity * (max_position_pct / 100)
+
+            # Loose leverage/numerical sanity backstop only (near-zero-ATR
+            # edge case) — not a per-slot design choice, see docstring.
+            max_notional = equity * (notional_sanity_cap_pct / 100)
             notional = position_size * candle.close
             if notional > max_notional:
                 position_size = max_notional / candle.close
+                risk_amount = position_size * stop_distance
 
             open_positions[symbol] = {
                 "entry_index": idx,
@@ -324,6 +438,18 @@ def simulate_rotational_ensemble(
             }
 
     return trades, equity_curve, skipped_log
+
+
+def compute_weekly_entry_evaluation_dates(calendar, weekday=WEEKLY_ENTRY_WEEKDAY):
+    """
+    Finding 13: entry signals evaluated once per week — picks the subset
+    of `calendar` (date strings) falling on a single fixed real calendar
+    weekday (default Monday, weekday()==0). Arbitrary but deterministic,
+    same judgment-call convention as findings 11-12's slot-priority
+    tie-break. Exit/stop monitoring is unaffected — always daily, see
+    simulate_rotational_ensemble()'s entry_eval_dates parameter.
+    """
+    return {d for d in calendar if datetime.fromisoformat(d).weekday() == weekday}
 
 
 def slice_ensemble_trades_by_folds(trades, equity_curve, folds, capital):
@@ -384,7 +510,7 @@ def main():
     end = datetime.now(timezone.utc) - timedelta(minutes=20)  # crypto bars need a short settle delay
     start = datetime(2021, 1, 3, tzinfo=timezone.utc)  # same earliest-history anchor as findings 5-9
 
-    print(f"=== 10-asset rotational Donchian ensemble (finding 12 retry): fetching {len(args.symbols)} symbols ===")
+    print(f"=== 10-asset rotational Donchian ensemble (finding 13: risk-budget sizing + weekly entries): fetching {len(args.symbols)} symbols ===")
     symbol_data = {}
     for symbol in args.symbols:
         series = build_symbol_series(symbol, start, end)
@@ -402,9 +528,12 @@ def main():
     folds = compute_fold_boundaries(
         actual_start, actual_end, num_folds=args.folds, initial_train_days=args.initial_train_days
     )
+    entry_eval_dates = compute_weekly_entry_evaluation_dates(calendar)
+    total_risk_budget_pct = args.max_positions * DEFAULT_RISK_PER_TRADE_PCT
 
-    print(f"\nshared calendar: {calendar[0]} -> {calendar[-1]}  ({len(calendar)} days)")
+    print(f"\nshared calendar: {calendar[0]} -> {calendar[-1]}  ({len(calendar)} days, {len(entry_eval_dates)} weekly entry-evaluation days)")
     print(f"max concurrent positions: {args.max_positions}  |  ATR trailing-stop multiplier: {args.atr_multiplier}")
+    print(f"total portfolio risk budget: {total_risk_budget_pct:.1f}%  |  per-trade risk target: {DEFAULT_RISK_PER_TRADE_PCT:.1f}%  |  capital: ${PAPER_VALIDATION_CAPITAL:,.0f}")
     print(f"fold boundaries (initial train {args.initial_train_days}d, then {args.folds} contiguous test windows):")
     for fold in folds:
         print(
@@ -415,17 +544,19 @@ def main():
 
     net_trades, net_curve, skipped_log = simulate_rotational_ensemble(
         symbol_data, universe_order, max_positions=args.max_positions, atr_multiplier=args.atr_multiplier,
-        capital=DEFAULT_CAPITAL, fee_pct=DEFAULT_TAKER_FEE_PCT, slippage_bps=DEFAULT_SLIPPAGE_BPS,
+        capital=PAPER_VALIDATION_CAPITAL, fee_pct=DEFAULT_TAKER_FEE_PCT, slippage_bps=DEFAULT_SLIPPAGE_BPS,
+        entry_eval_dates=entry_eval_dates,
     )
     gross_trades, gross_curve, _ = simulate_rotational_ensemble(
         symbol_data, universe_order, max_positions=args.max_positions, atr_multiplier=args.atr_multiplier,
-        capital=DEFAULT_CAPITAL, fee_pct=0.0, slippage_bps=0.0,
+        capital=PAPER_VALIDATION_CAPITAL, fee_pct=0.0, slippage_bps=0.0,
+        entry_eval_dates=entry_eval_dates,
     )
 
-    net_folds, net_pooled = slice_ensemble_trades_by_folds(net_trades, net_curve, folds, DEFAULT_CAPITAL)
-    gross_folds, gross_pooled = slice_ensemble_trades_by_folds(gross_trades, gross_curve, folds, DEFAULT_CAPITAL)
+    net_folds, net_pooled = slice_ensemble_trades_by_folds(net_trades, net_curve, folds, PAPER_VALIDATION_CAPITAL)
+    gross_folds, gross_pooled = slice_ensemble_trades_by_folds(gross_trades, gross_curve, folds, PAPER_VALIDATION_CAPITAL)
 
-    print(f"\n=== Portfolio-level results ({len(net_trades)} total trades, {len(skipped_log)} signals skipped for no free slot) ===")
+    print(f"\n=== Portfolio-level results ({len(net_trades)} total trades, {len(skipped_log)} signals skipped) ===")
     rows = []
     for fold, net, gross in zip(folds, net_folds, gross_folds):
         rows.append({
@@ -468,8 +599,12 @@ def main():
     )
 
     skipped_pooled = [s for s in skipped_log if s["date"] >= folds[0]["test_start"].isoformat()[:10]]
-    print(f"\nskipped signals (no free slot), pooled test period: {len(skipped_pooled)} of {len(skipped_log)} total")
+    print(f"\nskipped signals, pooled test period: {len(skipped_pooled)} of {len(skipped_log)} total")
     if skipped_pooled:
+        by_reason = {}
+        for s in skipped_pooled:
+            by_reason[s["reason"]] = by_reason.get(s["reason"], 0) + 1
+        print("  by reason:", ", ".join(f"{reason}={count}" for reason, count in sorted(by_reason.items(), key=lambda kv: -kv[1])))
         by_symbol_skips = {}
         for s in skipped_pooled:
             by_symbol_skips[s["symbol"]] = by_symbol_skips.get(s["symbol"], 0) + 1
