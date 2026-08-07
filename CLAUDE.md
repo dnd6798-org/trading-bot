@@ -27,10 +27,11 @@ until the new milestone lands.
 ## Current status
 
 **Milestone: 10-asset rotational Donchian ensemble (finding 10, spec §2
-scope reopened) — IN PROGRESS, just started, no code written yet.**
-Pivots off the closed/inconclusive single-/dual-asset strategy findings
-below (5, 7, 8, 9) — see "Not yet decided" for the full rationale and
-scope.
+scope reopened) — backtest COMPLETE (finding 11), raw numbers reported,
+no adopt/reject verdict rendered.** Decision deferred to the planning
+chat, same convention as findings 6, 8, and 9. Pivots off the closed/
+inconclusive single-/dual-asset strategy findings below (5, 7, 8, 9) —
+see "Not yet decided" for the full rationale and scope.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -285,6 +286,121 @@ and `data_ingestion.py`'s live fetch are untouched.
     placeholder is used instead — but WILL block any live-trading
     promotion of this strategy family until the guardrail is redesigned.
     Do not attempt to solve this now; flagged for awareness only.
+11. **10-asset rotational Donchian ensemble** (finding 10's milestone,
+    executed). Two parts:
+
+    **Universe selection** — `scripts/select_universe.py` (one-off, not
+    meant to be maintained), queried Alpaca's live `/v2/assets?
+    asset_class=crypto` (38 active tradable USD pairs) and ranked 31
+    non-stablecoin candidates by trailing-30-day average daily dollar
+    volume, computed from real fetched hourly candles (not a training-
+    data guess). **Caveat flagged and confirmed real, not a units bug:**
+    this volume is Alpaca's own crypto-venue order flow, not aggregated
+    global market volume (Alpaca runs its own crypto exchange) — BTC/USD
+    showed ~$94k/day on this measure, ETH/USD ~$39k/day. Arguably the
+    right number to rank on anyway (it's the liquidity the bot would
+    actually trade against), but flagged since it reads oddly low next to
+    global BTC volume. Top 8 non-stablecoin, non-BTC/ETH by this measure:
+    XRP/USD, SOL/USD, UNI/USD, AVAX/USD, AAVE/USD, LINK/USD, PAXG/USD,
+    PEPE/USD. **User adjustment after review:** PAXG/USD (Pax Gold, a
+    gold-tracking token, not stablecoin-classified so not auto-excluded)
+    was hand-swapped out for the next-ranked candidate, ADA/USD — PAXG
+    tracks gold spot price, not crypto market dynamics, which breaks the
+    premise of a crypto trend ensemble despite being liquid. **Locked
+    final universe (10 symbols):** BTC/USD, ETH/USD, XRP/USD, SOL/USD,
+    UNI/USD, AVAX/USD, AAVE/USD, LINK/USD, ADA/USD, PEPE/USD.
+
+    **Signal** — long entry on daily close breaking above the 20-day OR
+    55-day causal Donchian high; exit ATR trailing stop fixed at 2.5x
+    (finding 7's middle grid value) — fixed rule, not a parameter grid.
+    **MATH NOTE, flagged not self-resolved:** because a causal 55-day
+    window always contains the most recent 20 days as a subset, the
+    55-day leg is provably redundant — "close > upper_20 OR close >
+    upper_55" is mathematically identical to "close > upper_20" alone at
+    every index, confirmed both analytically and by a dedicated test
+    (`test_dual_channel_entry_55d_leg_never_adds_signals_beyond_20d_leg`
+    in `tests/test_backtest_donchian_ensemble.py`). Implemented literally
+    (both bands computed, OR'd) per the specified rule rather than
+    silently simplified to a 20-day-only signal.
+
+    **Portfolio construction** — rotational, capped at 4 concurrent open
+    positions across the 10-symbol universe, backed by a SHARED $100
+    capital pool (a deliberate difference from findings 6-9, which
+    backtested each symbol independently against its own full $100 — here
+    the real account only has $100 total, and the 4-slot cap is standing
+    in for the not-yet-generalized cross-symbol risk guardrail, spec
+    §4.3). New signals beyond the 4-slot cap are skipped and logged, not
+    queued. Position sizing reuses finding 7's formula (1% equity risk /
+    2.5x ATR stop distance, capped at 25% notional), applied per-asset off
+    the shared equity value at the moment each position opens — no
+    portfolio-level vol-targeted sizing this round, per instruction.
+    Exits are processed before entries within each simulated day so a
+    slot freed by an exit can be reused by a new entry the same day
+    (verified by a dedicated test). Slot-fill priority when multiple
+    signals cluster on the same day: fixed universe-list order (BTC, ETH,
+    then the 8 ranked-liquidity symbols) — an arbitrary, flagged
+    tie-break, not signal-strength ranked.
+
+    **New infrastructure:** `scripts/backtest_donchian_ensemble.py` — new
+    `EnsembleTrade` dataclass (adds a `symbol` field); new
+    `simulate_rotational_ensemble()`, a day-by-day portfolio loop over a
+    shared calendar built from the UNION of each symbol's available
+    dates, since several universe symbols have far shorter Alpaca history
+    than BTC/ETH's 2021-01-03 start: XRP/USD from 2024-01-01, AVAX/USD
+    from 2021-11-18, AAVE/USD from 2021-07-15, PEPE/USD from 2025-01-29,
+    and ADA/USD from only 2026-02-13. ADA/USD (175 daily candles) and
+    PEPE/USD (554) are markedly thinner than the rest of the universe
+    (BTC/ETH ~2042) — a real data-availability constraint, flagged, not a
+    bug. Reuses completely unchanged: `compute_donchian_levels()`
+    (`backtest_donchian.py`), `compute_atr()` (`signal_generation.py`),
+    `resample_candles()`/`summarize()`/`_print_table()`/fee constants/
+    position-sizing constants/`ATR_PERIOD` (`backtest.py`),
+    `compute_fold_boundaries()` (`backtest_walkforward.py` — same 5-fold,
+    365-day-anchor, 2021-01-03 setup as findings 5-9, dates unchanged).
+
+    **Fold-slicing judgment call, flagged** (methodology only — the fold
+    BOUNDARY DATES from `compute_fold_boundaries()` are untouched): because
+    up to 4 positions can be open concurrently, trade entry order and
+    exit/equity-realization order can diverge — impossible in every
+    single-position-at-a-time script (findings 1-9), where entry order,
+    exit order, and equity-curve order are always identical. The existing
+    `slice_trades_by_folds()` pattern silently assumes trades are
+    list-ordered by `entry_timestamp`, matching their equity-curve
+    position — true everywhere else, false here. This script's
+    `slice_ensemble_trades_by_folds()` buckets by `exit_timestamp`
+    instead, matching how `trades`/`equity_curve` are actually built
+    (equity only moves at trade close) — confirmed by a dedicated test
+    (`test_slice_ensemble_trades_by_folds_buckets_by_exit_not_entry_
+    timestamp`) using a trade that enters in fold 1's window but exits in
+    fold 2's, proving it lands in fold 2.
+
+    **Result — portfolio-level, 5-fold anchored walk-forward
+    (2022-01-03 → 2026-08-06 pooled test window, same boundaries as
+    findings 5-9):** pooled net-of-fees **-11.11%**, pooled gross-of-fees
+    -5.23%, **2/5 folds net-positive** (fold 2 +3.70%, fold 4 +10.68%;
+    fold 1 -9.61%, fold 3 -0.95%, fold 5 -14.54%), 139 pooled trades, max
+    drawdown 15.91%. 186 signals were skipped for no free slot over the
+    full history (169 within the pooled test window) against 168 total
+    trades taken (139 pooled) — the 4-slot cap bound often, roughly as
+    many signals turned away as taken.
+
+    Per-symbol diagnostics (pooled, informational only, not part of the
+    adopt/reject bar): net-positive contributors were ETH/USD (+$5.31, 23
+    trades), BTC/USD (+$4.34, 26 trades), AVAX/USD (+$3.19, 11 trades),
+    XRP/USD (+$1.49, 9 trades); net-negative were SOL/USD (-$7.42, 16
+    trades), AAVE/USD (-$7.05, 18 trades), LINK/USD (-$5.37, 18 trades),
+    UNI/USD (-$4.43, 14 trades), PEPE/USD (-$2.16, 2 trades), ADA/USD
+    (-$0.39, 2 trades). Skip counts concentrated on AVAX/USD (39),
+    LINK/USD (31), AAVE/USD (29), UNI/USD (28) — turned away by the slot
+    cap far more often than BTC/USD (9) or ETH/USD (4); this reflects
+    slot-occupancy duration over time, not the fixed tie-break priority
+    order (tie-breaks only apply among signals firing the same day).
+
+    **No adopt/reject verdict rendered — raw numbers only, per
+    instruction; decision deferred to the planning chat**, same
+    convention as findings 6, 8, and 9. 7 new tests added
+    (`tests/test_backtest_donchian_ensemble.py`), full suite (77 tests)
+    passing.
 
 ### Code state
 
@@ -326,7 +442,14 @@ stay independently readable; imports `compute_fold_boundaries()`
 unchanged but duplicates fold-slicing/pooling as its own
 `slice_trades_by_folds()`, same approach as `backtest_donchian.py`'s and
 `backtest_macd_d1h1.py`'s copies — see finding 9 and the module docstring
-for the judgment calls made), `scripts/
+for the judgment calls made), `scripts/select_universe.py` (one-off
+universe-liquidity ranking against live Alpaca asset/volume data, not
+meant to be maintained — see finding 11), `scripts/
+backtest_donchian_ensemble.py` (10-asset rotational Donchian ensemble —
+new `EnsembleTrade` dataclass, `simulate_rotational_ensemble()` day-by-day
+portfolio loop, `slice_ensemble_trades_by_folds()` exit-timestamp-keyed
+fold slicer; see finding 11 and the module docstring for the full set of
+judgment calls made), `scripts/
 sanity_check_daily_signal.py` (independent one-off check, not meant to be
 maintained). No `.env` or locked spec parameters touched. Nothing merged
 or promoted — still `paper` branch working state.
@@ -348,25 +471,23 @@ Finding 10 (step-back review, see above) identified the common thread
 across all four as a fixed 1-2 asset universe, not necessarily a bad
 indicator each time — crypto trend-following research (Zarattini/Pagani/
 Barbon SFI paper; Man Group) points at portfolio breadth (10-15 liquid
-coins) as the mechanism that clears the transaction-cost hurdle.
-**Current milestone (in progress): pivot to a 10-asset rotational
-Donchian ensemble** — reopens the BTC/USD + ETH/USD-only universe locked
-since the original spec; the user has explicitly signed off on this
-scope change. See finding 10 for the two new infrastructure pieces
-needed (multi-symbol ingestion, rotational position-slot management) and
-the known future guardrail-generalization blocker (explicitly deferred,
-not this milestone).
+coins) as the mechanism that clears the transaction-cost hurdle. Finding
+11 executed that pivot: 10-asset universe locked, rotational Donchian
+ensemble backtested, pooled net-of-fees -11.11%, 2/5 folds net-positive.
+**No adopt/reject verdict rendered — decision deferred to the planning
+chat**, same as findings 6, 8, 9. Until that verdict lands, there is no
+next strategy-family pivot to plan around.
 
 ### Pre-coding checklist state
 
-**Cleared to begin the 10-asset rotational Donchian ensemble milestone.**
-The scope decision (reopening the 1-2 asset cap) was made and signed off
-by the user this session — see finding 10. No code has been written for
-it yet. Two new infrastructure pieces need to be built as part of this
-milestone (multi-symbol data ingestion; rotational position-slot
-management capped at 4 concurrent positions) — the correlation/
-open-risk-budget guardrail redesign is explicitly OUT of scope for this
-milestone (known future blocker, see finding 10); don't attempt it now.
+**10-asset rotational Donchian ensemble milestone (finding 10 scope,
+finding 11 execution) is DONE from the code side** — universe locked,
+signal/exit/portfolio logic built and tested, backtest run, raw numbers
+reported. Blocked on a planning-chat adopt/reject decision before any
+further strategy-family work starts. The correlation/open-risk-budget
+guardrail redesign (spec §4.3, 2-asset → 10-asset) remains explicitly OUT
+of scope regardless of that decision's outcome — do not attempt it
+without a separate, current instruction.
 
 ### Blocked/pending, unrelated to backtest
 
@@ -378,10 +499,8 @@ needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
 blocked/pending — not started, and explicitly not part of the current
 milestone.
 
-**Next milestone:** 10-asset rotational Donchian ensemble (finding 10,
-in progress) — multi-symbol ingestion and rotational position-slot
-management (4-position cap) are the two infrastructure pieces needed
-first; see finding 10 and "Not yet decided" above for full scope.
+**Next milestone:** not yet chosen — blocked on the planning chat's
+adopt/reject verdict for finding 11's rotational Donchian ensemble.
 
 ## Hard rules — never do these
 
