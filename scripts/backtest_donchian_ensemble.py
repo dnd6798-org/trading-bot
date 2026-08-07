@@ -1,76 +1,88 @@
 """
-EXPERIMENT — 10-asset rotational Donchian ensemble (CLAUDE.md finding 10
-milestone). Pivots off the closed/inconclusive single-/dual-asset findings
+EXPERIMENT — redesigned 10-asset rotational Donchian ensemble (CLAUDE.md
+finding 12, a bounded one-time retry of finding 11 after its formal
+rejection). Pivots off the closed/inconclusive single-/dual-asset findings
 (5, 7, 8, 9) after finding 10 identified a fixed 1-2 asset universe as the
 common structural gap: crypto trend-following research (Zarattini/Pagani/
 Barbon SFI paper; Man Group) points at portfolio breadth as the mechanism
 that clears the transaction-cost hurdle findings 1/3/5/7/8 kept hitting.
+Finding 11 executed that pivot but was rejected on three diagnosed
+construction flaws (redundant 20d/55d OR-entry, over-tight 4-slot cap,
+thin-history ADA/PEPE) — finding 12 fixes those three directly, same
+strategy family and same portfolio-breadth thesis, not a new signal idea.
 
-Universe (locked this session via scripts/select_universe.py — BTC/USD +
-ETH/USD by default, plus the 8 most liquid non-stablecoin USD pairs on
-Alpaca's own crypto venue by trailing-30-day dollar volume, with PAXG/USD
-hand-excluded as a gold-tracking token rather than a crypto-beta asset,
-per explicit instruction):
+Universe (finding 11's list, ADA/USD and PEPE/USD dropped for
+insufficient history and backfilled with the next-most-liquid full-history
+candidates from scripts/select_universe.py's ranked output — see finding
+12's backfill selection: SHIB/USD, CRV/USD, BONK/USD, and WIF/USD all
+ranked above DOGE/USD and BCH/USD by trailing-30-day dollar volume but
+only have 2023-2026 or 2026-only history (1084-1241 and 169-172 daily
+candles respectively) against BTC/ETH's ~2040-candle full 2021-2026 depth
+— DOGE/USD and BCH/USD are the highest-ranked candidates that also clear
+full-history depth (2041 and 2037 daily candles, both from 2021-01-03),
+confirmed by direct fetch before locking in, not assumed from the
+liquidity ranking alone):
     BTC/USD, ETH/USD, XRP/USD, SOL/USD, UNI/USD, AVAX/USD, AAVE/USD,
-    LINK/USD, ADA/USD, PEPE/USD
+    LINK/USD, DOGE/USD, BCH/USD
 
 Signal — fixed rule, NOT a parameter grid this round:
-  - Long entry: daily close breaks above the 20-day OR the 55-day causal
-    Donchian channel high (compute_donchian_levels(), reused unchanged
-    from backtest_donchian.py/finding 6-7 — window [i-N, i), current day
-    excluded).
-  - Exit: ATR trailing stop fixed at 2.5x ATR(14) — finding 7's middle
-    grid value, Chandelier-style, same formula as
+  - Long entry: daily close breaks above the single 55-day causal Donchian
+    channel high (compute_donchian_levels(), reused unchanged from
+    backtest_donchian.py/finding 6-7 — window [i-N, i), current day
+    excluded). Finding 11's 20-day leg is removed entirely, not just
+    unused — finding 11's MATH NOTE proved "close > upper_20 OR close >
+    upper_55" is mathematically IDENTICAL to "close > upper_20" at every
+    index (a causal 55-day window always contains the most recent 20 days,
+    so upper_55[i] >= upper_20[i] once both are defined), meaning the
+    20-day leg was the one silently doing all the work the whole time,
+    not the 55-day leg as the fixed-rule spec intended. Finding 12 keeps
+    the 55-day channel (the one the design was supposed to test) and
+    drops the 20-day leg, rather than the reverse.
+  - Exit: ATR trailing stop fixed at 2.5x ATR(14) — unchanged from finding
+    11/finding 7's middle grid value, Chandelier-style, same formula as
     backtest_donchian.py's simulate_donchian() (ratchets in the trade's
     favor only, using the PRIOR day's extreme-close/ATR so today's
     trigger check has no lookahead).
   - Long-only (Alpaca doesn't support crypto shorting — same reasoning as
     finding 7's --long-only flag).
 
-MATH NOTE, flagged rather than silently resolved: because a 55-day causal
-window always contains the most recent 20 days as a subset, upper_55[i]
->= upper_20[i] at every index once both are defined (and upper_55[i] is
-None, i.e. the leg contributes nothing, while i < 55). This means "close
-> upper_20 OR close > upper_55" is mathematically IDENTICAL to "close >
-upper_20" for every index, over the whole dataset — the 55-day leg of the
-spec as given never fires an entry the 20-day leg wouldn't have already
-fired. Implemented literally (both bands computed, OR'd) rather than
-silently simplified to a 20-day-only signal, since the task specified
-both explicitly and the redundancy may not have been the intent — flagged
-here and in the run's printed output, not decided unilaterally.
-
-Portfolio construction (the two new infrastructure pieces this milestone
-needed, per finding 10 — NOT the live risk-budget guardrail, which is
-explicitly out of scope):
-  - Rotational, capped at MAX_CONCURRENT_POSITIONS (4) concurrent open
-    positions across the whole 10-symbol universe, shared capital pool
-    (DEFAULT_CAPITAL, same $100 as the account this bot actually runs —
-    a deliberate difference from findings 6-9, which backtested each
-    symbol independently against its own full $100; here the 4-slot cap
-    IS the cross-symbol risk control, replacing the correlation/open-risk
-    guardrail that's explicitly deferred).
-  - New signals that fire while all 4 slots are occupied are SKIPPED and
+Portfolio construction (finding 11's infrastructure, two of its three
+diagnosed parameters changed this round — NOT the live risk-budget
+guardrail, which remains explicitly out of scope):
+  - Rotational, capped at MAX_CONCURRENT_POSITIONS (8, widened from
+    finding 11's 4 — diagnosed as binding too hard: 169 of 337 signals
+    were skipped for lack of a slot) concurrent open positions across the
+    whole 10-symbol universe, shared capital pool (DEFAULT_CAPITAL, same
+    $100 as the account this bot actually runs — a deliberate difference
+    from findings 6-9, which backtested each symbol independently against
+    its own full $100; here the slot cap IS the cross-symbol risk
+    control, replacing the correlation/open-risk guardrail that's
+    explicitly deferred).
+  - New signals that fire while all 8 slots are occupied are SKIPPED and
     logged, not queued — a skipped signal is gone, it does not enter
-    later when a slot frees up, per instruction.
+    later when a slot frees up, per instruction, unchanged from finding 11.
   - Position sizing: finding 7's existing per-trade risk-based formula
     (risk_amount = current portfolio equity * 1%, position_size =
-    risk_amount / (2.5 * entry ATR), capped at 25% of current portfolio
-    equity notional), applied per-asset off the SHARED equity value at
-    the moment each position opens. No portfolio-level vol-targeted
-    sizing this round, per instruction. Judgment call, flagged: this
-    does NOT enforce a hard "total deployed notional <= 100% of equity"
-    check across concurrently open positions — each position is sized
-    and capped independently off current equity, same simplification
-    findings 1-9 already made (spec §4.3's real cross-symbol risk budget
-    isn't implemented yet regardless). With a 25% per-position cap and a
-    4-slot maximum, worst-case simultaneous exposure is bounded at ~100%
-    of equity, which is a reasonable backtest placeholder, not a load-
-    bearing guarantee.
+    risk_amount / (2.5 * entry ATR), capped at SLOT_MAX_POSITION_PCT of
+    current portfolio equity notional — 12.5%, halved from finding 11's
+    25% so that 8 slots x 12.5%/slot keeps the same ~100% max gross
+    exposure finding 11's 4 slots x 25%/slot had), applied per-asset off
+    the SHARED equity value at the moment each position opens. No
+    portfolio-level vol-targeted sizing this round, per instruction.
+    Judgment call, flagged, unchanged from finding 11: this does NOT
+    enforce a hard "total deployed notional <= 100% of equity" check
+    across concurrently open positions — each position is sized and
+    capped independently off current equity, same simplification findings
+    1-9 already made (spec §4.3's real cross-symbol risk budget isn't
+    implemented yet regardless). With a 12.5% per-position cap and an
+    8-slot maximum, worst-case simultaneous exposure is still bounded at
+    ~100% of equity, same as finding 11 — a reasonable backtest
+    placeholder, not a load-bearing guarantee.
   - Slot-filling priority when more signals fire on the same day than
     slots are available: universe list order (BTC, ETH, then the 8
-    ranked-liquidity symbols in that order) — an arbitrary but
+    ranked-liquidity/backfill symbols in that order) — an arbitrary but
     deterministic tie-break, flagged as a judgment call, not derived
-    from signal strength or any other ranking.
+    from signal strength or any other ranking, unchanged from finding 11.
   - Exits are processed before entries within each simulated day, so a
     slot vacated by an exit can be reused by a new entry the same day.
 
@@ -105,7 +117,7 @@ compute_fold_boundaries() (backtest_walkforward.py).
 
 Usage:
     python scripts/backtest_donchian_ensemble.py
-    python scripts/backtest_donchian_ensemble.py --max-positions 4 --atr-multiplier 2.5
+    python scripts/backtest_donchian_ensemble.py --max-positions 8 --atr-multiplier 2.5
 """
 import argparse
 import sys
@@ -126,21 +138,23 @@ from scripts.backtest import (
     DEFAULT_TAKER_FEE_PCT,
     DEFAULT_SLIPPAGE_BPS,
     DEFAULT_RISK_PER_TRADE_PCT,
-    DEFAULT_MAX_POSITION_PCT,
 )
 from scripts.backtest_donchian import compute_donchian_levels
 from scripts.backtest_walkforward import compute_fold_boundaries, DEFAULT_NUM_FOLDS, DEFAULT_INITIAL_TRAIN_DAYS
 
-# Locked this session (scripts/select_universe.py) — BTC/ETH by default +
-# 8 most-liquid non-stablecoin USD pairs on Alpaca's own crypto venue,
-# PAXG/USD hand-excluded (gold-tracking, not crypto-beta) per instruction.
+# Finding 12: finding 11's universe with ADA/USD and PEPE/USD (insufficient
+# history — 175 and 554 daily candles) dropped and backfilled with the
+# next-most-liquid full-history candidates from scripts/select_universe.py's
+# ranked output — see module docstring for the SHIB/CRV/BONK/WIF candidates
+# that ranked higher but failed the history-depth check.
 UNIVERSE = [
     "BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "UNI/USD",
-    "AVAX/USD", "AAVE/USD", "LINK/USD", "ADA/USD", "PEPE/USD",
+    "AVAX/USD", "AAVE/USD", "LINK/USD", "DOGE/USD", "BCH/USD",
 ]
-CHANNEL_LENGTHS = (20, 55)   # fixed dual-channel entry, not swept
-ATR_MULTIPLIER = 2.5         # fixed — finding 7's middle grid value, not swept
-MAX_CONCURRENT_POSITIONS = 4
+CHANNEL_LENGTH = 55           # finding 12: single channel, 20d leg removed (see docstring)
+ATR_MULTIPLIER = 2.5          # fixed — finding 7's middle grid value, not swept
+MAX_CONCURRENT_POSITIONS = 8  # finding 12: widened from finding 11's 4
+SLOT_MAX_POSITION_PCT = 12.5  # finding 12: halved from finding 11's 25% so 8 x 12.5% = 100% max gross exposure, unchanged
 
 
 @dataclass
@@ -159,24 +173,20 @@ class EnsembleTrade:
     r_multiple: float
 
 
-def compute_dual_channel_long_entry_indices(candles):
+def compute_channel_long_entry_indices(candles):
     """
-    Long entry indices where close breaks above the 20-day OR 55-day
-    causal Donchian high. See module docstring's MATH NOTE — this is
-    provably identical to "close > upper_20" alone, implemented literally
-    anyway per the specified rule.
+    Long entry indices where close breaks above the single 55-day causal
+    Donchian high. Finding 12: replaces finding 11's 20d/55d OR-combination
+    (proven redundant — see module docstring) with this single channel.
     """
-    upper_20, _ = compute_donchian_levels(candles, CHANNEL_LENGTHS[0])
-    upper_55, _ = compute_donchian_levels(candles, CHANNEL_LENGTHS[1])
+    upper, _ = compute_donchian_levels(candles, CHANNEL_LENGTH)
     atr = compute_atr(candles, period=ATR_PERIOD)
 
     entry_indices = set()
     for i in range(len(candles)):
         if atr[i] is None:
             continue
-        broke_20 = upper_20[i] is not None and candles[i].close > upper_20[i]
-        broke_55 = upper_55[i] is not None and candles[i].close > upper_55[i]
-        if broke_20 or broke_55:
+        if upper[i] is not None and candles[i].close > upper[i]:
             entry_indices.add(i)
     return entry_indices, atr
 
@@ -194,7 +204,7 @@ def build_symbol_series(symbol, start, end):
     if not hourly:
         return None
     candles = resample_candles(hourly, 24)
-    entry_indices, atr = compute_dual_channel_long_entry_indices(candles)
+    entry_indices, atr = compute_channel_long_entry_indices(candles)
     date_index = {c.timestamp[:10]: i for i, c in enumerate(candles)}
     return {
         "symbol": symbol,
@@ -212,7 +222,7 @@ def simulate_rotational_ensemble(
     atr_multiplier=ATR_MULTIPLIER,
     capital=DEFAULT_CAPITAL,
     risk_pct=DEFAULT_RISK_PER_TRADE_PCT,
-    max_position_pct=DEFAULT_MAX_POSITION_PCT,
+    max_position_pct=SLOT_MAX_POSITION_PCT,
     fee_pct=DEFAULT_TAKER_FEE_PCT,
     slippage_bps=DEFAULT_SLIPPAGE_BPS,
 ):
@@ -374,7 +384,7 @@ def main():
     end = datetime.now(timezone.utc) - timedelta(minutes=20)  # crypto bars need a short settle delay
     start = datetime(2021, 1, 3, tzinfo=timezone.utc)  # same earliest-history anchor as findings 5-9
 
-    print(f"=== 10-asset rotational Donchian ensemble: fetching {len(args.symbols)} symbols ===")
+    print(f"=== 10-asset rotational Donchian ensemble (finding 12 retry): fetching {len(args.symbols)} symbols ===")
     symbol_data = {}
     for symbol in args.symbols:
         series = build_symbol_series(symbol, start, end)

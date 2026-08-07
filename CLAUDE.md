@@ -26,19 +26,16 @@ until the new milestone lands.
 
 ## Current status
 
-**Milestone: finding 11's 10-asset rotational Donchian ensemble was
-formally REJECTED** (pooled net-of-fees -11.11%, 2/5 folds net-positive,
-not close on either leg of the adopt bar). Root cause diagnosed in the
-planning chat: a redundant 20d/55d OR-entry that silently ran as a bare
-20-day system, a 4-slot cap that bound harder than the reference design's
-own limits, and two universe symbols (ADA/PEPE) with too little history
-to participate. **Finding 12, IN PROGRESS: a bounded, one-time redesign
-retry** — single 55-day channel, 8-slot cap at 12.5%/slot, ADA/PEPE
-dropped and backfilled with two full-history replacements. If finding 12
-also fails the bar, no further breadth iteration is planned without a
-fresh instruction — next step would be a broader planning-chat
-conversation, not another variant. See finding 11's UPDATE and finding 12
-below for full detail.
+**Milestone: finding 12's redesigned rotational Donchian ensemble retry has
+been EXECUTED** (single 55-day channel, 8-slot cap at 12.5%/slot, ADA/PEPE
+dropped and backfilled with DOGE/USD and BCH/USD). Raw result: pooled
+net-of-fees -6.72%, 2/5 folds net-positive — same fold-count as finding 11
+but a smaller pooled loss. **No adopt/reject verdict rendered — raw
+numbers only, per instruction; decision deferred to the planning chat**,
+same convention as finding 11. Per the finding-12 "IMPORTANT CONSTRAINT"
+below, this was a bounded, one-time retry — do not start a finding 13
+breadth variant without a fresh, explicit instruction, regardless of what
+the planning chat decides. See finding 12 below for full detail.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -431,29 +428,89 @@ and `data_ingestion.py`'s live fetch are untouched.
     (3) ADA (175 candles) and PEPE (554 candles) had too little history to
     meaningfully participate across a 5-fold window spanning 2022-2026.
 
-12. **NEW MILESTONE, IN PROGRESS: redesigned rotational Donchian ensemble
-    retry**, addressing finding 11's three diagnosed flaws directly, not a
-    fresh strategy family:
-    (1) drop the fake OR-ensemble in favor of a single clean 55-day
-        Donchian channel (no 20-day leg at all);
-    (2) widen the rotational cap from 4 to 8 slots at 12.5% of equity per
-        slot (same 100% max gross exposure as finding 11's 4×25%);
-    (3) drop ADA/USD and PEPE/USD for insufficient history and backfill
-        with the next two most liquid full-history candidates from
-        finding 11's ranked universe list (`scripts/select_universe.py`
-        output) — exact symbols to be confirmed against actual fetched
-        history depth before locking in, not assumed from the volume
-        ranking alone.
-    Volatility-based position sizing remains explicitly deferred — not
-    part of this round.
+12. **Redesigned rotational Donchian ensemble retry (finding 11's
+    milestone, executed)**, addressing finding 11's three diagnosed flaws
+    directly, not a fresh strategy family.
 
-    **IMPORTANT CONSTRAINT, binding regardless of finding 12's outcome:**
-    this is a bounded, ONE-TIME retry, not an open-ended tuning loop. If
-    finding 12 also fails the pre-committed portfolio-level bar, no third
-    breadth iteration is planned — the next step is a broader strategic
-    conversation in the planning chat, not another variant. Do not
-    propose or build a finding 13 breadth variant without a fresh,
-    explicit instruction to do so.
+    **Backfill symbol selection.** ADA/USD and PEPE/USD dropped
+    (insufficient history — 175 and 554 daily candles). Reused
+    `scripts/select_universe.py`'s ranked liquidity output, re-run this
+    session (`--top-n 15`) to see candidates beyond the original top 8:
+    the next four by trailing-30d dollar volume after LINK/USD were
+    PAXG/USD ($4,743/day — stays excluded, gold-tracking per finding 11's
+    standing judgment call), PEPE/USD and ADA/USD (being dropped), then
+    SHIB/USD ($2,602/day), CRV/USD ($2,436/day), BONK/USD ($2,370/day),
+    DOGE/USD ($2,294/day), WIF/USD ($1,977/day), BCH/USD ($1,792/day).
+    Checked actual fetched history depth (2021-01-03 → present) for all
+    six before picking, not assumed from the ranking alone: SHIB 1,241
+    daily candles (from 2023-03-14), CRV 1,084 (from 2023-08-18), BONK 172
+    (from 2026-02-16), DOGE 2,041 (from 2021-01-03), WIF 169 (from
+    2026-02-19), BCH 2,037 (from 2021-01-03). SHIB/CRV rank higher on
+    liquidity but only cover ~2-3 of the 5.6-year dataset (roughly
+    half-to-60% of BTC/ETH's ~2,040-candle depth) — not "full or
+    near-full" per the instruction's bar. BONK/WIF are even thinner than
+    PEPE was. **DOGE/USD and BCH/USD are the highest-ranked candidates
+    that also clear full-history depth** (2,041 and 2,037 candles,
+    matching BTC/ETH's start date) — locked in as the two backfills.
+    **Final universe (10 symbols):** BTC/USD, ETH/USD, XRP/USD, SOL/USD,
+    UNI/USD, AVAX/USD, AAVE/USD, LINK/USD, DOGE/USD, BCH/USD.
+
+    **Implementation** (`scripts/backtest_donchian_ensemble.py`, same file
+    as finding 11, not a new script — repair, not a rebuild):
+    (1) `compute_dual_channel_long_entry_indices()` replaced with
+        `compute_channel_long_entry_indices()` — single 55-day
+        `compute_donchian_levels()` call, 20-day band removed from the
+        entry logic entirely (not left in as dead code). Exit unchanged:
+        2.5x ATR trailing stop.
+    (2) `MAX_CONCURRENT_POSITIONS` raised 4 → 8; new `SLOT_MAX_POSITION_PCT`
+        (12.5%) replaces the import of `backtest.py`'s
+        `DEFAULT_MAX_POSITION_PCT` (25%) as `simulate_rotational_ensemble()`'s
+        sizing-cap default — 8 × 12.5% keeps the same ~100% max gross
+        exposure finding 11's 4 × 25% had. Same skip-and-log behavior when
+        all 8 slots are full, same per-trade risk-based sizing formula
+        (finding 7's, unresized inputs otherwise), same exits-before-entries
+        ordering, same universe-list-order slot-priority tie-break, same
+        exit-timestamp-keyed fold-slicing — none of that infrastructure
+        needed to change. 2 tests updated in
+        `tests/test_backtest_donchian_ensemble.py` (function rename +
+        single-channel behavior — the old dual-channel-redundancy test no
+        longer applies once the 20-day leg is removed); full suite (77
+        tests) still passing.
+
+    **Result — portfolio-level, 5-fold anchored walk-forward
+    (2022-01-03 → 2026-08-06 pooled test window, same boundaries as
+    findings 5-11):** pooled net-of-fees **-6.72%**, pooled gross-of-fees
+    -1.65%, **2/5 folds net-positive** (fold 3 +3.06%, fold 4 +11.57%;
+    fold 1 -7.75%, fold 2 -5.50%, fold 5 -6.91%), 123 pooled trades (154
+    total trades over the full history), max drawdown 15.27%. Only 11
+    signals were skipped for no free slot over the full history (all 11
+    within the pooled test window, vs. finding 11's 169) — the wider
+    8-slot cap essentially stopped binding, confirming finding 11's
+    diagnosis on that flaw specifically.
+
+    Per-symbol diagnostics (pooled, informational only, not part of the
+    adopt/reject bar): net-positive contributors were XRP/USD (+$5.78, 6
+    trades), ETH/USD (+$5.67, 12 trades), AVAX/USD (+$3.36, 9 trades),
+    BTC/USD (+$2.69, 15 trades), DOGE/USD (+$0.93, 14 trades); net-negative
+    were UNI/USD (-$4.47, 14 trades), LINK/USD (-$4.61, 15 trades), SOL/USD
+    (-$5.13, 11 trades), AAVE/USD (-$5.47, 14 trades), BCH/USD (-$6.30, 13
+    trades) — one of the two backfill symbols (BCH/USD) landed as the
+    single worst pooled contributor; the other (DOGE/USD) was mildly
+    positive. Skip counts concentrated on AVAX/USD (6), AAVE/USD (4),
+    XRP/USD (1) — far lower magnitude than finding 11's skip counts across
+    the board.
+
+    **No adopt/reject verdict rendered — raw numbers only, per
+    instruction; decision deferred to the planning chat**, same convention
+    as findings 6, 8, 9, and 11.
+
+    **IMPORTANT CONSTRAINT, still binding regardless of the planning
+    chat's verdict on this result:** this was a bounded, ONE-TIME retry,
+    not an open-ended tuning loop. Do not propose or build a finding 13
+    breadth variant (a third slot-cap/entry-window/universe tweak) without
+    a fresh, explicit instruction to do so — if this result is also
+    rejected, the next step is a broader strategic conversation in the
+    planning chat, not another variant.
 
 ### Code state
 
@@ -499,10 +556,12 @@ for the judgment calls made), `scripts/select_universe.py` (one-off
 universe-liquidity ranking against live Alpaca asset/volume data, not
 meant to be maintained — see finding 11), `scripts/
 backtest_donchian_ensemble.py` (10-asset rotational Donchian ensemble —
-new `EnsembleTrade` dataclass, `simulate_rotational_ensemble()` day-by-day
+`EnsembleTrade` dataclass, `simulate_rotational_ensemble()` day-by-day
 portfolio loop, `slice_ensemble_trades_by_folds()` exit-timestamp-keyed
-fold slicer; see finding 11 and the module docstring for the full set of
-judgment calls made), `scripts/
+fold slicer; built for finding 11, repaired in place for finding 12's
+retry — single-channel `compute_channel_long_entry_indices()`, 8-slot/
+12.5% sizing constants, backfilled `UNIVERSE` list — see findings 11-12
+and the module docstring for the full set of judgment calls made), `scripts/
 sanity_check_daily_signal.py` (independent one-off check, not meant to be
 maintained). No `.env` or locked spec parameters touched. Nothing merged
 or promoted — still `paper` branch working state.
@@ -530,29 +589,34 @@ coins) as the mechanism that clears the transaction-cost hurdle. Finding
 construction flaws (redundant OR-entry, over-tight slot cap, thin-history
 symbols), not a rejection of the portfolio-breadth thesis itself.
 
-**Finding 12 (in progress) is a bounded, one-time retry** fixing those
-three flaws directly: single 55-day Donchian channel, 8-slot cap at
-12.5%/slot, ADA/PEPE dropped and backfilled from the ranked universe
-list. **If finding 12 also fails the adopt bar, no third breadth
-iteration is planned** — treat that as a hard stop on this line of
-attack absent a fresh, explicit instruction; the next step would be a
-broader planning-chat conversation about strategy direction, not another
+**Finding 12 (executed, bounded one-time retry)** fixed those three flaws
+directly: single 55-day Donchian channel, 8-slot cap at 12.5%/slot,
+ADA/PEPE dropped and backfilled with DOGE/USD and BCH/USD. Raw result:
+pooled net-of-fees -6.72%, pooled gross-of-fees -1.65%, 2/5 folds
+net-positive — an improvement over finding 11's -11.11% but still 2/5 on
+the folds-consistency leg, same failure mode as finding 11. **No
+adopt/reject verdict rendered — raw numbers only, decision deferred to
+the planning chat.** Per finding 12's binding "IMPORTANT CONSTRAINT," this
+was the one-time retry — **no third breadth iteration (finding 13) is to
+be started without a fresh, explicit instruction**, regardless of what the
+planning chat decides on this result; the next step would be a broader
+planning-chat conversation about strategy direction, not another
 universe/cap/entry variant.
 
 ### Pre-coding checklist state
 
 **Finding 11 (10-asset rotational Donchian ensemble, 4-slot/25%, 20d-OR-
 55d entry) is CLOSED — rejected.** **Finding 12 (redesigned retry:
-55d-only entry, 8-slot/12.5% cap, ADA/PEPE backfilled) is the active
-milestone, IN PROGRESS** — universe backfill candidates need confirming
-against actual fetched history depth before locking in; signal/portfolio
-code changes not yet made. This is understood to be a bounded, one-time
-retry per the "IMPORTANT CONSTRAINT" in finding 12 above — do not spin up
-a further breadth variant if finding 12 also fails without a fresh
-instruction to do so. The correlation/open-risk-budget guardrail redesign
-(spec §4.3, 2-asset → 10-asset) remains explicitly OUT of scope
-regardless of finding 12's outcome — do not attempt it without a
-separate, current instruction.
+55d-only entry, 8-slot/12.5% cap, ADA/PEPE backfilled with DOGE/BCH) is
+EXECUTED** — pooled net-of-fees -6.72%, 2/5 folds net-positive, no
+adopt/reject verdict rendered (raw numbers only, per instruction; deferred
+to the planning chat). This was a bounded, one-time retry per the
+"IMPORTANT CONSTRAINT" in finding 12 above — **do not spin up a further
+breadth variant (finding 13) without a fresh, explicit instruction to do
+so**, regardless of the planning chat's verdict on this result. The
+correlation/open-risk-budget guardrail redesign (spec §4.3, 2-asset →
+10-asset) remains explicitly OUT of scope regardless of finding 12's
+outcome — do not attempt it without a separate, current instruction.
 
 ### Blocked/pending, unrelated to backtest
 
@@ -564,10 +628,13 @@ needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
 blocked/pending — not started, and explicitly not part of the current
 milestone.
 
-**Next milestone:** finding 12's redesigned rotational Donchian ensemble
-retry (in progress) — see finding 12 and "Not yet decided" above. Bounded
-to one attempt; no further breadth iteration planned if it also fails,
-absent a fresh instruction.
+**Next milestone:** none currently active. Finding 12's redesigned
+rotational Donchian ensemble retry (executed) is awaiting an adopt/reject
+verdict from the planning chat — see finding 12 and "Not yet decided"
+above. Per finding 12's binding constraint, do not start a finding 13
+breadth variant without a fresh, explicit instruction; the next backtest
+milestone should come from the planning chat's direction, not be
+self-initiated.
 
 ## Hard rules — never do these
 

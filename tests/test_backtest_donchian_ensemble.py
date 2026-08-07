@@ -1,13 +1,13 @@
 """
-Verifies scripts/backtest_donchian_ensemble.py's dual-channel entry signal,
-the rotational portfolio simulation loop (slot cap, same-day slot reuse,
-shared-equity position sizing, EOL exit per symbol), and the exit-
-timestamp-based fold-slicing — against deterministic synthetic daily
-candles and hand-built symbol_data dicts, no network calls.
+Verifies scripts/backtest_donchian_ensemble.py's finding-12 single-channel
+55-day entry signal, the rotational portfolio simulation loop (8-slot cap,
+same-day slot reuse, shared-equity position sizing, EOL exit per symbol),
+and the exit-timestamp-based fold-slicing — against deterministic
+synthetic daily candles and hand-built symbol_data dicts, no network calls.
 """
 from src.data_ingestion import Candle
 from scripts.backtest_donchian_ensemble import (
-    compute_dual_channel_long_entry_indices,
+    compute_channel_long_entry_indices,
     simulate_rotational_ensemble,
     slice_ensemble_trades_by_folds,
     EnsembleTrade,
@@ -37,43 +37,31 @@ def _make_series(symbol, candles, atr, entry_indices):
     }
 
 
-# --- compute_dual_channel_long_entry_indices --------------------------------
+# --- compute_channel_long_entry_indices --------------------------------
 
-def test_dual_channel_entry_fires_on_close_above_20d_band_before_55d_window_exists():
-    dates = [f"2021-01-{i + 1:02d}" for i in range(25)]
+def test_channel_entry_does_not_fire_before_55d_window_is_seeded():
+    # Only 20 seasoning days — the 55-day band isn't defined yet, so even
+    # a sharp breakout candle must not register as an entry.
+    dates = [f"2021-01-{i + 1:02d}" for i in range(21)]
     candles = [_flat_candle("BTC/USD", dates[i]) for i in range(20)]
-    candles.append(_candle("BTC/USD", dates[20], close=125, high=130, low=120))  # breaks the flat 105 20d band
-    candles += [_flat_candle("BTC/USD", dates[i], close=125) for i in range(21, 25)]
+    candles.append(_candle("BTC/USD", dates[20], close=125, high=130, low=120))
 
-    entry_indices, atr = compute_dual_channel_long_entry_indices(candles)
+    entry_indices, atr = compute_channel_long_entry_indices(candles)
 
-    assert 20 in entry_indices
-    assert atr[20] is not None
+    assert 20 not in entry_indices
 
 
-def test_dual_channel_entry_55d_leg_never_adds_signals_beyond_20d_leg():
-    # 60 seasoning days (enough for both the 20d and 55d bands to be fully
-    # defined), then a single breakout day. Per the module's MATH NOTE,
-    # "close > upper_20 OR close > upper_55" should be provably identical
-    # to "close > upper_20" once both bands are defined, since the 55d
-    # causal window always contains the 20d window as its most recent
-    # slice (upper_55 >= upper_20 always) — this locks that claim in.
-    from scripts.backtest_donchian import compute_donchian_levels
+def test_channel_entry_fires_on_close_above_55d_band_once_window_is_seeded():
+    # 55 seasoning days (enough for the 55-day band to be fully defined),
+    # then a single breakout day.
+    dates = [f"d{i}" for i in range(56)]
+    candles = [_flat_candle("BTC/USD", dates[i]) for i in range(55)]
+    candles.append(_candle("BTC/USD", dates[55], close=125, high=130, low=120))
 
-    dates = [f"d{i}" for i in range(61)]
-    candles = [_flat_candle("BTC/USD", dates[i]) for i in range(60)]
-    candles.append(_candle("BTC/USD", dates[60], close=125, high=130, low=120))
+    entry_indices, atr = compute_channel_long_entry_indices(candles)
 
-    entry_indices, atr = compute_dual_channel_long_entry_indices(candles)
-    upper_20, _ = compute_donchian_levels(candles, 20)
-    upper_55, _ = compute_donchian_levels(candles, 55)
-
-    plain_20d_indices = {
-        i for i in range(len(candles))
-        if upper_20[i] is not None and atr[i] is not None and candles[i].close > upper_20[i]
-    }
-    assert entry_indices == plain_20d_indices
-    assert upper_55[60] >= upper_20[60]  # the containment fact the equivalence rests on
+    assert 55 in entry_indices
+    assert atr[55] is not None
 
 
 # --- simulate_rotational_ensemble: slot cap & skip logging ------------------
