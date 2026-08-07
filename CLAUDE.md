@@ -26,12 +26,19 @@ until the new milestone lands.
 
 ## Current status
 
-**Milestone: 10-asset rotational Donchian ensemble (finding 10, spec §2
-scope reopened) — backtest COMPLETE (finding 11), raw numbers reported,
-no adopt/reject verdict rendered.** Decision deferred to the planning
-chat, same convention as findings 6, 8, and 9. Pivots off the closed/
-inconclusive single-/dual-asset strategy findings below (5, 7, 8, 9) —
-see "Not yet decided" for the full rationale and scope.
+**Milestone: finding 11's 10-asset rotational Donchian ensemble was
+formally REJECTED** (pooled net-of-fees -11.11%, 2/5 folds net-positive,
+not close on either leg of the adopt bar). Root cause diagnosed in the
+planning chat: a redundant 20d/55d OR-entry that silently ran as a bare
+20-day system, a 4-slot cap that bound harder than the reference design's
+own limits, and two universe symbols (ADA/PEPE) with too little history
+to participate. **Finding 12, IN PROGRESS: a bounded, one-time redesign
+retry** — single 55-day channel, 8-slot cap at 12.5%/slot, ADA/PEPE
+dropped and backfilled with two full-history replacements. If finding 12
+also fails the bar, no further breadth iteration is planned without a
+fresh instruction — next step would be a broader planning-chat
+conversation, not another variant. See finding 11's UPDATE and finding 12
+below for full detail.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -402,6 +409,52 @@ and `data_ingestion.py`'s live fetch are untouched.
     (`tests/test_backtest_donchian_ensemble.py`), full suite (77 tests)
     passing.
 
+    **UPDATE (separate planning chat, post-session): formally REJECTED.**
+    Pooled net-of-fees -11.11%, pooled gross -5.23%, 2/5 folds
+    net-positive against a pre-committed bar of positive pooled net-of-fees
+    AND ≥4/5 folds positive — not a close call on either leg.
+
+    **Root-cause diagnosis (completed in the planning chat by researching
+    the actual mechanics of the reference design — the Turtle System
+    1/System 2 structure and the SFI ensemble paper — not by re-examining
+    this result after the fact):** three construction flaws.
+    (1) The 20d/55d OR-combination is mathematically redundant — a 55-day
+    Donchian high is always ≥ the 20-day high on the same series, so the
+    55-day leg could never fire uniquely under OR logic (this repo's own
+    MATH NOTE above already proved this; the planning-chat review
+    confirmed it's also the actual root cause, not just a curiosity). The
+    test silently ran as a bare 20-day system the entire time.
+    (2) The 4-slot cap across 10 assets was tighter than the reference
+    design's own per-market unit limits applied portfolio-wide, and the
+    diagnostics above confirm it bound hard — 169 of 337 total signals
+    were skipped for lack of a slot.
+    (3) ADA (175 candles) and PEPE (554 candles) had too little history to
+    meaningfully participate across a 5-fold window spanning 2022-2026.
+
+12. **NEW MILESTONE, IN PROGRESS: redesigned rotational Donchian ensemble
+    retry**, addressing finding 11's three diagnosed flaws directly, not a
+    fresh strategy family:
+    (1) drop the fake OR-ensemble in favor of a single clean 55-day
+        Donchian channel (no 20-day leg at all);
+    (2) widen the rotational cap from 4 to 8 slots at 12.5% of equity per
+        slot (same 100% max gross exposure as finding 11's 4×25%);
+    (3) drop ADA/USD and PEPE/USD for insufficient history and backfill
+        with the next two most liquid full-history candidates from
+        finding 11's ranked universe list (`scripts/select_universe.py`
+        output) — exact symbols to be confirmed against actual fetched
+        history depth before locking in, not assumed from the volume
+        ranking alone.
+    Volatility-based position sizing remains explicitly deferred — not
+    part of this round.
+
+    **IMPORTANT CONSTRAINT, binding regardless of finding 12's outcome:**
+    this is a bounded, ONE-TIME retry, not an open-ended tuning loop. If
+    finding 12 also fails the pre-committed portfolio-level bar, no third
+    breadth iteration is planned — the next step is a broader strategic
+    conversation in the planning chat, not another variant. Do not
+    propose or build a finding 13 breadth variant without a fresh,
+    explicit instruction to do so.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -472,22 +525,34 @@ across all four as a fixed 1-2 asset universe, not necessarily a bad
 indicator each time — crypto trend-following research (Zarattini/Pagani/
 Barbon SFI paper; Man Group) points at portfolio breadth (10-15 liquid
 coins) as the mechanism that clears the transaction-cost hurdle. Finding
-11 executed that pivot: 10-asset universe locked, rotational Donchian
-ensemble backtested, pooled net-of-fees -11.11%, 2/5 folds net-positive.
-**No adopt/reject verdict rendered — decision deferred to the planning
-chat**, same as findings 6, 8, 9. Until that verdict lands, there is no
-next strategy-family pivot to plan around.
+11 executed that pivot and was **formally REJECTED** (pooled net-of-fees
+-11.11%, 2/5 folds net-positive) — root cause diagnosed as three
+construction flaws (redundant OR-entry, over-tight slot cap, thin-history
+symbols), not a rejection of the portfolio-breadth thesis itself.
+
+**Finding 12 (in progress) is a bounded, one-time retry** fixing those
+three flaws directly: single 55-day Donchian channel, 8-slot cap at
+12.5%/slot, ADA/PEPE dropped and backfilled from the ranked universe
+list. **If finding 12 also fails the adopt bar, no third breadth
+iteration is planned** — treat that as a hard stop on this line of
+attack absent a fresh, explicit instruction; the next step would be a
+broader planning-chat conversation about strategy direction, not another
+universe/cap/entry variant.
 
 ### Pre-coding checklist state
 
-**10-asset rotational Donchian ensemble milestone (finding 10 scope,
-finding 11 execution) is DONE from the code side** — universe locked,
-signal/exit/portfolio logic built and tested, backtest run, raw numbers
-reported. Blocked on a planning-chat adopt/reject decision before any
-further strategy-family work starts. The correlation/open-risk-budget
-guardrail redesign (spec §4.3, 2-asset → 10-asset) remains explicitly OUT
-of scope regardless of that decision's outcome — do not attempt it
-without a separate, current instruction.
+**Finding 11 (10-asset rotational Donchian ensemble, 4-slot/25%, 20d-OR-
+55d entry) is CLOSED — rejected.** **Finding 12 (redesigned retry:
+55d-only entry, 8-slot/12.5% cap, ADA/PEPE backfilled) is the active
+milestone, IN PROGRESS** — universe backfill candidates need confirming
+against actual fetched history depth before locking in; signal/portfolio
+code changes not yet made. This is understood to be a bounded, one-time
+retry per the "IMPORTANT CONSTRAINT" in finding 12 above — do not spin up
+a further breadth variant if finding 12 also fails without a fresh
+instruction to do so. The correlation/open-risk-budget guardrail redesign
+(spec §4.3, 2-asset → 10-asset) remains explicitly OUT of scope
+regardless of finding 12's outcome — do not attempt it without a
+separate, current instruction.
 
 ### Blocked/pending, unrelated to backtest
 
@@ -499,8 +564,10 @@ needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
 blocked/pending — not started, and explicitly not part of the current
 milestone.
 
-**Next milestone:** not yet chosen — blocked on the planning chat's
-adopt/reject verdict for finding 11's rotational Donchian ensemble.
+**Next milestone:** finding 12's redesigned rotational Donchian ensemble
+retry (in progress) — see finding 12 and "Not yet decided" above. Bounded
+to one attempt; no further breadth iteration planned if it also fails,
+absent a fresh instruction.
 
 ## Hard rules — never do these
 
