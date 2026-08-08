@@ -37,6 +37,19 @@ described above is being reopened** — see "Current status" and finding 10
 below. Treat the 2-asset scope as under active revision, not settled,
 until the new milestone lands.
 
+**NOTE (2026-08 session, spec v23, multi-track pivot): the crypto-only
+framing in this section's opening paragraph is now historical, not
+current.** The crypto strategy search (findings 1-14) concluded without
+an adopted strategy — see "Current status" below for the full pivot. The
+project now runs three parallel tracks (GEM+circuit-breaker, ETF
+trend-following, options premium-selling) under spec v23, which
+supersedes `trading-bot-spec-v6.md` as the source-of-truth spec document
+(both live in project knowledge, not this repo). Older sections of this
+file that still say "spec v6" or describe the crypto-only scope reflect
+what was true when they were written — not edited retroactively, per this
+file's own convention of preserving historical record rather than
+rewriting it.
+
 ## Current status
 
 **Milestone: finding 13 was formally REJECTED** (pooled net-of-fees
@@ -100,6 +113,52 @@ fresh, explicit instruction. The next step is a broader strategic
 conversation in the planning chat, not another backtest variant.** Full
 detail, including per-fold/per-symbol numbers and the thin-fold caveat, is
 in finding 14 below.
+
+**The crypto strategy search (findings 1-14) is now formally CONCLUDED
+and preserved as historical record below, unedited — no crypto work is
+planned for the foreseeable future.** The "broader strategic conversation
+in the planning chat" flagged above happened; the outcome is the
+multi-track pivot described here, not a return to crypto.
+
+**Last session (planning chat): Dual Momentum / GEM (classic Gary
+Antonacci design — monthly rotation among SPY/EFA/AGG/BIL) was locked as
+the next candidate strategy, but was NOT backtested yet** — locking the
+candidate was as far as that session went.
+
+**This session, before backtesting GEM, its design was reconsidered.**
+GEM's canonical form has no interim exit — once a monthly rotation signal
+picks a holding, it's held untouched until the next month-end signal,
+even if it draws down hard mid-month. The user does not want a strategy
+where a losing position can't be acted on until the next scheduled
+signal. Rather than force a single answer to "fix GEM's exit vs. abandon
+GEM," **the project now runs three parallel, independently-evidenced
+tracks, each tested against its own pre-committed bar:**
+  - **Track A:** GEM plus a portfolio-level drawdown circuit breaker.
+  - **Track B:** a multi-asset ETF trend-following strategy with a real,
+    continuously-monitored ATR stop-loss.
+  - **Track C:** options premium-selling, where max loss is defined at
+    entry (structurally unrelated to the interim-exit problem, included
+    as a third, independent line of evidence).
+Full reasoning for the three-track split is in spec v23 §2 (project
+knowledge, not this repo) — treat that section as the source of truth for
+*why*, this file records *what was decided and when*.
+
+**NEW MILESTONE, STARTING NOW: Track B.** Reuses the exact
+Donchian-breakout-plus-ATR-trailing-stop mechanism already built and
+tested for the crypto search — specifically this file's finding 14
+design (100-day channel, 3.0x ATR trailing stop, equal-risk-contribution
+sizing; spec v23 refers to this same design as "finding 15" — flagged,
+not silently resolved: the external spec's own numbering and this file's
+session-numbered findings list have drifted by one somewhere outside this
+repo's visibility, but the design parameters match exactly, so there is
+no ambiguity about *which* mechanism is being reused) — ported to a
+diversified 8-ETF universe on Alpaca's commission-free stock/ETF product,
+replacing BTC/USD + ETH/USD. Full design and the pre-committed adopt bar
+for this milestone are in spec v23 §10.1 (project knowledge) — treat that
+section as the source of truth for this milestone; no implementation
+started yet, this update only records the decision to start per this
+file's own "update whenever a real decision is made" rule. Track A and
+Track C are locked as concepts but not yet started.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -887,6 +946,87 @@ and `data_ingestion.py`'s live fetch are untouched.
     100-day channel, 6 new for the buy-and-hold helpers), full suite
     (88 tests) passing.
 
+### Track B findings
+
+1. **8-ETF rotational Donchian ensemble (executed)** — Track B's first
+   backtest, spec v23 §10.1. Universe: SPY, QQQ, IWM, EFA, AGG, GLD, DBC,
+   VNQ. Signal/exit/sizing unchanged from finding 14/15 (100-day causal
+   Donchian channel, long-only; 3.0x ATR(14) Chandelier-style trailing
+   stop; equal-risk-contribution sizing off spec §4.1's real 1%-of-equity
+   risk formula, shrunk under a portfolio-level risk budget when needed —
+   the first backtest since the original EMA crossover with a genuine
+   ATR-based stop distance to size off, so the flat-25%-notional fallback
+   MACD D1H1/RSI-mean-reversion needed was not used here). Fee model:
+   0% commission (Alpaca stock/ETF) + 5bps/leg slippage (wider than GEM's
+   2bps — DBC/VNQ are less liquid than the core equity ETFs in this
+   universe, an explicit judgment call). `MAX_CONCURRENT_POSITIONS` = 8
+   (= full universe size, a judgment call — the kickoff didn't pin N; at
+   N=8 the slot-count cap never binds on its own, so the 8%
+   portfolio-level risk budget is the only sizing constraint that can
+   actually shrink a trade). Capital: $10,000 (`PAPER_VALIDATION_CAPITAL`,
+   reused unchanged from the crypto ensemble file).
+
+   **Data window** (see "Current status" above for the full deviation
+   record): requested 2006-02-03 (DBC inception), actually available
+   **2016-01-04 → 2026-08-07** (~10.6yr) — this account's Alpaca stock
+   data floor, confirmed uniform across all 8 tickers, decided before any
+   result existed. 3 anchored folds (not 5) — initial train 365d, then 3
+   contiguous test windows, exact boundaries computed at runtime: fold 1
+   test 2017-01-03→2020-03-15, fold 2 test 2020-03-15→2023-05-27, fold 3
+   test 2023-05-27→2026-08-07.
+
+   **Result:** pooled net-of-costs **+73.64%**, pooled gross-of-costs
+   **+85.97%**, **3/3 folds net-positive** (fold 1 +27.97%/71 trades,
+   fold 2 +14.60%/56 trades, fold 3 +16.99%/76 trades — no fold flagged
+   THIN, all comfortably above the 5-trade threshold), 219 total trades
+   (207 pooled), pooled max drawdown 5.69% (materially lower than any
+   crypto finding's drawdown — 8-16% was typical there). **Zero signals
+   were skipped for any reason** (no free slot, no risk budget) — same
+   caveat as findings 13/14: this run does not exercise the risk-budget
+   shrink-under-pressure path, so it provides no direct evidence on that
+   mechanism specifically, only on the base signal/exit/full-target-sizing
+   combination.
+
+   **PDT / same-day round-trip check (new — crypto has no PDT
+   restriction): PASS, 0 of 219 trades entered and exited on the same
+   calendar day**, confirmed against the actual produced trade list, not
+   just asserted from the mechanism's design (exits are processed using
+   only positions already open at the start of each day's iteration, so a
+   position opened today cannot be exit-checked until a later day).
+
+   **Buy-and-hold comparison (mandatory, CLAUDE.md permanent
+   requirement):** pooled 8-ETF equal-weight blend **+164.01%** — the
+   strategy's pooled net-of-costs (+73.64%) does NOT beat this benchmark,
+   the first Track B/crypto-lineage result to underperform buy-and-hold
+   on its primary comparison (findings 1-13 also underperformed, but
+   finding 14/15 had beaten it). Per-symbol pooled buy-and-hold: QQQ
+   +504.8%, GLD +260.6%, SPY +243.5%, IWM +122.5%, EFA +86.9%, DBC
+   +84.7%, VNQ +18.9%, AGG -9.8% — QQQ's extreme post-2016 run alone
+   pulls the equal-weight blend up sharply; the strategy's 100-day
+   breakout + 3x ATR trailing-stop structurally gives back a large share
+   of a strong, low-volatility grind-up trend like QQQ's compared to
+   simply holding it, which is a large part of the net gap.
+
+   **Concentration check (per-symbol, pooled, informational only):**
+   net-positive contributors were GLD (+$3,246.40, 25 trades — the single
+   largest contributor, ~44% of total net profit), QQQ (+$2,263.30, 33
+   trades), SPY (+$1,866.79, 33 trades), DBC (+$754.05, 25 trades), AGG
+   (+$331.55, 14 trades); net-negative were VNQ (-$269.24, 17), EFA
+   (-$302.26, 32), IWM (-$581.68, 28). 5 of 8 symbols net-positive — more
+   broad-based than finding 14/15's crypto result (there, a single symbol
+   ETH/USD contributed MORE than the entire pooled net gain, meaning
+   every other symbol net-netted negative in aggregate); here GLD+QQQ
+   together account for ~75% of net profit but no single symbol exceeds
+   the total, and the negative contributors are shallow, not offsetting a
+   dominant winner the way finding 14/15's structure did.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction; decision deferred to the planning chat**, same convention
+   as every crypto finding. 6 tests added
+   (`tests/test_backtest_etf_donchian.py`), full suite (94 tests)
+   passing. Scope: backtest-only per instruction — `execution.py`,
+   guardrail integration, and Track A/Track C are untouched.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -958,6 +1098,24 @@ unchanged with per-trade notional/equity% logging added, not meant to be
 maintained), `scripts/sanity_check_daily_signal.py` (independent one-off
 check, not meant to be maintained). No `.env` or locked spec parameters
 touched. Nothing merged or promoted — still `paper` branch working state.
+
+**Track B:** `scripts/backtest_etf_donchian.py` (new — 8-ETF rotational
+Donchian ensemble; imports `EnsembleTrade`/`simulate_rotational_ensemble()`/
+`slice_ensemble_trades_by_folds()`/`per_symbol_diagnostics()`/the
+buy-and-hold helpers/`PAPER_VALIDATION_CAPITAL`/`THIN_FOLD_TRADE_THRESHOLD`
+directly from `backtest_donchian_ensemble.py` unchanged — none of that
+infrastructure needed modification, it was already generic over
+symbol_data/universe_order; adds its own `compute_channel_long_entry_
+indices()` reparameterized on `channel_length` rather than reading that
+file's module global, `build_symbol_series()` for daily-native stock
+data — no hourly-fetch-then-resample step needed — and
+`check_no_same_day_round_trips()`, the new PDT guard). `src/
+data_ingestion.py` gained `fetch_historical_stock_candles()` (Alpaca
+`StockHistoricalDataClient`, `TimeFrame.Day`, same paper keys as the
+crypto path via `get_alpaca_config()` — a separate client/product from
+`fetch_historical_candles()`'s `CryptoHistoricalDataClient`, not a
+modification to it). See "Track B findings" above for the full result and
+judgment calls made.
 
 ### Not yet decided (blocks next steps)
 
@@ -1060,20 +1218,51 @@ needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
 blocked/pending — not started, and explicitly not part of the current
 milestone.
 
-**Next milestone: none authorized yet.** Finding 14 (corrected
-long-horizon design — 100-day Donchian channel, daily entries, 3.0x ATR
-trailing stop, finding 13's equal-risk-contribution sizing kept
-unchanged), the TRUE final planned iteration on this strategy family, has
-been executed (see "Current status" and finding 14 above for the full
-result: pooled net-of-fees +0.94% but only 3/5 folds positive — misses
-the pre-committed adopt bar; beats both buy-and-hold comparisons
-regardless). Per the binding constraint set at finding 13/14's kickoff,
-this result closes the strategy family — do not start a finding-15
-variant without a fresh, explicit instruction. The next step is a
-broader planning-chat conversation about strategy direction, not another
-backtest variant. Any future finding, in this family or a new one, MUST
-report a buy-and-hold comparison alongside net/gross/folds-positive —
-mandatory from finding 13 forward, not optional.
+**Crypto strategy family: CLOSED, no further milestones.** Finding 14
+(corrected long-horizon design — 100-day Donchian channel, daily entries,
+3.0x ATR trailing stop, finding 13's equal-risk-contribution sizing kept
+unchanged), the TRUE final planned iteration on this strategy family, was
+executed (see "Current status" and finding 14 above for the full result:
+pooled net-of-fees +0.94% but only 3/5 folds positive — misses the
+pre-committed adopt bar; beats both buy-and-hold comparisons regardless).
+Per the binding constraint set at finding 13/14's kickoff, this result
+closed the strategy family — no finding-15 crypto variant without a
+fresh, explicit instruction. Any future crypto finding, in this family or
+a new one, MUST report a buy-and-hold comparison alongside
+net/gross/folds-positive — mandatory from finding 13 forward, not
+optional, and this requirement carries over to every non-crypto track
+below too.
+
+**Track B (spec v23 §10.1) EXECUTED this session.** Multi-asset ETF
+Donchian breakout + ATR trailing stop, reusing finding 14/15's signal/
+exit/sizing mechanism unchanged, ported to an 8-ETF universe (SPY, QQQ,
+IWM, EFA, AGG, GLD, DBC, VNQ) on Alpaca's commission-free stock/ETF
+product, replacing BTC/USD + ETH/USD. New script `scripts/
+backtest_etf_donchian.py`; new `src/data_ingestion.py` function
+`fetch_historical_stock_candles()` (Alpaca `StockHistoricalDataClient`,
+daily bars — a separate client/product from the crypto path, same paper
+keys). See "Track B findings" below for full detail — raw numbers only,
+no verdict rendered, per the same convention as every crypto finding.
+
+**Data-window deviation, decided BEFORE any backtest ran (not in
+response to results):** the kickoff specified a 2006-02-03 (DBC
+inception) start, ~20 years of history. This account's Alpaca stock data
+is truncated at **2016-01-04** regardless of requested start date or feed
+parameter (SIP/IEX both truncate identically) — confirmed empirically
+across all 8 tickers, including GLD/AGG/QQQ whose real inception dates
+are 2004/2003/1999, so this is an account/data-plan tier limit, not a
+per-symbol gap. User decision: proceed with the available ~10.6-year
+window (2016-01-04 → present) and drop from 5 anchored folds to 3
+(rather than risk fold-level sample starvation on a shorter span).
+**This means the window excludes the 2008 financial crisis and the 2020
+COVID crash's lead-in — a result here is evidence about post-2016
+regimes only**, not the same breadth-of-regime claim the original
+20-year design would have supported. If more history is later available
+(paid data-plan upgrade), this backtest should be rerun — the current
+result is not final evidence on the original 20-year design.
+
+Track A and Track C are locked as concepts but not yet started — do not
+begin either without a fresh, explicit instruction to switch tracks.
 
 ## Hard rules — never do these
 

@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest
+from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from .config import get_alpaca_config
@@ -53,6 +54,49 @@ def fetch_historical_candles(symbol: str, start: datetime, end: datetime, timefr
         end=end,
     )
     barset = client.get_crypto_bars(request)
+    bars = barset[symbol]
+    return [
+        Candle(
+            symbol=bar.symbol,
+            timestamp=bar.timestamp.isoformat(),
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+        )
+        for bar in bars
+    ]
+
+
+def fetch_historical_stock_candles(symbol: str, start: datetime, end: datetime) -> list[Candle]:
+    """
+    Fetch historical daily candles for backtesting via Alpaca's stock/ETF
+    market data API (spec v23 §10.1, Track B) — a separate product/data
+    plan from crypto market data, hence its own client class, but reuses
+    the same paper Alpaca keys (get_alpaca_config()), no new credential
+    path. Daily bars only (unlike the crypto path's hourly-then-resample
+    pattern): Track B's signal is daily-only, and Alpaca serves stock
+    daily bars directly, so there's no need to fetch a finer timeframe.
+
+    KNOWN ACCOUNT-LEVEL LIMIT, confirmed empirically before Track B's
+    first backtest (not assumed): this account's historical stock data
+    is truncated at 2016-01-04 regardless of the requested `start` date
+    or feed parameter (SIP/IEX both truncate identically) — a data-plan
+    tier limit, not a per-symbol gap (verified uniformly across all 8
+    Track B tickers, including GLD/AGG/QQQ whose real inception dates are
+    2004/2003/1999). Callers should derive their actual usable window from
+    the returned candles' own timestamps, not assume `start` was honored.
+    """
+    cfg = get_alpaca_config()
+    client = StockHistoricalDataClient(api_key=cfg.api_key, secret_key=cfg.secret_key)
+    request = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Day,
+        start=start,
+        end=end,
+    )
+    barset = client.get_stock_bars(request)
     bars = barset[symbol]
     return [
         Candle(
