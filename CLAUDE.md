@@ -39,23 +39,67 @@ until the new milestone lands.
 
 ## Current status
 
-**Milestone: finding 13 (final planned iteration on the multi-asset
-Donchian ensemble family) was EXECUTED and, on its raw numbers, misses the
-adopt bar more decisively than finding 12 did** (pooled net-of-fees
--15.22%, pooled gross-of-fees -13.51%, 1/5 folds net-positive against a
-pre-committed bar of ≥4/5 — see finding 13 below for the full record).
-**No adopt/reject verdict is self-rendered here, per the same convention
-as findings 6, 8, 9, 11, and 12 — raw numbers only, decision deferred to
-the planning chat.** Required verification (finding 12's actual per-trade
-sizing) ran first, per instruction, and disproved the informal "flat
-sizing" assumption the milestone kickoff was built on: sizing already
-varied meaningfully by symbol (2.91%-12.50% of equity), and the 12.5%
-notional cap bound almost exclusively on BTC/USD, not broadly. **Per
-finding 13's own binding "IMPORTANT CONSTRAINT," this was the final
-planned iteration on this strategy family — do not propose a finding 14
-variant without a fresh, explicit instruction.** The likely next step is
-the broader planning-chat conversation about strategy direction that
-finding 13 flagged as the fallback if it also failed.
+**Milestone: finding 13 was formally REJECTED** (pooled net-of-fees
+-15.22% vs. finding 12's -6.72%, pooled gross-of-fees -13.51% vs. -1.65%,
+1/5 folds net-positive vs. 2/5, trade count collapsed 154→54 — worse than
+finding 12 on every dimension). **Root-cause diagnosis (planning chat,
+post-session): the gross-return degradation rules out fee drag as the
+explanation.** The Monday-only entry gate decoupled signal-*checking* from
+signal-*timing* on a fast 55-day breakout rule — a breakout that fires
+mid-week is simply missed or picked up late, not deferred — causing
+systematically missed/delayed entries. **This is an implementation flaw
+in how "lower frequency" was tested, not evidence that lower entry
+frequency is a bad idea.** Separately: trade count was so low (44-54
+trades total) that neither the slot cap nor the risk budget ever bound,
+so finding 13 provides **no real evidence against equal-risk-contribution
+sizing itself** — that mechanism was implemented and unit-tested but never
+meaningfully exercised. Verification note (already recorded, reconfirmed):
+finding 12's sizing was never flat — confirmed range 2.91%-12.50% of
+equity, cap binding narrowly and mostly on BTC/USD only.
+
+**Honest context established this session, now a PERMANENT process
+requirement:** across all seven strategy variants tested to date (findings
+1/3, 5, 7, 8, 9, 11, 12, 13), none has beaten simple buy-and-hold on
+BTC/ETH (~+100% each over the 5.6-year test window) while every active
+strategy tested has been net-negative. **Buy-and-hold for the relevant
+universe/period MUST be reported alongside every backtest result from now
+on** — not just net/gross/folds-positive, every future finding needs a
+buy-and-hold comparison line so a strategy's real bar is "beats
+buy-and-hold," not just "clears the pooled-net-positive/folds-consistency
+bar" in isolation.
+
+**Milestone: finding 14 (corrected long-horizon design) was EXECUTED.**
+100-day Donchian channel (up from 55-day), daily entries (reverted from
+finding 13's weekly gate), 3.0x ATR trailing stop (widened from 2.5x),
+finding 13's equal-risk-contribution sizing kept unchanged. **Result is
+genuinely mixed, reported raw per instruction, no verdict self-rendered:**
+pooled net-of-fees **+0.94%**, pooled gross-of-fees **+3.29%** — the
+first finding in this whole session where the pooled net-of-fees number
+is positive — but only **3/5 folds net-positive** against the
+pre-committed ≥4/5 bar, so the pre-committed adopt bar is NOT cleared
+(fails on the folds-consistency leg specifically, not the net-return
+leg). **The strategy beats both buy-and-hold comparisons** for the same
+pooled test window (10-asset equal-weighted buy-and-hold: -41.62%;
+BTC/ETH-only buy-and-hold: -4.48%) — the first time any strategy tested
+this session has beaten buy-and-hold on either measure. Important
+clarifying note, not a contradiction: this buy-and-hold figure is for the
+pooled fold TEST window only (2022-01-03 → 2026-08-07, apples-to-apples
+with the strategy's own pooled number), not the "~+100%" BTC/ETH figure
+quoted earlier in this file for the FULL 5.6-year history (2021-01-03 →
+present) — that full-history figure includes 2021's rally, which sits in
+the reserved training period and is excluded here. The fold-test-window
+buy-and-hold happened to be a genuinely bad stretch for buy-and-hold (2022
+bear market in fold 1, a second broad drawdown in fold 5), which is why
+the strategy's modest positive result cleared it while still failing its
+own internal folds-consistency bar. Per the binding constraint set at
+finding 13/14's kickoff (this outcome — fails the pre-committed adopt bar
+— was one of the two pre-specified branches, even though it does beat
+buy-and-hold): **finding 14 is the TRUE final planned iteration on this
+strategy family — no finding-15 variant should be started without a
+fresh, explicit instruction. The next step is a broader strategic
+conversation in the planning chat, not another backtest variant.** Full
+detail, including per-fold/per-symbol numbers and the thin-fold caveat, is
+in finding 14 below.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -683,16 +727,165 @@ and `data_ingestion.py`'s live fetch are untouched.
     risk-budget shrinkage, risk-budget exhaustion with free slots,
     weekly-cadence gating x2), full suite (82 tests) passing.
 
-    **IMPORTANT CONSTRAINT, now resolved: finding 13 was the final planned
-    iteration on this strategy family.** Per that binding constraint (set
-    when finding 13 was kicked off), no finding-14 variant of this
-    ensemble is authorized without a fresh, explicit instruction —
-    regardless of how the planning chat ultimately reads these numbers.
-    The flagged fallback if finding 13 also failed was a broader
-    planning-chat conversation about strategy direction; these raw
-    numbers are markedly worse than finding 12's on both legs of the
-    adopt bar, so that conversation is the most likely next step, but
-    the verdict itself is explicitly not self-rendered here.
+    **UPDATE (separate planning chat, post-session): formally REJECTED.**
+    Pooled net-of-fees -15.22% (vs. finding 12's -6.72%), pooled
+    gross-of-fees -13.51% (vs. -1.65%), 1/5 folds net-positive (vs. 2/5),
+    trade count collapsed 154→54 — worse than finding 12 on every
+    dimension, not a close call.
+
+    **Root-cause diagnosis (planning chat, researching the actual
+    mechanics of what changed rather than re-examining the result after
+    the fact):** the gross-return degradation is the key diagnostic
+    signal — finding 12's rejection had gross close to fee-neutral
+    (-1.65%) with net doing the damage (fee drag). Finding 13's gross
+    (-13.51%) is itself sharply negative, which rules out fee drag as the
+    story here. **The actual cause: the Monday-only entry gate decoupled
+    signal-*checking* from signal-*timing* on a fast 55-day breakout
+    rule.** A Donchian breakout is a specific-day event (close crosses the
+    channel high); checking for it only once a week means a breakout that
+    fires mid-week is simply missed entirely, or picked up several days
+    late (after the move has already partly happened) on the next Monday
+    — not deferred or queued the way a slower-moving signal would
+    tolerate. **This is an implementation flaw in how "lower entry
+    frequency" was tested, not evidence that lower frequency itself is a
+    bad idea** — finding 14 (below) expresses the same "trade less often"
+    goal structurally instead, via a longer channel, rather than via
+    calendar-gating a fast one. Separately: trade count was so thin
+    (44-54 trades total across the whole run) that neither the 8-slot cap
+    nor Part 2's risk budget ever bound in practice (0 skips of any kind)
+    — so this result is **not evidence against equal-risk-contribution
+    sizing**, which was implemented and unit-tested but never
+    meaningfully stress-tested by real portfolio pressure this round.
+
+    Per finding 13's binding "IMPORTANT CONSTRAINT" (set at kickoff), no
+    finding-14 variant would normally be authorized without a fresh,
+    explicit instruction — that instruction has now been given (see
+    finding 14 below): a corrected long-horizon design, not a repeat of
+    finding 13's approach.
+
+14. **Corrected long-horizon design (finding 14's milestone, executed)** —
+    the TRUE final planned iteration on this strategy family (see "Current
+    status" above for the full binding constraint). Same 10-asset
+    universe, same fee model, same 5-fold anchored walk-forward harness/
+    boundary function as findings 5-13, unchanged. Three changes from
+    finding 13, all in `scripts/backtest_donchian_ensemble.py` (same file,
+    repaired in place again, not a new script):
+    (a) `CHANNEL_LENGTH` lengthened 55d → 100d — a longer, slower breakout
+        window, replacing finding 13's calendar-gated weekly check (the
+        thing diagnosed as the actual flaw) with a structural fix to the
+        same "trade less often" goal;
+    (b) entries evaluated DAILY again, not weekly-gated — `main()` no
+        longer calls `compute_weekly_entry_evaluation_dates()` or passes
+        `entry_eval_dates` to `simulate_rotational_ensemble()` (defaults
+        to `None` = every day). The function and parameter are both KEPT
+        in the file (still unit-tested) for any future caller, just not
+        invoked this round — directly reverses finding 13's Part 3
+        mechanism, since that mechanism (not the underlying "lower
+        frequency" idea) was diagnosed as the cause of finding 13's
+        failure;
+    (c) `ATR_MULTIPLIER` widened 2.5x → 3.0x.
+    Finding 13's Part 2 (equal-risk-contribution / portfolio-level
+    risk-budget sizing, `TOTAL_PORTFOLIO_RISK_BUDGET_PCT` = 8% = 8 slots x
+    1%) is KEPT UNCHANGED — no sizing code touched this round; finding
+    13's diagnosis found no evidence against it, so it is carried forward
+    rather than reverted alongside Part 3.
+
+    **New, permanent addition this finding: buy-and-hold benchmark
+    functions** `compute_buy_and_hold_symbol_return()` and
+    `compute_buy_and_hold_portfolio_return()`, both new in this file.
+    Equal-weighted, buy-at-window-start/hold-to-window-end, never
+    rebalanced (portfolio return = simple average of per-symbol %
+    returns, which is exactly what that convention produces), computed
+    independently for each of the 5 folds' own test-window boundaries
+    (not compounded fold-to-fold) plus once more for the full pooled
+    window (fold 1 test_start → fold 5 test_end) — the same convention
+    the strategy's own pooled number already uses, so the two are
+    directly comparable. Reported for both the full 10-asset universe and
+    a `BUY_AND_HOLD_BTC_ETH_ONLY` subset. Judgment call, flagged: for a
+    symbol whose own history starts after a window's nominal start date
+    (XRP/USD from 2024-01-01, AVAX/USD from 2021-11-18, AAVE/USD from
+    2021-07-15), that symbol's entry is its first available close ON OR
+    AFTER the window start rather than excluding it from that fold's
+    average — a partial-window return, included at equal weight anyway.
+    BTC/USD and ETH/USD have full history for every fold, so the
+    BTC/ETH-only comparison carries no such caveat. New
+    `THIN_FOLD_TRADE_THRESHOLD` (5) flags any fold with fewer trades than
+    that as "THIN" directly in the results table, per the session's
+    explicit ask to report thin folds plainly rather than fold them into
+    a clean pass/fail number.
+
+    **Result — portfolio-level, 5-fold anchored walk-forward (2022-01-03
+    → 2026-08-07 pooled test window — one day later than findings 5-13's
+    quoted 2026-08-06 due to this run's real-time data fetch happening a
+    day later, a negligible calendar drift, not a boundary-logic
+    change):** pooled net-of-fees **+0.94%**, pooled gross-of-fees
+    **+3.29%**, **3/5 folds net-positive** (fold 3 +0.91%, fold 4 +6.22%,
+    fold 5 +2.21%; fold 1 -0.14%, fold 2 -7.25%), 65 pooled trades (86
+    total trades over the full history), max drawdown 8.97%. Per-fold
+    trade counts: fold 1 = 1 (**flagged THIN** — below the 5-trade
+    threshold, read as inconclusive not evidence either way), fold 2 =
+    10, fold 3 = 24, fold 4 = 23, fold 5 = 6 (just above the threshold,
+    still fairly thin). **Known risk flagged at kickoff — reported
+    honestly: it partially materialized.** The 100-day channel did NOT
+    sample-starve as severely as finding 9's RSI mean-reversion (65
+    pooled trades vs. finding 9's 3), but it is thinner than finding
+    12/13's 55-day-channel predecessor (123 pooled trades) and fold 1 in
+    particular is too thin (n=1) to read as anything but inconclusive.
+    12 signals were skipped, all for `no_slot_available` (concentrated on
+    XRP/USD=8, ETH/USD=4) — the 8-slot cap bound modestly this round,
+    unlike finding 13's zero skips of any kind, but **zero skips were for
+    `no_risk_budget_available`** — so, same as finding 13, this run still
+    provides no direct evidence that the risk-budget sizing mechanism's
+    shrink-under-pressure path was meaningfully stress-tested, even
+    though the slot cap itself bound a little.
+
+    **Buy-and-hold comparison (new, mandatory this finding forward):**
+    pooled 10-asset equal-weighted **-41.62%**, pooled BTC/ETH-only
+    **-4.48%** — the strategy's pooled net-of-fees (+0.94%) beats BOTH,
+    the first strategy tested this session to beat either buy-and-hold
+    measure. Per-fold buy-and-hold swung wildly (10-asset / BTC-ETH-only):
+    fold 1 -69.70%/-64.14% (2022 bear market), fold 2 +146.25%/+74.41%,
+    fold 3 +39.74%/+52.72%, fold 4 +102.81%/+77.61%, fold 5
+    -61.91%/-48.38% (a second broad drawdown in the most recent window).
+    Per-symbol pooled buy-and-hold: XRP/USD +61.6%, BTC/USD +40.2%,
+    ETH/USD -49.1%, BCH/USD -50.2%, SOL/USD -56.1%, DOGE/USD -59.4%,
+    AAVE/USD -65.6%, LINK/USD -65.6%, UNI/USD -78.0%, AVAX/USD -94.0% —
+    most of the 10-asset universe collapsed hard over this specific
+    window, which is why the 10-asset buy-and-hold benchmark is so
+    deeply negative and easy for the strategy to clear; this is a
+    materially harder period for buy-and-hold than the "~+100%"
+    full-5.6-year figure quoted earlier in this file (see "Current
+    status" for why those two figures aren't in conflict). The
+    strategy's much lower pooled max drawdown (8.97%) versus
+    buy-and-hold's fold-level swings (as wide as -69.70% to +146.25%)
+    is a real risk-adjusted difference worth noting, though not part of
+    the pre-committed adopt bar.
+
+    Per-symbol diagnostics (pooled, informational only, not part of the
+    adopt/reject bar): net-positive contributors were ETH/USD (+$607.59,
+    4 trades), AVAX/USD (+$268.65, 6 trades), LINK/USD (+$149.11, 7
+    trades), UNI/USD (+$14.39, 5 trades); BTC/USD landed slightly
+    net-negative (-$21.84 net on 10 trades) despite positive gross
+    (+$28.75) — fee drag tipped it, not a signal-quality issue
+    specifically; net-negative were DOGE/USD (-$25.16, 8 trades),
+    XRP/USD (-$154.13, 3 trades), BCH/USD (-$181.94, 8 trades), AAVE/USD
+    (-$226.54, 8 trades), SOL/USD (-$337.84, 6 trades, worst pooled
+    contributor).
+
+    **No adopt/reject verdict rendered — raw numbers only, per
+    instruction; decision deferred to the planning chat**, same
+    convention as findings 6, 8, 9, 11, 12, and 13. On the pre-committed
+    bar specifically: pooled net-of-fees is positive (clears that leg)
+    but only 3/5 folds are net-positive (misses the ≥4/5 leg) — so the
+    bar as a whole is not cleared, even though the strategy beats both
+    buy-and-hold benchmarks for the same window. Per the binding
+    constraint set at finding 13/14's kickoff, this — failing the
+    pre-committed adopt bar — is one of the two pre-specified outcomes
+    that closes this strategy family: **no finding-15 variant without a
+    fresh, explicit instruction.** 8 tests added/updated in
+    `tests/test_backtest_donchian_ensemble.py` (2 rewritten for the
+    100-day channel, 6 new for the buy-and-hold helpers), full suite
+    (88 tests) passing.
 
 ### Code state
 
@@ -749,9 +942,17 @@ notional cap, removed) with a separate `notional_sanity_cap_pct` leverage
 backstop, plus a new `entry_eval_dates` param and
 `compute_weekly_entry_evaluation_dates()` helper for weekly entry gating;
 local `PAPER_VALIDATION_CAPITAL` ($10,000) used for finding 13's run
-instead of `backtest.py`'s shared $100 `DEFAULT_CAPITAL` — see findings
-11-13 and the module docstring for the full set of judgment calls made),
-`scripts/verify_finding12_sizing.py` (one-off, finding 13's required
+instead of `backtest.py`'s shared $100 `DEFAULT_CAPITAL`; repaired in
+place a third time for finding 14 — `CHANNEL_LENGTH` 55→100,
+`ATR_MULTIPLIER` 2.5→3.0, `main()` no longer calls
+`compute_weekly_entry_evaluation_dates()`/passes `entry_eval_dates`
+(function and parameter both kept, just unexercised by `main()` now),
+risk-budget sizing untouched; new `compute_buy_and_hold_symbol_return()`/
+`compute_buy_and_hold_portfolio_return()` and `THIN_FOLD_TRADE_THRESHOLD`/
+`BUY_AND_HOLD_BTC_ETH_ONLY` constants for the new mandatory buy-and-hold
+reporting — see findings 11-14 and the module docstring for the full set
+of judgment calls made), `scripts/verify_finding12_sizing.py` (one-off,
+finding 13's required
 pre-code verification — re-derives finding 12's exact sizing formula
 unchanged with per-trade notional/equity% logging added, not meant to be
 maintained), `scripts/sanity_check_daily_signal.py` (independent one-off
@@ -793,22 +994,35 @@ sharply — the problem is **no longer primarily fee drag**, it's now a
 Per finding 12's binding "IMPORTANT CONSTRAINT," no further slot-cap/
 entry-window/universe variant of this ensemble is authorized.
 
-**Finding 13 (executed) was the final planned iteration** on this strategy
-family, motivated directly by finding 12's signal-quality diagnosis:
-portfolio-level risk-budget position sizing and weekly (vs. daily) entry
-evaluation — the two reference-research pieces findings 11-12 deliberately
-deferred. Required verification ran first and disproved the "flat sizing"
-assumption (finding 12's sizing already varied 2.91%-12.50% of equity;
-the notional cap bound almost exclusively on BTC/USD). Raw result: pooled
-net-of-fees -15.22%, pooled gross-of-fees -13.51%, 1/5 folds net-positive
-— worse than finding 12 on both legs of the adopt bar, and unlike finding
-12, gross also degraded (not just net), so fee drag alone doesn't explain
-it. **No verdict self-rendered — decision deferred to the planning chat,
-same convention as findings 6, 8, 9, 11, 12.** Per finding 13's binding
-"IMPORTANT CONSTRAINT," no finding-14 variant of this ensemble is
-authorized without a fresh, explicit instruction — the next step is the
-broader planning-chat conversation about strategy direction that finding
-13 flagged as its fallback.
+**Finding 13 (executed) was formally REJECTED** — worse than finding 12 on
+every dimension (pooled net -15.22% vs. -6.72%, gross -13.51% vs. -1.65%,
+1/5 folds vs. 2/5, trade count 154→54). Root-cause diagnosis (planning
+chat): the weekly Monday-only entry gate, not the risk-budget sizing
+change, caused the failure — gross degrading (not just net) rules out fee
+drag, and points instead at a signal-timing flaw specific to gating a fast
+55-day breakout rule to a weekly check. Equal-risk-contribution sizing
+itself was never meaningfully exercised (0 skips of any kind) and is not
+discredited by this result — see finding 13's UPDATE above for the full
+diagnosis. Buy-and-hold context established this session (see "Current
+status"): none of the seven variants tested to date have beaten
+buy-and-hold on BTC/ETH (~+100% each over the test window) — this is now
+a mandatory comparison line for every future finding.
+
+**Finding 14 (100-day channel, daily entries, 3.0x ATR stop, sizing kept
+from finding 13) was EXECUTED — mixed result, no verdict self-rendered.**
+Pooled net-of-fees +0.94%, pooled gross-of-fees +3.29%, only 3/5 folds
+net-positive (misses the ≥4/5 leg of the pre-committed adopt bar even
+though the net-return leg clears). Beats both buy-and-hold comparisons
+for the same window (10-asset -41.62%, BTC/ETH-only -4.48%) — the first
+strategy this session to do so — but that does not override the
+pre-committed bar, which the binding constraint set at kickoff already
+covered: failing the adopt bar (regardless of the buy-and-hold result)
+closes this strategy family. Fold 1 (n=1 trade) is explicitly flagged
+THIN/inconclusive, not folded into the headline number. See finding 14
+above for full per-fold/per-symbol detail. **No finding-15 variant
+without a fresh, explicit instruction — the next step is a broader
+planning-chat conversation about strategy direction, not another
+backtest variant.**
 
 ### Pre-coding checklist state
 
@@ -818,16 +1032,23 @@ broader planning-chat conversation about strategy direction that finding
 CLOSED — rejected** (pooled net-of-fees -6.72%, 2/5 folds net-positive;
 diagnosis: signal-quality problem, not fee drag — see finding 12's UPDATE
 above). **Finding 13 (risk-budget sizing + weekly entry evaluation) is
-CLOSED — executed, raw numbers reported, no self-rendered verdict**
-(pooled net-of-fees -15.22%, pooled gross-of-fees -13.51%, 1/5 folds
-net-positive; worse than finding 12 on both legs — see finding 13 above
-for the full record, including the verification step that disproved the
-"flat sizing" assumption). **Finding 13 was the final planned iteration
-on this strategy family, per its own binding "IMPORTANT CONSTRAINT" — no
-finding 14 variant of this ensemble is authorized without a fresh,
-explicit instruction.** The correlation/open-risk-budget guardrail
-redesign (spec §4.3, 2-asset → 10-asset) remains explicitly OUT of scope
-regardless — do not attempt it without a separate, current instruction.
+CLOSED — formally REJECTED** (pooled net-of-fees -15.22%, pooled
+gross-of-fees -13.51%, 1/5 folds net-positive; worse than finding 12 on
+every dimension — root cause: the weekly entry gate's signal-timing flaw,
+not the sizing change — see finding 13's UPDATE above). **Finding 14
+(100-day channel, daily entries, 3.0x ATR stop, sizing kept from finding
+13) is CLOSED — executed, mixed result** (pooled net-of-fees +0.94%
+positive, but only 3/5 folds net-positive — misses the pre-committed
+adopt bar on the folds-consistency leg; beats both buy-and-hold
+comparisons for the same window regardless — see finding 14 above for
+full detail). Per the binding constraint set at kickoff, this closes the
+strategy family — no finding-15 variant without a fresh, explicit
+instruction. Every future finding, including any new strategy family,
+MUST report a buy-and-hold comparison alongside net/gross/folds-positive
+(see "Current status" and Coding Conventions). The correlation/
+open-risk-budget guardrail redesign (spec §4.3, 2-asset → 10-asset)
+remains explicitly OUT of scope — do not attempt it without a separate,
+current instruction.
 
 ### Blocked/pending, unrelated to backtest
 
@@ -839,14 +1060,20 @@ needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
 blocked/pending — not started, and explicitly not part of the current
 milestone.
 
-**Next milestone: none authorized yet.** Finding 13 was the final planned
-iteration on the multi-asset Donchian ensemble family and closed with raw
-numbers worse than finding 12's on both legs of the adopt bar (see
-finding 13 above); no finding-14 variant of this ensemble may be started
-without a fresh, explicit instruction. The most likely next step —
-flagged in finding 13's own kickoff as its fallback — is a broader
-planning-chat conversation about strategy direction, not another
-backtest variant; do not start one unprompted.
+**Next milestone: none authorized yet.** Finding 14 (corrected
+long-horizon design — 100-day Donchian channel, daily entries, 3.0x ATR
+trailing stop, finding 13's equal-risk-contribution sizing kept
+unchanged), the TRUE final planned iteration on this strategy family, has
+been executed (see "Current status" and finding 14 above for the full
+result: pooled net-of-fees +0.94% but only 3/5 folds positive — misses
+the pre-committed adopt bar; beats both buy-and-hold comparisons
+regardless). Per the binding constraint set at finding 13/14's kickoff,
+this result closes the strategy family — do not start a finding-15
+variant without a fresh, explicit instruction. The next step is a
+broader planning-chat conversation about strategy direction, not another
+backtest variant. Any future finding, in this family or a new one, MUST
+report a buy-and-hold comparison alongside net/gross/folds-positive —
+mandatory from finding 13 forward, not optional.
 
 ## Hard rules — never do these
 
@@ -891,6 +1118,16 @@ backtest variant; do not start one unprompted.
 - "Done" for a session = tests passing + code committed +
   (`trading-bot-spec-v6.md` or `session-playbook-v6.md` updated, if an
   actual decision was made, not just an implementation detail).
+- **PERMANENT, as of finding 13 (2026-08 session): every backtest report
+  must include a buy-and-hold comparison** for the same symbol universe
+  and test period, reported alongside net-of-fees/gross-of-fees/
+  folds-net-positive — not a one-off for that finding. Established
+  because none of the seven strategy variants tested through finding 13
+  beat buy-and-hold on BTC/ETH (~+100% each over the 5.6-year test
+  window) while every active strategy tested was net-negative; without
+  this comparison a result can clear the pooled-net-positive/
+  folds-consistency adopt bar while still being a worse choice than doing
+  nothing. Applies to finding 14 onward and any future strategy family.
 
 ## Environment
 

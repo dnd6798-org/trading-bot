@@ -1,16 +1,21 @@
 """
-Verifies scripts/backtest_donchian_ensemble.py's finding-12 single-channel
-55-day entry signal, the rotational portfolio simulation loop (8-slot cap,
-same-day slot reuse, shared-equity position sizing, EOL exit per symbol),
-the exit-timestamp-based fold-slicing, and finding 13's two changes
-(portfolio-level total-risk-budget sizing replacing the flat notional cap,
-and weekly entry-evaluation gating) — against deterministic synthetic
-daily candles and hand-built symbol_data dicts, no network calls.
+Verifies scripts/backtest_donchian_ensemble.py's finding-14 single-channel
+100-day entry signal (widened from finding 12-13's 55-day), the rotational
+portfolio simulation loop (8-slot cap, same-day slot reuse, shared-equity
+position sizing, EOL exit per symbol), the exit-timestamp-based
+fold-slicing, finding 13's two infrastructure pieces (portfolio-level
+total-risk-budget sizing, still active in finding 14; weekly
+entry-evaluation gating, still available but no longer invoked by
+finding 14's main()), and finding 14's buy-and-hold benchmark helpers —
+against deterministic synthetic daily candles and hand-built symbol_data
+dicts, no network calls.
 """
 from src.data_ingestion import Candle
 from scripts.backtest_donchian_ensemble import (
     compute_channel_long_entry_indices,
     compute_weekly_entry_evaluation_dates,
+    compute_buy_and_hold_symbol_return,
+    compute_buy_and_hold_portfolio_return,
     simulate_rotational_ensemble,
     slice_ensemble_trades_by_folds,
     EnsembleTrade,
@@ -42,8 +47,8 @@ def _make_series(symbol, candles, atr, entry_indices):
 
 # --- compute_channel_long_entry_indices --------------------------------
 
-def test_channel_entry_does_not_fire_before_55d_window_is_seeded():
-    # Only 20 seasoning days — the 55-day band isn't defined yet, so even
+def test_channel_entry_does_not_fire_before_100d_window_is_seeded():
+    # Only 20 seasoning days — the 100-day band isn't defined yet, so even
     # a sharp breakout candle must not register as an entry.
     dates = [f"2021-01-{i + 1:02d}" for i in range(21)]
     candles = [_flat_candle("BTC/USD", dates[i]) for i in range(20)]
@@ -54,17 +59,17 @@ def test_channel_entry_does_not_fire_before_55d_window_is_seeded():
     assert 20 not in entry_indices
 
 
-def test_channel_entry_fires_on_close_above_55d_band_once_window_is_seeded():
-    # 55 seasoning days (enough for the 55-day band to be fully defined),
+def test_channel_entry_fires_on_close_above_100d_band_once_window_is_seeded():
+    # 100 seasoning days (enough for the 100-day band to be fully defined),
     # then a single breakout day.
-    dates = [f"d{i}" for i in range(56)]
-    candles = [_flat_candle("BTC/USD", dates[i]) for i in range(55)]
-    candles.append(_candle("BTC/USD", dates[55], close=125, high=130, low=120))
+    dates = [f"d{i}" for i in range(101)]
+    candles = [_flat_candle("BTC/USD", dates[i]) for i in range(100)]
+    candles.append(_candle("BTC/USD", dates[100], close=125, high=130, low=120))
 
     entry_indices, atr = compute_channel_long_entry_indices(candles)
 
-    assert 55 in entry_indices
-    assert atr[55] is not None
+    assert 100 in entry_indices
+    assert atr[100] is not None
 
 
 # --- simulate_rotational_ensemble: slot cap & skip logging ------------------
@@ -312,3 +317,79 @@ def test_slice_ensemble_trades_by_folds_buckets_by_exit_not_entry_timestamp():
     assert fold_summaries[0]["trade_count"] == 0
     assert fold_summaries[1]["trade_count"] == 1
     assert pooled["trade_count"] == 1
+
+
+# --- finding 14: buy-and-hold benchmark helpers ------------------------
+
+def test_compute_buy_and_hold_symbol_return_uses_first_and_last_close_in_window():
+    dates = ["2022-01-01", "2022-01-02", "2022-01-03", "2022-01-04"]
+    candles = [_flat_candle("A", dates[0], close=100), _flat_candle("A", dates[1], close=120),
+               _flat_candle("A", dates[2], close=150), _flat_candle("A", dates[3], close=90)]
+    series = _make_series("A", candles, atr=[None] * 4, entry_indices=[])
+
+    r = compute_buy_and_hold_symbol_return(series, "2022-01-01", "2022-01-03")
+
+    assert abs(r - 50.0) < 1e-9  # 100 -> 150 over the windowed subset, day4 excluded
+
+
+def test_compute_buy_and_hold_symbol_return_uses_first_available_close_when_history_starts_late():
+    # Symbol's own data only starts on 01-03, inside a window that
+    # nominally begins 01-01 — entry falls back to the first available
+    # close rather than being treated as missing.
+    dates = ["2022-01-03", "2022-01-04"]
+    candles = [_flat_candle("A", dates[0], close=200), _flat_candle("A", dates[1], close=220)]
+    series = _make_series("A", candles, atr=[None, None], entry_indices=[])
+
+    r = compute_buy_and_hold_symbol_return(series, "2022-01-01", "2022-01-04")
+
+    assert abs(r - 10.0) < 1e-9  # 200 -> 220, not treated as missing/None
+
+
+def test_compute_buy_and_hold_symbol_return_returns_none_when_fully_outside_window():
+    candles = [_flat_candle("A", "2020-01-01", close=100)]
+    series = _make_series("A", candles, atr=[None], entry_indices=[])
+
+    r = compute_buy_and_hold_symbol_return(series, "2022-01-01", "2022-01-04")
+
+    assert r is None
+
+
+def test_compute_buy_and_hold_portfolio_return_is_equal_weighted_simple_average():
+    # A: +50%, B: -20% over the same window -> equal-weighted average +15%,
+    # not a dollar-weighted or price-weighted blend.
+    symbol_data = {
+        "A": _make_series("A", [_flat_candle("A", "2022-01-01", close=100), _flat_candle("A", "2022-01-02", close=150)],
+                           atr=[None, None], entry_indices=[]),
+        "B": _make_series("B", [_flat_candle("B", "2022-01-01", close=100), _flat_candle("B", "2022-01-02", close=80)],
+                           atr=[None, None], entry_indices=[]),
+    }
+
+    portfolio_return, per_symbol = compute_buy_and_hold_portfolio_return(symbol_data, ["A", "B"], "2022-01-01", "2022-01-02")
+
+    assert abs(portfolio_return - 15.0) < 1e-9
+    assert abs(per_symbol["A"] - 50.0) < 1e-9
+    assert abs(per_symbol["B"] - (-20.0)) < 1e-9
+
+
+def test_compute_buy_and_hold_portfolio_return_excludes_symbols_with_no_data_in_window():
+    symbol_data = {
+        "A": _make_series("A", [_flat_candle("A", "2022-01-01", close=100), _flat_candle("A", "2022-01-02", close=110)],
+                           atr=[None, None], entry_indices=[]),
+        "B": _make_series("B", [_flat_candle("B", "2019-01-01", close=100)], atr=[None], entry_indices=[]),
+    }
+
+    portfolio_return, per_symbol = compute_buy_and_hold_portfolio_return(symbol_data, ["A", "B"], "2022-01-01", "2022-01-02")
+
+    assert "B" not in per_symbol
+    assert abs(portfolio_return - 10.0) < 1e-9  # driven by A alone
+
+
+def test_compute_buy_and_hold_portfolio_return_returns_none_when_no_symbol_has_data():
+    symbol_data = {
+        "A": _make_series("A", [_flat_candle("A", "2019-01-01", close=100)], atr=[None], entry_indices=[]),
+    }
+
+    portfolio_return, per_symbol = compute_buy_and_hold_portfolio_return(symbol_data, ["A"], "2022-01-01", "2022-01-02")
+
+    assert portfolio_return is None
+    assert per_symbol == {}

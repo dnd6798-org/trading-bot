@@ -63,14 +63,85 @@ finding-12-equivalent behavior (None -> derived 8%-budget cap; None ->
 every day is an entry-evaluation day) so finding 12's existing tests
 needed only the one sizing-cap test rewritten, not a rebuild.
 
-Universe, channel, ATR multiplier, long-only, fee model — all unchanged
-from finding 12 (see below). Notional: this run uses $10,000 (the
-locked paper-validation notional, CLAUDE.md 2026-08 capital reframing),
-not finding 12's $100 — percentage results are unaffected by that switch,
-it only makes position-size dollar reporting realistic; see
-PAPER_VALIDATION_CAPITAL below (a local override, NOT a change to
-backtest.py's shared DEFAULT_CAPITAL, which other findings' $100 numbers
-still depend on).
+FINDING 14 UPDATE (the TRUE final planned iteration on this strategy
+family, in both directions — see CLAUDE.md "Current status"/finding 14
+for the full binding constraint, executed in place per the same
+"repair, not rebuild" convention). Finding 13 was formally REJECTED
+(pooled net-of-fees -15.22% vs. finding 12's -6.72%, gross -13.51% vs.
+-1.65%, 1/5 folds positive vs. 2/5, trade count collapsed 154->54).
+Planning-chat root-cause diagnosis: the gross-return degradation ruled
+out fee drag — the actual cause was the weekly Monday-only entry gate
+decoupling signal-*checking* from signal-*timing* on a fast 55-day
+breakout rule (a breakout firing mid-week was simply missed or picked up
+late, not deferred). This was diagnosed as an implementation flaw in HOW
+"lower entry frequency" was tested, not evidence against the underlying
+"trade less often" idea, and separately, finding 13's risk-budget sizing
+was never meaningfully exercised (0 skips of any kind at only 44-54 total
+trades) so finding 13 provides no evidence against it either.
+
+Finding 14 makes three changes, addressing findings 13's actual flaw
+structurally instead of reverting the goal it was chasing:
+  (a) Channel lengthened 55d -> 100d (CHANNEL_LENGTH): a longer, slower
+      breakout window expresses "trade less often" as a property of the
+      signal itself, not a calendar gate bolted on top of a fast signal.
+  (b) Entries evaluated DAILY again, not weekly-gated: directly reverses
+      finding 13's Part 3 mechanism (the diagnosed cause of its failure).
+      compute_weekly_entry_evaluation_dates() and
+      simulate_rotational_ensemble()'s entry_eval_dates parameter are
+      BOTH KEPT in this file (general infrastructure, still exercised by
+      their own unit tests) but main() no longer calls the weekly-cadence
+      helper or passes entry_eval_dates — omitting it defaults to None,
+      i.e. every day is an entry-evaluation day, finding-12-equivalent
+      cadence behavior.
+  (c) ATR trailing-stop multiplier widened 2.5x -> 3.0x (ATR_MULTIPLIER):
+      more room for a longer-horizon trend before getting stopped out,
+      consistent with trading a slower channel.
+Finding 13's Part 2 (equal-risk-contribution / portfolio-level
+TOTAL_PORTFOLIO_RISK_BUDGET_PCT sizing) is KEPT UNCHANGED — no code
+touched sizing this round, per instruction (no evidence against it, so
+it isn't reverted alongside Part 3).
+
+NEW, PERMANENT REQUIREMENT (CLAUDE.md, established this session): every
+finding from here forward must report a buy-and-hold comparison for the
+same universe/period alongside net/gross/folds-positive, since none of
+findings 1-13 beat buy-and-hold on BTC/ETH (~+100% each over the 5.6yr
+window) while every active strategy tested was net-negative — "clears
+the internal adopt bar" was never sufficient on its own. New functions
+`compute_buy_and_hold_symbol_return()` /
+`compute_buy_and_hold_portfolio_return()` compute an equal-weighted,
+buy-at-fold-test-window-start/hold-to-window-end, NEVER-rebalanced
+return (portfolio return = simple average of per-symbol % returns,
+which is exactly what "split capital equally at t0, never touch it
+again" produces) for both the full 10-asset universe and a BTC/ETH-only
+subset, using the SAME fold boundaries as the strategy's own per-fold
+breakdown, computed independently per fold (not compounded fold-to-fold)
+plus once for the full pooled window (fold 1 test_start -> fold 5
+test_end) — mirrors exactly how the strategy's own pooled number is
+defined. Judgment call, flagged: for a symbol whose own history doesn't
+yet cover a fold's test_start (XRP/USD from 2024-01-01, AVAX/USD from
+2021-11-18, AAVE/USD from 2021-07-15 per finding 11), that symbol's
+entry is its first available close ON OR AFTER the window start rather
+than being excluded from the fold entirely — a partial-window return,
+included with an equal weight alongside full-window symbols. This
+slightly favors symbols that entered late during a favorable stretch,
+but excluding them would understate 10-asset breadth in early folds even
+more; flagged rather than silently resolved either way. BTC/USD and
+ETH/USD have full history for every fold, so the BTC/ETH-only comparison
+carries no such caveat.
+
+Known risk, reported honestly per instruction, not folded into a clean
+pass/fail number: a 100-day lookback is expected to produce a materially
+lower trade count per fold than finding 12/13's 55-day channel — each
+fold's own trade count is printed and any fold under
+THIN_FOLD_TRADE_THRESHOLD trades is explicitly flagged "THIN" in the
+results table rather than silently averaged into the headline number.
+
+Universe, long-only, fee model, fold-slicing convention — all otherwise
+unchanged from findings 11-13 (see below). Notional: $10,000
+(PAPER_VALIDATION_CAPITAL, the locked paper-validation notional,
+CLAUDE.md 2026-08 capital reframing), same as finding 13, not
+backtest.py's shared $100 DEFAULT_CAPITAL which earlier findings' $100
+numbers still depend on.
 
 Universe (finding 11's list, ADA/USD and PEPE/USD dropped for
 insufficient history and backfilled with the next-most-liquid full-history
@@ -87,23 +158,19 @@ liquidity ranking alone):
     LINK/USD, DOGE/USD, BCH/USD
 
 Signal — fixed rule, NOT a parameter grid this round:
-  - Long entry: daily close breaks above the single 55-day causal Donchian
+  - Long entry: daily close breaks above the single causal Donchian
     channel high (compute_donchian_levels(), reused unchanged from
     backtest_donchian.py/finding 6-7 — window [i-N, i), current day
-    excluded). Finding 11's 20-day leg is removed entirely, not just
-    unused — finding 11's MATH NOTE proved "close > upper_20 OR close >
-    upper_55" is mathematically IDENTICAL to "close > upper_20" at every
-    index (a causal 55-day window always contains the most recent 20 days,
-    so upper_55[i] >= upper_20[i] once both are defined), meaning the
-    20-day leg was the one silently doing all the work the whole time,
-    not the 55-day leg as the fixed-rule spec intended. Finding 12 keeps
-    the 55-day channel (the one the design was supposed to test) and
-    drops the 20-day leg, rather than the reverse.
-  - Exit: ATR trailing stop fixed at 2.5x ATR(14) — unchanged from finding
-    11/finding 7's middle grid value, Chandelier-style, same formula as
-    backtest_donchian.py's simulate_donchian() (ratchets in the trade's
-    favor only, using the PRIOR day's extreme-close/ATR so today's
-    trigger check has no lookahead).
+    excluded). N = CHANNEL_LENGTH = 100d as of finding 14 (was 55d in
+    findings 12-13; finding 11's 20-day leg was removed entirely in
+    finding 12 — see finding 11's MATH NOTE proving the OR-combination
+    was redundant — and has stayed removed since).
+  - Exit: ATR trailing stop, ATR_MULTIPLIER = 3.0x ATR(14) as of finding
+    14 (was 2.5x in findings 11-13, finding 7's middle grid value) —
+    Chandelier-style, same formula as backtest_donchian.py's
+    simulate_donchian() (ratchets in the trade's favor only, using the
+    PRIOR day's extreme-close/ATR so today's trigger check has no
+    lookahead).
   - Long-only (Alpaca doesn't support crypto shorting — same reasoning as
     finding 7's --long-only flag).
 
@@ -140,9 +207,13 @@ guardrail, which remains explicitly out of scope):
     exposure is bounded at ~8% of equity (not ~100% notional exposure the
     way finding 11/12's notional-cap framing was) — a materially tighter,
     risk-denominated bound than finding 12's notional-denominated one.
-  - Entry cadence (FINDING 13): entries evaluated weekly (fixed Monday
-    evaluation day) instead of daily — see module docstring update.
-    Exits/trailing-stop still evaluated daily, unchanged.
+  - Entry cadence (FINDING 14: reverted): entries evaluated DAILY again
+    (finding 13's weekly Monday-only gate is diagnosed as the cause of
+    finding 13's failure, not the sizing change — see module docstring's
+    FINDING 14 UPDATE). compute_weekly_entry_evaluation_dates() and the
+    entry_eval_dates parameter both still exist and are still unit-tested,
+    just no longer invoked from main(). Exits/trailing-stop are and always
+    were evaluated daily, unaffected either way.
   - Slot-filling priority when more signals fire on the same day than
     slots are available: universe list order (BTC, ETH, then the 8
     ranked-liquidity/backfill symbols in that order) — an arbitrary but
@@ -216,8 +287,8 @@ UNIVERSE = [
     "BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "UNI/USD",
     "AVAX/USD", "AAVE/USD", "LINK/USD", "DOGE/USD", "BCH/USD",
 ]
-CHANNEL_LENGTH = 55           # finding 12: single channel, 20d leg removed (see docstring)
-ATR_MULTIPLIER = 2.5          # fixed — finding 7's middle grid value, not swept
+CHANNEL_LENGTH = 100          # finding 14: lengthened from 55d (findings 12-13) — see docstring
+ATR_MULTIPLIER = 3.0          # finding 14: widened from 2.5x (findings 11-13) — see docstring
 MAX_CONCURRENT_POSITIONS = 8  # finding 12: widened from finding 11's 4
 # Finding 13: replaces finding 12's flat SLOT_MAX_POSITION_PCT (12.5%) —
 # verification showed that cap bound almost exclusively on BTC/USD (see
@@ -225,17 +296,28 @@ MAX_CONCURRENT_POSITIONS = 8  # finding 12: widened from finding 11's 4
 # across open positions instead of NOTIONAL per slot; derived as
 # MAX_CONCURRENT_POSITIONS x DEFAULT_RISK_PER_TRADE_PCT (8 x 1% = 8%),
 # same worst-case aggregate risk envelope finding 12's design implied.
+# Finding 14 keeps this sizing mechanism unchanged, per instruction.
 TOTAL_PORTFOLIO_RISK_BUDGET_PCT = MAX_CONCURRENT_POSITIONS * DEFAULT_RISK_PER_TRADE_PCT
 # Loose leverage/numerical sanity backstop only (near-zero-ATR edge case)
 # — NOT a per-slot design choice, see module docstring's finding 13 note.
 NOTIONAL_SANITY_CAP_PCT = 100.0
-# Finding 13: weekly entry evaluation (fixed Monday, weekday()==0) —
-# arbitrary but deterministic, flagged per module docstring.
+# Finding 13 infrastructure, kept but NOT invoked from main() as of finding
+# 14 (weekly gating was diagnosed as finding 13's failure cause) — still
+# unit-tested, available for any future caller that wants it.
 WEEKLY_ENTRY_WEEKDAY = 0
 # Finding 13: $10,000 locked paper-validation notional (CLAUDE.md 2026-08
 # capital reframing), NOT backtest.py's shared $100 DEFAULT_CAPITAL —
 # other findings' $100 numbers are untouched by this local override.
 PAPER_VALIDATION_CAPITAL = 10_000.0
+# Finding 14: per-fold trade counts below this are flagged "THIN" in the
+# results table rather than folded silently into a clean pass/fail read —
+# a 100-day channel is expected to produce materially fewer signals than
+# the 55-day channel findings 11-13 used. Arbitrary but stated threshold.
+THIN_FOLD_TRADE_THRESHOLD = 5
+# Finding 14: BTC/ETH-only subset for the buy-and-hold benchmark's second,
+# caveat-free comparison (both have full history for every fold, unlike
+# XRP/AVAX/AAVE — see module docstring's buy-and-hold judgment call).
+BUY_AND_HOLD_BTC_ETH_ONLY = ["BTC/USD", "ETH/USD"]
 
 
 @dataclass
@@ -256,9 +338,10 @@ class EnsembleTrade:
 
 def compute_channel_long_entry_indices(candles):
     """
-    Long entry indices where close breaks above the single 55-day causal
-    Donchian high. Finding 12: replaces finding 11's 20d/55d OR-combination
-    (proven redundant — see module docstring) with this single channel.
+    Long entry indices where close breaks above the single CHANNEL_LENGTH-day
+    causal Donchian high (100d as of finding 14, was 55d in findings 12-13).
+    Finding 12: replaces finding 11's 20d/55d OR-combination (proven
+    redundant — see module docstring) with this single channel.
     """
     upper, _ = compute_donchian_levels(candles, CHANNEL_LENGTH)
     atr = compute_atr(candles, period=ATR_PERIOD)
@@ -495,6 +578,54 @@ def per_symbol_diagnostics(trades, fold_test_start_iso):
     return sorted(by_symbol.values(), key=lambda r: r["net_pnl"], reverse=True)
 
 
+def compute_buy_and_hold_symbol_return(series, test_start_date, test_end_date):
+    """
+    Finding 14: single-symbol buy-and-hold % return over [test_start_date,
+    test_end_date] (inclusive date strings, "YYYY-MM-DD"). Entry is the
+    first available close ON OR AFTER test_start_date (not necessarily
+    test_start_date itself — a symbol whose own history starts later in
+    the window still gets a partial-window return rather than being
+    silently assumed to start at test_start_date, see module docstring's
+    judgment call), exit is the last available close ON OR BEFORE
+    test_end_date. Returns None if the symbol has no candles anywhere in
+    the window (fully outside its available history).
+    """
+    dates_in_window = sorted(d for d in series["date_index"] if test_start_date <= d <= test_end_date)
+    if not dates_in_window:
+        return None
+    entry_idx = series["date_index"][dates_in_window[0]]
+    exit_idx = series["date_index"][dates_in_window[-1]]
+    entry_price = series["candles"][entry_idx].close
+    exit_price = series["candles"][exit_idx].close
+    return (exit_price - entry_price) / entry_price * 100
+
+
+def compute_buy_and_hold_portfolio_return(symbol_data, symbols, test_start_date, test_end_date):
+    """
+    Finding 14: equal-weighted buy-and-hold portfolio return — split
+    capital equally across `symbols` at window start, hold each
+    independently to window end, never rebalance. Under that convention
+    the portfolio % return is exactly the simple average of each
+    included symbol's own % return (each got an equal dollar amount, so
+    each dollar's pct gain contributes equally regardless of price level).
+    Symbols with no candle data anywhere in the window are excluded from
+    both the average and the returned per-symbol dict, not counted as 0%.
+    Returns (portfolio_return_pct_or_None, {symbol: return_pct}).
+    """
+    symbol_returns = {}
+    for symbol in symbols:
+        series = symbol_data.get(symbol)
+        if series is None:
+            continue
+        r = compute_buy_and_hold_symbol_return(series, test_start_date, test_end_date)
+        if r is not None:
+            symbol_returns[symbol] = r
+    if not symbol_returns:
+        return None, symbol_returns
+    portfolio_return = sum(symbol_returns.values()) / len(symbol_returns)
+    return portfolio_return, symbol_returns
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbols", nargs="+", default=UNIVERSE)
@@ -510,7 +641,7 @@ def main():
     end = datetime.now(timezone.utc) - timedelta(minutes=20)  # crypto bars need a short settle delay
     start = datetime(2021, 1, 3, tzinfo=timezone.utc)  # same earliest-history anchor as findings 5-9
 
-    print(f"=== 10-asset rotational Donchian ensemble (finding 13: risk-budget sizing + weekly entries): fetching {len(args.symbols)} symbols ===")
+    print(f"=== 10-asset rotational Donchian ensemble (finding 14: 100d channel + 3.0x ATR stop, daily entries, risk-budget sizing kept from finding 13): fetching {len(args.symbols)} symbols ===")
     symbol_data = {}
     for symbol in args.symbols:
         series = build_symbol_series(symbol, start, end)
@@ -528,11 +659,12 @@ def main():
     folds = compute_fold_boundaries(
         actual_start, actual_end, num_folds=args.folds, initial_train_days=args.initial_train_days
     )
-    entry_eval_dates = compute_weekly_entry_evaluation_dates(calendar)
+    # Finding 14: entries evaluated daily again — no entry_eval_dates
+    # passed below (None default), reverting finding 13's weekly gate.
     total_risk_budget_pct = args.max_positions * DEFAULT_RISK_PER_TRADE_PCT
 
-    print(f"\nshared calendar: {calendar[0]} -> {calendar[-1]}  ({len(calendar)} days, {len(entry_eval_dates)} weekly entry-evaluation days)")
-    print(f"max concurrent positions: {args.max_positions}  |  ATR trailing-stop multiplier: {args.atr_multiplier}")
+    print(f"\nshared calendar: {calendar[0]} -> {calendar[-1]}  ({len(calendar)} days, entries evaluated daily)")
+    print(f"channel length: {CHANNEL_LENGTH}d  |  max concurrent positions: {args.max_positions}  |  ATR trailing-stop multiplier: {args.atr_multiplier}")
     print(f"total portfolio risk budget: {total_risk_budget_pct:.1f}%  |  per-trade risk target: {DEFAULT_RISK_PER_TRADE_PCT:.1f}%  |  capital: ${PAPER_VALIDATION_CAPITAL:,.0f}")
     print(f"fold boundaries (initial train {args.initial_train_days}d, then {args.folds} contiguous test windows):")
     for fold in folds:
@@ -545,12 +677,10 @@ def main():
     net_trades, net_curve, skipped_log = simulate_rotational_ensemble(
         symbol_data, universe_order, max_positions=args.max_positions, atr_multiplier=args.atr_multiplier,
         capital=PAPER_VALIDATION_CAPITAL, fee_pct=DEFAULT_TAKER_FEE_PCT, slippage_bps=DEFAULT_SLIPPAGE_BPS,
-        entry_eval_dates=entry_eval_dates,
     )
     gross_trades, gross_curve, _ = simulate_rotational_ensemble(
         symbol_data, universe_order, max_positions=args.max_positions, atr_multiplier=args.atr_multiplier,
         capital=PAPER_VALIDATION_CAPITAL, fee_pct=0.0, slippage_bps=0.0,
-        entry_eval_dates=entry_eval_dates,
     )
 
     net_folds, net_pooled = slice_ensemble_trades_by_folds(net_trades, net_curve, folds, PAPER_VALIDATION_CAPITAL)
@@ -563,6 +693,7 @@ def main():
             "fold": fold["fold"],
             "test_window": f"{fold['test_start'].date()}..{fold['test_end'].date()}",
             "n": net["trade_count"],
+            "flag": "THIN" if net["trade_count"] < THIN_FOLD_TRADE_THRESHOLD else "",
             "win%": f"{net['win_rate_pct']:.1f}",
             "net%": f"{net['total_return_pct']:.2f}",
             "gross%": f"{gross['total_return_pct']:.2f}",
@@ -572,6 +703,7 @@ def main():
         "fold": "POOLED",
         "test_window": f"{folds[0]['test_start'].date()}..{folds[-1]['test_end'].date()}",
         "n": net_pooled["trade_count"],
+        "flag": "THIN" if net_pooled["trade_count"] < THIN_FOLD_TRADE_THRESHOLD else "",
         "win%": f"{net_pooled['win_rate_pct']:.1f}",
         "net%": f"{net_pooled['total_return_pct']:.2f}",
         "gross%": f"{gross_pooled['total_return_pct']:.2f}",
@@ -579,8 +711,14 @@ def main():
     })
     _print_table(rows, [
         ("fold", "fold"), ("test_window", "test_window"),
-        ("n", "n"), ("win%", "win%"), ("net%", "net%"), ("gross%", "gross%"), ("max_dd%", "max_dd%"),
+        ("n", "n"), ("flag", "flag"), ("win%", "win%"), ("net%", "net%"), ("gross%", "gross%"), ("max_dd%", "max_dd%"),
     ])
+    thin_folds = [r["fold"] for r in rows if r["flag"] == "THIN"]
+    if thin_folds:
+        print(
+            f"WARNING: fold(s) {thin_folds} have fewer than {THIN_FOLD_TRADE_THRESHOLD} trades — "
+            f"read these as thin/inconclusive samples, not as clean pass/fail evidence."
+        )
 
     positive = sum(1 for net in net_folds if net["trade_count"] > 0 and net["total_return_pct"] > 0)
     negative = sum(1 for net in net_folds if net["trade_count"] > 0 and net["total_return_pct"] < 0)
@@ -589,6 +727,43 @@ def main():
         f"folds net-positive: {positive}/{len(net_folds)}  |  "
         f"net-negative: {negative}/{len(net_folds)}  |  "
         f"flat/no-trades: {flat_or_no_trades}/{len(net_folds)}"
+    )
+
+    # Finding 14: mandatory buy-and-hold comparison (CLAUDE.md, permanent
+    # requirement from this finding forward) — same fold boundaries as the
+    # strategy's own per-fold breakdown, plus the full pooled window.
+    print(f"\n=== Buy-and-hold benchmark (equal-weighted, buy-at-window-start/hold-to-window-end, no rebalancing) ===")
+    bh_rows = []
+    for fold in folds:
+        test_start_date = fold["test_start"].date().isoformat()
+        test_end_date = fold["test_end"].date().isoformat()
+        bh_10, _ = compute_buy_and_hold_portfolio_return(symbol_data, universe_order, test_start_date, test_end_date)
+        bh_btc_eth, _ = compute_buy_and_hold_portfolio_return(symbol_data, BUY_AND_HOLD_BTC_ETH_ONLY, test_start_date, test_end_date)
+        bh_rows.append({
+            "fold": fold["fold"],
+            "test_window": f"{test_start_date}..{test_end_date}",
+            "bh_10asset%": f"{bh_10:.2f}" if bh_10 is not None else "n/a",
+            "bh_btc_eth%": f"{bh_btc_eth:.2f}" if bh_btc_eth is not None else "n/a",
+        })
+    pooled_test_start_date = folds[0]["test_start"].date().isoformat()
+    pooled_test_end_date = folds[-1]["test_end"].date().isoformat()
+    bh_10_pooled, bh_10_by_symbol = compute_buy_and_hold_portfolio_return(symbol_data, universe_order, pooled_test_start_date, pooled_test_end_date)
+    bh_btc_eth_pooled, _ = compute_buy_and_hold_portfolio_return(symbol_data, BUY_AND_HOLD_BTC_ETH_ONLY, pooled_test_start_date, pooled_test_end_date)
+    bh_rows.append({
+        "fold": "POOLED",
+        "test_window": f"{pooled_test_start_date}..{pooled_test_end_date}",
+        "bh_10asset%": f"{bh_10_pooled:.2f}" if bh_10_pooled is not None else "n/a",
+        "bh_btc_eth%": f"{bh_btc_eth_pooled:.2f}" if bh_btc_eth_pooled is not None else "n/a",
+    })
+    _print_table(bh_rows, [
+        ("fold", "fold"), ("test_window", "test_window"),
+        ("bh_10asset%", "bh_10asset%"), ("bh_btc_eth%", "bh_btc_eth%"),
+    ])
+    print("  per-symbol pooled buy-and-hold % (10-asset universe):")
+    print("   ", ", ".join(f"{sym}={ret:.1f}%" for sym, ret in sorted(bh_10_by_symbol.items(), key=lambda kv: -kv[1])))
+    print(
+        f"\nstrategy pooled net-of-fees {net_pooled['total_return_pct']:.2f}%  vs.  "
+        f"buy-and-hold 10-asset {bh_10_pooled:.2f}%  vs.  buy-and-hold BTC/ETH-only {bh_btc_eth_pooled:.2f}%"
     )
 
     print(f"\n=== Per-symbol diagnostics (pooled from fold 1 test start onward, informational only) ===")
