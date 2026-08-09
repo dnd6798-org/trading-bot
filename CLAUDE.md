@@ -1298,6 +1298,55 @@ and `data_ingestion.py`'s live fetch are untouched.
    v1 whipsaw setup and confirms a modest post-resume decline no longer
    re-triggers), full suite (118 tests) passing.
 
+4. **Buy-and-hold context (executed) — mandatory per this file's own
+   permanent requirement (established at crypto finding 13, carried
+   forward to every track since), requested explicitly before any final
+   evaluation of Track A.** New one-off script `scripts/compute_gem_
+   benchmarks.py` (not meant to be maintained, same convention as
+   `compute_buy_and_hold_drawdown.py`) computes buy-and-hold SPY and a
+   static 60/40 SPY/AGG portfolio, both return AND max drawdown, over
+   the IDENTICAL pooled window Track A's own findings use
+   (2017-01-31 → 2026-07-31, reproduced from real fetched data via the
+   same month-end/warm-up logic `backtest_gem.py` uses, not hardcoded).
+   Same `Adjustment.ALL` dividend+split-adjusted data as GEM's own
+   signal, for the same correctness reason (AGG's return is mostly
+   distributions). **Judgment call, flagged:** both benchmarks are
+   buy-at-window-start/hold-to-window-end with NO rebalancing, matching
+   every other buy-and-hold figure already reported in this repo
+   (Track B's convention) — a monthly- or annually-REBALANCED 60/40 is
+   at least as common a convention for this specific benchmark and was
+   NOT built; the reported 60/40 number lets its SPY/AGG weights drift
+   with relative performance from the initial 60/40 split.
+
+   **Result:**
+
+   | benchmark | return | max drawdown |
+   |---|---|---|
+   | Buy-and-hold SPY (100%) | +279.61% | 33.79% |
+   | Static 60/40 SPY/AGG (no rebalance) | +174.82% | 23.16% |
+   | Base GEM (no circuit breaker) | +138.90% | 33.79% |
+   | GEM + 15% circuit breaker (v2) | +120.09% | 24.58% |
+   | GEM + 20% circuit breaker (v2) | +133.38% | 24.94% |
+
+   **None of the three GEM variants beat either buy-and-hold benchmark on
+   return.** Base GEM's drawdown (33.79%) is IDENTICAL to buy-and-hold
+   SPY's own — not a bug (verified independently: buy-and-hold SPY's
+   drawdown was computed fresh from SPY's own price series, no shared
+   code path with GEM's simulation) but explained by base GEM's own trade
+   log (finding 1 above): GEM was continuously holding 100% SPY through
+   2019-02-28→2020-03-31, which spans the Feb-Mar 2020 COVID crash — so
+   GEM's worst drawdown and SPY's worst drawdown are driven by the exact
+   same underlying price move, with GEM adding no diversification benefit
+   during that specific stretch. The two breaker variants get closer to
+   the 60/40 blend's drawdown (24.58%/24.94% vs. 23.16%) but still
+   underperform its return (120.09%/133.38% vs. 174.82%) — on this
+   window, the simplest possible static allocation dominates every GEM
+   variant tested on a return basis, and roughly matches the breaker
+   variants on drawdown.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction; decision deferred to the planning chat.**
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
