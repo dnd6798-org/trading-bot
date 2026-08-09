@@ -13,6 +13,7 @@ TODO (live-loop build session, not this one — backtest first, playbook v6 §9)
 from dataclasses import dataclass
 from datetime import datetime
 
+from alpaca.data.enums import Adjustment
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
@@ -69,7 +70,9 @@ def fetch_historical_candles(symbol: str, start: datetime, end: datetime, timefr
     ]
 
 
-def fetch_historical_stock_candles(symbol: str, start: datetime, end: datetime) -> list[Candle]:
+def fetch_historical_stock_candles(
+    symbol: str, start: datetime, end: datetime, adjustment: Adjustment = Adjustment.RAW
+) -> list[Candle]:
     """
     Fetch historical daily candles for backtesting via Alpaca's stock/ETF
     market data API (spec v23 §10.1, Track B) — a separate product/data
@@ -87,6 +90,20 @@ def fetch_historical_stock_candles(symbol: str, start: datetime, end: datetime) 
     Track B tickers, including GLD/AGG/QQQ whose real inception dates are
     2004/2003/1999). Callers should derive their actual usable window from
     the returned candles' own timestamps, not assume `start` was honored.
+
+    `adjustment` defaults to RAW (unadjusted close), matching Track B's
+    already-locked/passed behavior exactly — Track B's Donchian breakout
+    is a price-channel signal, not a total-return comparison, so dividend
+    adjustment wasn't a correctness question there. Track A (GEM) passes
+    Adjustment.ALL explicitly: GEM's signal IS a total-return comparison
+    (12-month momentum ranking, absolute-momentum filter), and RAW prices
+    are demonstrably wrong for that — confirmed empirically before Track
+    A's first backtest, BIL's raw series shows an uncorrected ~2x
+    discontinuity (an unadjusted split event) and AGG's raw price-only
+    return is negative over a window where its true total return
+    (dividend-inclusive) is positive. This is a correctness fix, not a
+    style preference — RAW would silently break GEM's absolute-momentum
+    filter, not just shift results slightly.
     """
     cfg = get_alpaca_config()
     client = StockHistoricalDataClient(api_key=cfg.api_key, secret_key=cfg.secret_key)
@@ -95,6 +112,7 @@ def fetch_historical_stock_candles(symbol: str, start: datetime, end: datetime) 
         timeframe=TimeFrame.Day,
         start=start,
         end=end,
+        adjustment=adjustment,
     )
     barset = client.get_stock_bars(request)
     bars = barset[symbol]

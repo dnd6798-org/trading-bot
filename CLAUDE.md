@@ -1033,6 +1033,86 @@ and `data_ingestion.py`'s live fetch are untouched.
    passing. Scope: backtest-only per instruction — `execution.py`,
    guardrail integration, and Track A/Track C are untouched.
 
+### Track A findings
+
+1. **Base GEM (Dual Momentum), no circuit breaker (executed).** Spec v22
+   §10.1's design, locked as a candidate in a prior planning-chat session
+   but never backtested before this run. Universe: SPY, EFA (risky pair,
+   relative momentum), AGG (defensive holding), BIL (absolute-momentum
+   reference rate only, never held). New script `scripts/backtest_gem.py`.
+
+   **Data-correctness fix, confirmed empirically before writing any
+   simulation code, not a style choice:** GEM's signal is a trailing
+   12-month TOTAL-RETURN comparison, so `src/data_ingestion.py`'s
+   `fetch_historical_stock_candles()` gained an `adjustment` parameter
+   (default `RAW`, preserving Track B's already-passed behavior exactly)
+   — Track A calls it with `Adjustment.ALL` (splits + dividends). RAW
+   prices are demonstrably wrong for this signal: BIL's raw series has an
+   uncorrected ~2x split discontinuity, and AGG's raw price-only return
+   is negative over a window where its true dividend-inclusive return is
+   positive — RAW would silently invalidate the absolute-momentum filter,
+   not just shift results slightly.
+
+   **Data window:** same account-level 2016-01-04 floor Track B found,
+   confirmed for all 4 Track A tickers before any code was written (per
+   explicit instruction, flagged before proceeding rather than silently
+   applied). GEM's own 12-month lookback is treated as pure indicator
+   warm-up, not a training/tuning period (GEM's parameters are fixed,
+   externally-evidenced, same epistemic status as Track B's carried-over
+   100d/3.0x) — usable window starts at the first evaluation point with a
+   full 12-month lookback: **2017-01-31 -> 2026-07-31** (115 live monthly
+   evaluation points). **2 anchored folds** (not Track B's 3 — user
+   instruction, given GEM's monthly cadence and low turnover risk the
+   same sample-starvation failure mode as crypto finding 9 if split
+   finer): fold 1 test 2017-01-31→2021-10-29, fold 2 test
+   2021-10-29→2026-07-31.
+
+   **Adopt bar (user instruction, stricter than Track B's ≥N/2 folds):**
+   pooled net-of-cost positive AND BOTH folds individually positive.
+
+   **Result:** pooled net-of-cost **+138.90%**, pooled gross-of-cost
+   **+143.39%**, 19 total holding periods (19 pooled), **18 of 19 asset
+   switches** (position-change events; the 19th holding period is the
+   final still-open position, marked-to-market as "eol"). **Fold 1:
+   net +4.60%, 6 trades, 6 switches. Fold 2: net +128.39%, 13 trades, 12
+   switches.** Both folds well above the 3-switch thin-sample threshold —
+   no sample-starvation flag raised. As raw facts (not self-judged):
+   pooled net-of-cost is positive AND both folds are individually
+   positive.
+
+   **Concentration note, informational:** fold 2's return is dominated by
+   two long, favorable SPY holds — 2020-05-29→2022-05-31 (+$4,130.16) and
+   2023-11-30→2025-04-30 (+$3,450.19) — together larger than fold 2's
+   entire net gain, meaning other fold-2 holdings netted negative in
+   aggregate. This is a real result, not a bug, but it means fold 2's
+   headline number leans heavily on two multi-year holds landing well,
+   not on an average across many similar switches.
+
+   **IMPORTANT CAVEAT, confirmed by code inspection before reporting, not
+   asserted from memory:** `max_drawdown_pct` (fold 1: 11.25%, fold 2:
+   2.84%, pooled: 11.25%) is computed by `summarize()` iterating over
+   `equity_curve`, which for GEM only gets a new entry when a holding
+   period CLOSES — unlike Track B's daily-bar equity curve, where trades
+   were short enough that this was a minor approximation. GEM can hold a
+   single position for up to two years (the 2020-05-29→2022-05-31 SPY
+   hold above); ANY intra-holding drawdown during that stretch is
+   completely invisible to this metric. **The reported drawdown numbers
+   are a lower bound on true risk, not a mark-to-market drawdown** — this
+   matters directly for evaluating the circuit-breaker variants later,
+   since a circuit breaker's whole purpose is reacting to intra-holding
+   drawdown the base monthly signal can't see by construction. A
+   continuous daily mark-to-market drawdown was flagged as a valuable
+   follow-up diagnostic, not yet built (would need its own read-only
+   script, same category as the Track B buy-and-hold-drawdown follow-up).
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction; decision deferred to the planning chat**, same convention
+   as every other finding. 14 tests added (`tests/test_backtest_gem.py`),
+   full suite (108 tests) passing. Circuit-breaker variants (15%/20%
+   thresholds, spec v24 §10.2) are NOT yet implemented — exact trigger/
+   action/reset mechanics were not available in this repo and were asked
+   of the user before proceeding; see "Not yet decided" below.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1123,7 +1203,30 @@ crypto path via `get_alpaca_config()` — a separate client/product from
 modification to it). See "Track B findings" above for the full result and
 judgment calls made.
 
+**Track A:** `scripts/backtest_gem.py` (new — base GEM signal + monthly
+holding-period simulator; `GemTrade` dataclass, `simulate_gem()`,
+`compute_gem_fold_boundaries()`, `slice_gem_trades_by_folds()` — a
+different trade model from every prior finding, see the module docstring
+for why GEM's continuous monthly-rotation holding periods needed their
+own simulation loop rather than reusing Track B's rotational-ensemble
+infrastructure). `src/data_ingestion.py`'s `fetch_historical_stock_
+candles()` gained an `adjustment` parameter (default `Adjustment.RAW`,
+Track B's behavior unchanged; Track A passes `Adjustment.ALL` — see
+"Track A findings" above for why RAW is actively wrong for a total-return
+signal like GEM's). See "Track A findings" above for the full result,
+the max-drawdown-understates-risk caveat, and judgment calls made.
+
 ### Not yet decided (blocks next steps)
+
+**Track A circuit-breaker variants (15%/20% drawdown thresholds, spec
+v24 §10.2) are blocked on one open question:** the exact trigger metric
+(drawdown from what peak — the strategy's own equity, measured how
+often?), the action taken on breach (exit to cash/BIL entirely? partial
+de-risk?), and the reset/resume condition are not available in this repo
+(spec v24 lives in project knowledge) and were asked of the user before
+any circuit-breaker code was written, per explicit instruction not to
+silently guess. Base GEM (no circuit breaker) is NOT blocked and has been
+executed — see "Track A findings" above.
 
 Four strategy families tested against the original BTC/USD + ETH/USD,
 1-2 asset universe are closed or inconclusive on their own terms — none
