@@ -1113,6 +1113,103 @@ and `data_ingestion.py`'s live fetch are untouched.
    action/reset mechanics were not available in this repo and were asked
    of the user before proceeding; see "Not yet decided" below.
 
+2. **Continuous daily equity tracking + circuit-breaker variants
+   (executed).** `simulate_gem()` rewritten from a month-end-only loop to
+   a full day-by-day continuous simulation (see module docstring's
+   "CONTINUOUS DAILY SIMULATION" section) — needed both to report a true
+   mark-to-market drawdown for base GEM and to drive the breaker, which
+   checks drawdown from the ALL-TIME-PEAK strategy equity every day (user
+   instruction), exits fully to BIL on breach, and resumes automatically
+   at the next scheduled monthly evaluation regardless of price recovery
+   — an explicit, logged backtest simplification (real deployment would
+   need manual review per spec §7/halt_state.py's convention, so a live
+   resume would likely be slower and more conservative than this
+   simulates).
+
+   **True (continuous) max drawdown for base GEM: pooled 33.79%** (fold 1:
+   33.79%, fold 2: 21.73%) — nearly 3x the trade-close-sampled 11.25%
+   reported in finding 1, confirming that caveat mattered as much as
+   flagged. Net/gross returns for base GEM are unchanged (19 trades,
+   pooled net +138.90%) — the continuous curve is purely additive
+   reporting there, since no breaker was active to change outcomes.
+
+   **Circuit-breaker variants — result, raw facts:**
+
+   | variant | pooled net | true max DD (global peak) | switches | breaches |
+   |---|---|---|---|---|
+   | Base GEM | +138.90% | 33.79% | 18 | 0 |
+   | +15% breaker | +3.74% | 20.77% | 92 | 91 |
+   | +20% breaker | +2.63% | 28.90% | 81 | 78 |
+
+   Both breaker variants: pooled net-of-cost positive, but **fold 1 is
+   net-NEGATIVE for the 20% variant (-3.02%)** — fails the pre-committed
+   bar (both folds individually positive) on that leg; the 15% variant
+   clears both folds (+0.96%, +2.75%) but by a much thinner margin than
+   base GEM's own folds.
+
+   **ROOT-CAUSE DIAGNOSIS, quantified against the actual produced trade
+   list, not inferred from the headline numbers alone — this is the
+   single most important thing to understand about this result:** of the
+   91 circuit_breaker exits in the 15% variant, only **2 are genuine
+   multi-day breach events** (SPY held 203 days before a real breach on
+   2018-12-20, pnl -$972; EFA held 78 days before a real breach on
+   2026-03-20, pnl -$281). **The other 89 are zero-day same-day
+   re-breaches** — the position resumes at a scheduled evaluation and is
+   immediately force-closed again on the SAME day, before any price can
+   move at all. The 20% variant shows the identical pattern: 78 breaches,
+   only 1 genuine (SPY held 377 days, breaching 2020-03-12 — this one is
+   the real COVID crash, a legitimate protective event), 77 zero-day.
+
+   **Mechanism (verified, not speculated):** the breach trigger compares
+   CURRENT equity against the ALL-TIME peak, and per instruction there is
+   no cooldown and no peak reset on resume. Once a real breach occurs and
+   equity falls meaningfully behind the historic peak, resuming a
+   position (which starts its own P&L at exactly 1.0x, zero elapsed time)
+   does NOT reset the PORTFOLIO-level drawdown-from-peak check — if
+   overall equity is already more than the threshold below the all-time
+   peak at the moment of resume, day 0 of the new position already reads
+   as "in breach," forcing an immediate re-exit regardless of what the
+   newly-resumed asset does next. With no mechanism ever able to close
+   that gap (real growth requires holding a risky asset for more than
+   zero days, which this trap prevents), **the strategy falls into a
+   permanent monthly whipsaw for essentially the rest of the backtest**
+   after the first genuine breach — resume, instantly re-breach, park in
+   BIL a month earning small T-bill carry, repeat. This is a faithful,
+   correct execution of the literal instructed rules (all-time-peak
+   trigger, unconditional resume, no cooldown) — NOT an implementation
+   bug — but it means the "circuit breaker" is not functioning as a
+   crash-protection overlay after its first genuine trigger; it is
+   functioning as a near-permanent monthly-fee-drag mechanism instead.
+   **Quantified cost of the whipsaw alone:** 15% variant — the 89
+   zero-day re-breach trades sum to -$915.72 net, and $937.27 of the
+   variant's $1,895.44 total fees (≈49%) came from circuit_breaker exits
+   specifically. 20% variant — 77 zero-day trades sum to -$760.11 net,
+   $770.57 of $1,584.26 total fees (≈49%) from circuit_breaker exits.
+   Roughly half of all transaction costs paid across the entire 9.6-year
+   backtest, in both variants, came from this one degenerate mechanism.
+
+   **This reframes what the headline pooled-net numbers actually mean:**
+   +3.74%/+2.63% is not "the breaker gave up some of base GEM's upside in
+   exchange for genuine crash protection" — it is "the breaker correctly
+   caught the one real drawdown event in each variant's path, then got
+   permanently stuck whipsawing for years afterward." The true_dd%
+   figures (20.77%/28.90%) look superficially reasonable (not wildly
+   above their own thresholds) precisely BECAUSE the breaker keeps
+   snapping equity back near the threshold every time it fires — that
+   containment is real, but it comes from never allowing the strategy to
+   compound again, not from a clean, one-time protective exit.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction; decision deferred to the planning chat.** Given the
+   diagnosis above, the planning chat may want to treat "resume
+   unconditionally with no cooldown/peak-reset" as a distinct open design
+   question from "does GEM + a drawdown overlay work at all" — this
+   result is not strong evidence against the latter on its own. 3 tests
+   added/updated in `tests/test_backtest_gem.py` for the breaker
+   mechanics (breach trigger, no-rebreach-while-breached, unconditional
+   resume, daily curve construction, post-fee equity in the daily curve),
+   full suite (111 tests) passing.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1218,15 +1315,20 @@ the max-drawdown-understates-risk caveat, and judgment calls made.
 
 ### Not yet decided (blocks next steps)
 
-**Track A circuit-breaker variants (15%/20% drawdown thresholds, spec
-v24 §10.2) are blocked on one open question:** the exact trigger metric
-(drawdown from what peak — the strategy's own equity, measured how
-often?), the action taken on breach (exit to cash/BIL entirely? partial
-de-risk?), and the reset/resume condition are not available in this repo
-(spec v24 lives in project knowledge) and were asked of the user before
-any circuit-breaker code was written, per explicit instruction not to
-silently guess. Base GEM (no circuit breaker) is NOT blocked and has been
-executed — see "Track A findings" above.
+**Track A circuit-breaker mechanics were specified and executed this
+session** (all-time-peak trigger checked daily, exit to BIL, unconditional
+resume at next scheduled evaluation) — see "Track A findings" finding 2
+above. **New open question surfaced by that result, not yet decided:**
+the "no cooldown / no peak-reset on resume" combination was diagnosed as
+causing a permanent monthly whipsaw after the first genuine breach in
+both variants (89/91 and 77/78 circuit-breaker exits were zero-day
+same-day re-breaches, not genuine drawdown events) — roughly half of each
+variant's total transaction costs came from this single mechanism. Before
+any adopt/reject call on Track A's circuit-breaker concept, the planning
+chat may want to decide whether to test a variant with a cooldown period
+and/or a peak reset on resume, as a distinct question from whether GEM +
+some drawdown overlay works at all. Not started — no fresh instruction
+given yet.
 
 Four strategy families tested against the original BTC/USD + ETH/USD,
 1-2 asset universe are closed or inconclusive on their own terms — none

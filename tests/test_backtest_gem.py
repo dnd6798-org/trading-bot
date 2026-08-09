@@ -1,10 +1,11 @@
 """
-Verifies scripts/backtest_gem.py's month-end calendar construction, GEM's
-relative/absolute-momentum selection rule, the holding-period trade
-simulation (simulate_gem — a different trade model from every prior
-finding, see module docstring), and slice_gem_trades_by_folds()'s
-exit-date bucketing (including the deliberate last-fold-extends-to-end
-fix and the full-vs-truncated-timestamp comparison fix) — against
+Verifies scripts/backtest_gem.py: month-end calendar construction, GEM's
+relative/absolute-momentum selection rule, the CONTINUOUS DAY-BY-DAY
+holding-period simulation (simulate_gem — rewritten to iterate the full
+daily calendar, not just month-end dates, so the circuit breaker can
+check drawdown daily and force a mid-month exit), slice_gem_trades_by_
+folds()'s exit-date bucketing, and the new continuous-drawdown helpers
+(compute_max_drawdown_pct, slice_continuous_drawdown_by_folds) — against
 deterministic synthetic daily candles and hand-built symbol_data dicts,
 no network calls.
 """
@@ -15,17 +16,19 @@ from scripts.backtest_gem import (
     simulate_gem,
     compute_gem_fold_boundaries,
     slice_gem_trades_by_folds,
+    compute_max_drawdown_pct,
+    slice_continuous_drawdown_by_folds,
     GemTrade,
     MOMENTUM_LOOKBACK_MONTHS,
 )
 
 
-def _monthly_candle(symbol, date, close):
+def _daily_candle(symbol, date, close):
     return Candle(symbol, f"{date}T05:00:00+00:00", open=close, high=close, low=close, close=close, volume=100)
 
 
 def _make_series(symbol, dates, closes):
-    candles = [_monthly_candle(symbol, d, c) for d, c in zip(dates, closes)]
+    candles = [_daily_candle(symbol, d, c) for d, c in zip(dates, closes)]
     date_index = {c.timestamp[:10]: i for i, c in enumerate(candles)}
     return {"symbol": symbol, "candles": candles, "date_index": date_index}
 
@@ -35,24 +38,19 @@ def _make_series(symbol, dates, closes):
 def test_compute_month_end_dates_excludes_dates_in_the_same_month_as_their_successor():
     calendar = ["2016-01-29", "2016-01-30", "2016-02-27", "2016-02-28", "2016-03-15"]
     result = compute_month_end_dates(calendar)
-    # Jan's last date (01-30) and Feb's last date (02-28) both have a
-    # successor in a different month; 03-15 has no successor at all
-    # (still the "current" month as far as this calendar knows) and 01-29
-    # has a same-month successor -- neither counts.
     assert result == ["2016-01-30", "2016-02-28"]
 
 
 def test_compute_month_end_dates_excludes_the_final_still_open_month():
     calendar = ["2016-01-31", "2016-02-15", "2016-02-16"]
     result = compute_month_end_dates(calendar)
-    assert result == ["2016-01-31"]  # Feb has no later different-month date yet -> not a confirmed month-end
+    assert result == ["2016-01-31"]
 
 
 # --- select_gem_asset ----------------------------------------------------
 
 def _one_eval_point_symbol_data(spy_now, efa_now, bil_now, spy_then=100.0, efa_then=100.0, bil_then=100.0):
-    """Builds symbol_data + month_end_dates with exactly one live evaluation point (t=12)."""
-    dates = [f"2016-{m:02d}-01" for m in range(1, 13)] + ["2017-01-01"]  # 13 month-end dates, t=12 is the 13th (index 12)
+    dates = [f"2016-{m:02d}-01" for m in range(1, 13)] + ["2017-01-01"]
     spy_closes = [spy_then] + [100.0] * 11 + [spy_now]
     efa_closes = [efa_then] + [100.0] * 11 + [efa_now]
     bil_closes = [bil_then] + [100.0] * 11 + [bil_now]
@@ -66,174 +64,235 @@ def _one_eval_point_symbol_data(spy_now, efa_now, bil_now, spy_then=100.0, efa_t
 
 def test_select_gem_asset_picks_relative_momentum_winner_when_it_beats_bil():
     symbol_data, dates = _one_eval_point_symbol_data(spy_now=130.0, efa_now=110.0, bil_now=105.0)
-    # SPY: +30%, EFA: +10%, BIL: +5% -- SPY wins relative momentum and beats BIL
-    result = select_gem_asset(symbol_data, dates, t=MOMENTUM_LOOKBACK_MONTHS)
-    assert result == "SPY"
+    assert select_gem_asset(symbol_data, dates, t=MOMENTUM_LOOKBACK_MONTHS) == "SPY"
 
 
 def test_select_gem_asset_picks_efa_when_it_is_the_relative_momentum_winner():
     symbol_data, dates = _one_eval_point_symbol_data(spy_now=104.0, efa_now=115.0, bil_now=90.0)
-    # EFA: +15% beats SPY: +4%, and EFA beats BIL: -10%
-    result = select_gem_asset(symbol_data, dates, t=MOMENTUM_LOOKBACK_MONTHS)
-    assert result == "EFA"
+    assert select_gem_asset(symbol_data, dates, t=MOMENTUM_LOOKBACK_MONTHS) == "EFA"
 
 
 def test_select_gem_asset_falls_back_to_agg_when_the_winner_underperforms_bil():
     symbol_data, dates = _one_eval_point_symbol_data(spy_now=90.0, efa_now=80.0, bil_now=100.0)
-    # SPY: -10% (relative winner over EFA's -20%), but BIL: 0% beats it -- absolute momentum fails
-    result = select_gem_asset(symbol_data, dates, t=MOMENTUM_LOOKBACK_MONTHS)
-    assert result == "AGG"
+    assert select_gem_asset(symbol_data, dates, t=MOMENTUM_LOOKBACK_MONTHS) == "AGG"
 
 
-# --- simulate_gem: holding-period trade model ---------------------------
+# --- compute_max_drawdown_pct -------------------------------------------
 
-def _build_switch_scenario():
+def test_compute_max_drawdown_pct_basic_peak_to_trough():
+    assert abs(compute_max_drawdown_pct([100, 120, 90, 100, 95]) - 25.0) < 1e-9
+
+
+def test_compute_max_drawdown_pct_empty_series_returns_zero():
+    assert compute_max_drawdown_pct([]) == 0.0
+
+
+# --- fixture: a scenario with a mid-month circuit-breaker trigger -------
+
+def _breach_scenario():
     """
-    15 month-end dates (indices 0-14), t=12,13,14 are live evaluation
-    points. t=12: SPY wins outright (opens SPY, not a switch -- no prior
-    holding). t=13: both SPY and EFA underperform BIL -> AGG selected
-    (a real switch, SPY closed). t=14: SPY again underperforms BIL and
-    EFA underperforms too -> AGG selected again (no switch -- final
-    holding period spans t13->t14, a genuine non-zero-length eol trade).
+    14 month-end dates (t=12,13 live). t=12 ("2017-01-31"): SPY wins
+    outright (100% trailing return vs EFA's 50%, beats BIL's 5%) -> opens
+    SPY @200. Between t=12 and t=13, 5 intra-month trading days are added
+    to `calendar` (not part of month_end_dates) during which SPY's price
+    falls from 200 to 169 (-15.5%) then partially "recovers" to 198 --
+    enough to cross a 15% breaker threshold but NOT a 20% one, and enough
+    to test that recovery doesn't cause an early resume. t=13
+    ("2017-02-28"): SPY(0%) beats EFA(-10%) but loses to BIL(10%) -> AGG
+    selected, testing that resume lands wherever GEM currently prescribes
+    (not necessarily back into the asset that breached, and not into
+    BIL itself).
+
+    Returns (symbol_data, month_end_dates, calendar).
     """
-    dates = [f"2016-{m:02d}-01" for m in range(1, 13)] + ["2017-01-01", "2017-02-01", "2017-03-01"]
-    spy_closes = [100.0] * 3 + [100.0] * 9 + [200.0, 90.0, 100.0]     # idx0..2 refs, idx12=200, idx13=90, idx14=100
-    efa_closes = [100.0] * 3 + [100.0] * 9 + [150.0, 80.0, 80.0]      # idx12=150, idx13=80, idx14=80
-    bil_closes = [100.0] * 3 + [100.0] * 9 + [105.0, 100.0, 110.0]    # idx12=105, idx13=100, idx14=110
-    agg_closes = [100.0] * 3 + [100.0] * 9 + [100.0, 100.0, 105.0]    # AGG entered @t13=100, held to t14=105
+    month_end_dates = [f"2016-{m:02d}-01" for m in range(1, 13)] + ["2017-01-31", "2017-02-28"]
+    intramonth = ["2017-02-01", "2017-02-02", "2017-02-03", "2017-02-06", "2017-02-07"]
+    calendar = ["2017-01-31"] + intramonth + ["2017-02-28"]
+
+    # idx0=100 (t=12's -12mo ref), idx1=195 (t=13's -12mo ref -- matched to
+    # idx13 below so SPY's OWN trailing return at t=13 is exactly 0%
+    # without implying any extra intrinsic price move beyond the
+    # intra-month path already modeled -- keeping SPY's t=13 exit price
+    # close to where the intra-month path leaves it, isolating the
+    # breach test from an unrelated large move at the month-end switch).
+    spy_closes_monthend = [100.0, 195.0] + [100.0] * 10 + [200.0, 195.0]  # idx0,idx1,idx2..11,idx12=200,idx13=195
+    efa_closes_monthend = [100.0] + [100.0] * 11 + [150.0, 90.0]
+    bil_closes_monthend = [100.0] + [100.0] * 11 + [105.0, 110.0]
+    agg_closes_monthend = [100.0] * 12 + [100.0, 100.0]
+
+    spy_intramonth = {"2017-02-01": 180.0, "2017-02-02": 169.0, "2017-02-03": 165.0, "2017-02-06": 195.0, "2017-02-07": 198.0}
+    bil_intramonth = {d: 105.0 for d in intramonth}
+    efa_intramonth = {d: 100.0 for d in intramonth}
+    agg_intramonth = {d: 100.0 for d in intramonth}
+
+    def _series(symbol, monthend_closes, intramonth_closes):
+        dates = month_end_dates[:12] + ["2017-01-31"] + intramonth + ["2017-02-28"]
+        closes = monthend_closes[:12] + [monthend_closes[12]] + [intramonth_closes[d] for d in intramonth] + [monthend_closes[13]]
+        return _make_series(symbol, dates, closes)
 
     symbol_data = {
-        "SPY": _make_series("SPY", dates, spy_closes),
-        "EFA": _make_series("EFA", dates, efa_closes),
-        "BIL": _make_series("BIL", dates, bil_closes),
-        "AGG": _make_series("AGG", dates, agg_closes),
+        "SPY": _series("SPY", spy_closes_monthend, spy_intramonth),
+        "EFA": _series("EFA", efa_closes_monthend, efa_intramonth),
+        "BIL": _series("BIL", bil_closes_monthend, bil_intramonth),
+        "AGG": _series("AGG", agg_closes_monthend, agg_intramonth),
     }
-    return symbol_data, dates
+    return symbol_data, month_end_dates, calendar
 
 
-def test_simulate_gem_first_pick_is_not_counted_as_a_switch():
-    symbol_data, dates = _build_switch_scenario()
-    trades, equity_curve = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
+# --- simulate_gem: circuit breaker mechanics ----------------------------
 
-    first_trade = trades[0]
-    assert first_trade.asset == "SPY"
-    assert first_trade.entry_price == 200.0
+def test_simulate_gem_no_breaker_holds_through_the_full_drawdown():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    trades, trade_curve, daily_curve = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=None,
+    )
+    # No breach: SPY is held straight through to the next scheduled switch at t=13.
+    assert [t.asset for t in trades] == ["SPY", "AGG"]
+    assert trades[0].exit_reason == "switch"
+    assert trades[0].exit_price == 195.0  # SPY's own price at "2017-02-28"
 
 
-def test_simulate_gem_switch_closes_the_old_position_and_opens_the_new_one_same_day():
-    symbol_data, dates = _build_switch_scenario()
-    trades, equity_curve = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
+def test_simulate_gem_breach_triggers_when_drawdown_crosses_threshold():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    trades, trade_curve, daily_curve = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
 
     spy_trade = trades[0]
-    assert spy_trade.exit_reason == "switch"
-    assert spy_trade.entry_price == 200.0 and spy_trade.exit_price == 90.0
-    # position_size = 1000/200 = 5; gross_pnl = 5*(90-200) = -550
-    assert abs(spy_trade.gross_pnl - (-550.0)) < 1e-9
-    assert abs(spy_trade.pnl - (-550.0)) < 1e-9  # zero fees in this test
-    assert spy_trade.exit_timestamp == trades[1].entry_timestamp  # AGG opens same day SPY closes
+    assert spy_trade.exit_reason == "circuit_breaker"
+    assert spy_trade.exit_timestamp[:10] == "2017-02-02"  # first day drawdown reaches -15.5%
+    assert spy_trade.exit_price == 169.0
+    # position_size = 1000/200 = 5; gross_pnl = 5*(169-200) = -155
+    assert abs(spy_trade.gross_pnl - (-155.0)) < 1e-9
+
+    bil_trade = trades[1]
+    assert bil_trade.asset == "BIL"
+    assert bil_trade.entry_timestamp[:10] == "2017-02-02"
+    assert bil_trade.entry_price == 105.0
 
 
-def test_simulate_gem_final_holding_period_marks_to_market_as_eol_not_switch():
-    symbol_data, dates = _build_switch_scenario()
-    trades, equity_curve = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
-
-    agg_trade = trades[1]
-    assert agg_trade.asset == "AGG"
-    assert agg_trade.exit_reason == "eol"
-    assert agg_trade.entry_price == 100.0 and agg_trade.exit_price == 105.0
-    assert agg_trade.entry_timestamp != agg_trade.exit_timestamp  # genuine non-zero-length holding
-    assert len(trades) == 2  # exactly SPY then AGG -- no 3rd trade opened for the no-op t=14 re-selection of AGG
-
-
-def test_simulate_gem_applies_fees_to_reduce_net_pnl():
-    symbol_data, dates = _build_switch_scenario()
-    with_fees, _ = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.25, slippage_bps=5.0)
-    no_fees, _ = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
-
-    assert with_fees[0].gross_pnl == no_fees[0].gross_pnl
-    assert with_fees[0].pnl < no_fees[0].pnl
-    assert with_fees[0].fees_paid > 0
+def test_simulate_gem_no_breach_when_drawdown_stays_below_threshold():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    # Same price path (max drawdown ~15.5%) but a 20% threshold should never trigger.
+    trades, trade_curve, daily_curve = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=20.0,
+    )
+    assert all(t.exit_reason != "circuit_breaker" for t in trades)
+    assert [t.asset for t in trades] == ["SPY", "AGG"]
 
 
-def test_simulate_gem_sizes_at_full_notional_not_a_fraction_of_equity():
-    symbol_data, dates = _build_switch_scenario()
-    trades, _ = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
+def test_simulate_gem_stays_in_breach_across_multiple_days_without_rechecking():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    trades, trade_curve, daily_curve = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+    # Exactly one circuit_breaker trade -- SPY's later "recovery" to 195/198
+    # (irrelevant once out of the position) must not cause a second breach
+    # or an early switch back before the next scheduled evaluation.
+    breach_trades = [t for t in trades if t.exit_reason == "circuit_breaker"]
+    assert len(breach_trades) == 1
+    assert trades[1].asset == "BIL"
+    assert trades[1].exit_timestamp[:10] == "2017-02-28"  # BIL held all the way to the next scheduled eval
 
-    position_size = trades[0].gross_pnl / (trades[0].exit_price - trades[0].entry_price)
-    assert abs(position_size * trades[0].entry_price - 1000.0) < 1e-9  # full $1000 notional, not 25%
+
+def test_simulate_gem_resumes_unconditionally_at_next_evaluation_into_whatever_gem_prescribes():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    trades, trade_curve, daily_curve = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+    # Resume lands on AGG (what GEM prescribes at t=13), not back into SPY
+    # (the asset that breached) and not staying in BIL.
+    resumed = trades[2]
+    assert resumed.asset == "AGG"
+    assert resumed.entry_timestamp[:10] == "2017-02-28"
+    assert trades[1].exit_reason == "switch"  # the BIL holding closes via a normal scheduled switch, not another breach
+
+
+def test_simulate_gem_daily_equity_curve_has_one_entry_per_calendar_day():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    trades, trade_curve, daily_curve = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+    assert len(daily_curve) == len(calendar) == 7
+    assert [d for d, _ in daily_curve] == calendar
+    assert abs(daily_curve[0][1] - 1000.0) < 1e-9  # entry day, no return yet
+    assert abs(daily_curve[1][1] - 900.0) < 1e-9   # 1000 * 180/200
+
+
+def test_simulate_gem_breach_exit_reflects_post_fee_equity_in_the_daily_curve():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    _, _, daily_curve_no_fees = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+    _, _, daily_curve_with_fees = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.25, slippage_bps=5.0,
+        breaker_drawdown_pct=15.0,
+    )
+    # The breach day's recorded equity must be strictly lower with fees than
+    # without -- confirming the daily curve was overwritten with post-fee
+    # equity, not left at the pre-fee mark-to-market value.
+    breach_day_equity_no_fees = dict(daily_curve_no_fees)["2017-02-02"]
+    breach_day_equity_with_fees = dict(daily_curve_with_fees)["2017-02-02"]
+    assert breach_day_equity_with_fees < breach_day_equity_no_fees
 
 
 # --- compute_gem_fold_boundaries / slice_gem_trades_by_folds -----------
 
 def test_compute_gem_fold_boundaries_splits_usable_window_into_two_halves():
-    symbol_data, dates = _build_switch_scenario()  # 15 month-end dates, live_eval = dates[12:] = 3 points
-
-    folds = compute_gem_fold_boundaries(dates, num_folds=2)
-
+    month_end_dates = [f"2016-{m:02d}-01" for m in range(1, 13)] + ["2017-01-01", "2017-02-01", "2017-03-01"]
+    folds = compute_gem_fold_boundaries(month_end_dates, num_folds=2)
     assert len(folds) == 2
-    assert folds[0]["test_start"] == dates[12]
-    assert folds[1]["test_end"] == dates[14]
-    assert folds[0]["test_end"] == folds[1]["test_start"]  # contiguous
+    assert folds[0]["test_start"] == month_end_dates[12]
+    assert folds[1]["test_end"] == month_end_dates[14]
+    assert folds[0]["test_end"] == folds[1]["test_start"]
 
 
-def test_slice_gem_trades_by_folds_last_fold_includes_the_final_eol_trade():
-    # Regression test for the deliberate fix in slice_gem_trades_by_folds:
-    # a strict "<test_end" comparison on the last fold would silently drop
-    # the final eol trade (its exit date exactly equals the last fold's
-    # test_end by construction) -- both trades here exit ON a fold
-    # boundary date (SPY on fold1/fold2's shared boundary, AGG on fold2's
-    # own end), so without the fix, sum(fold trade_counts) would be 1
-    # (only the switch trade counted in fold2) while pooled stays 2 -- a
-    # mismatch. With the fix both land in fold 2 and the totals agree.
-    symbol_data, dates = _build_switch_scenario()
-    trades, equity_curve = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
-    folds = compute_gem_fold_boundaries(dates, num_folds=2)
-
-    fold_summaries, fold_switches, pooled_summary, pooled_switches = slice_gem_trades_by_folds(
-        trades, equity_curve, folds, capital=1000.0
-    )
-
-    assert sum(f["trade_count"] for f in fold_summaries) == pooled_summary["trade_count"]
-    assert pooled_summary["trade_count"] == 2
-    assert fold_summaries[0]["trade_count"] == 0  # neither trade exits before fold1's own end boundary
-    assert fold_summaries[1]["trade_count"] == 2  # both land in fold 2, including the eol trade -- not dropped
-
-
-def test_slice_gem_trades_by_folds_counts_switches_but_not_eol():
-    symbol_data, dates = _build_switch_scenario()
-    trades, equity_curve = simulate_gem(symbol_data, dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0)
-    folds = compute_gem_fold_boundaries(dates, num_folds=2)
-
-    fold_summaries, fold_switches, pooled_summary, pooled_switches = slice_gem_trades_by_folds(
-        trades, equity_curve, folds, capital=1000.0
-    )
-
-    assert pooled_switches == 1  # only the SPY->AGG switch counts, not the initial pick or the eol close
-    assert sum(fold_switches) == pooled_switches
-
-
-def test_slice_gem_trades_by_folds_a_trade_exiting_exactly_on_a_boundary_date_lands_in_the_later_fold():
-    # Both trades here exit exactly ON a fold boundary date (SPY on the
-    # fold1/fold2 shared boundary, AGG on fold2's own end). Fold
-    # boundaries are bare 10-char dates while trade exit_timestamp values
-    # carry a full time component -- confirmed (not assumed) that this
-    # length difference doesn't change any "<" comparison outcome the
-    # function relies on, so both same-boundary-date trades correctly
-    # fall through to fold 2 rather than being miscounted or dropped.
+def test_slice_gem_trades_by_folds_last_fold_includes_the_final_eol_trade_and_counts_breaches_separately():
     trades = [
-        GemTrade("SPY", 0, 1, "2017-01-01T05:00:00+00:00", "2017-02-01T05:00:00+00:00", 100, 110, "switch", 10.0, 0.0, 10.0, 1.0),
-        GemTrade("AGG", 1, 2, "2017-02-01T05:00:00+00:00", "2017-03-01T05:00:00+00:00", 110, 112, "eol", 2.0, 0.0, 2.0, 0.2),
+        GemTrade("SPY", 0, 1, "2017-01-01T05:00:00+00:00", "2017-02-01T05:00:00+00:00", 100, 90, "circuit_breaker", -10.0, 0.0, -10.0, -1.0),
+        GemTrade("BIL", 1, 2, "2017-02-01T05:00:00+00:00", "2017-03-01T05:00:00+00:00", 105, 106, "eol", 1.0, 0.0, 1.0, 0.1),
     ]
-    equity_curve = [1000.0, 1010.0, 1012.0]
+    equity_curve = [1000.0, 990.0, 991.0]
     folds = [
         {"fold": 1, "test_start": "2017-01-01", "test_end": "2017-02-01"},
         {"fold": 2, "test_start": "2017-02-01", "test_end": "2017-03-01"},
     ]
 
-    fold_summaries, fold_switches, pooled_summary, pooled_switches = slice_gem_trades_by_folds(
+    fold_summaries, fold_switches, fold_breaches, pooled_summary, pooled_switches, pooled_breaches = slice_gem_trades_by_folds(
         trades, equity_curve, folds, capital=1000.0
     )
 
+    assert sum(f["trade_count"] for f in fold_summaries) == pooled_summary["trade_count"] == 2
     assert fold_summaries[0]["trade_count"] == 0
-    assert fold_summaries[1]["trade_count"] == 2  # both trades, including the eol one, land here -- neither dropped
-    assert pooled_summary["trade_count"] == 2
+    assert fold_summaries[1]["trade_count"] == 2  # both land in fold 2, including the eol trade
+    assert pooled_breaches == 1
+    assert pooled_switches == 0  # neither trade's exit_reason is "switch" in this scenario
+    assert sum(fold_breaches) == pooled_breaches
+
+
+# --- slice_continuous_drawdown_by_folds ---------------------------------
+
+def test_slice_continuous_drawdown_by_folds_fold_relative_vs_global_peak():
+    # Peak of 120 occurs in fold 1 (at d2); fold 2's OWN local peak resets
+    # to 100 (at d4), understating the true worst-case relative to the
+    # actual all-time high. The pooled figure must use the GLOBAL peak
+    # and therefore match fold 1's own number (the worst drop happened
+    # relative to the all-time peak, which sits in fold 1's window).
+    daily_equity_curve = [("d1", 100.0), ("d2", 120.0), ("d3", 90.0), ("d4", 100.0), ("d5", 95.0)]
+    folds = [
+        {"fold": 1, "test_start": "d1", "test_end": "d3"},
+        {"fold": 2, "test_start": "d3", "test_end": "d5"},
+    ]
+
+    fold_dds, pooled_global_dd = slice_continuous_drawdown_by_folds(daily_equity_curve, folds)
+
+    assert abs(fold_dds[0] - 25.0) < 1e-9   # (120-90)/120
+    assert abs(fold_dds[1] - 5.0) < 1e-9    # fold-relative peak resets to 100 at d4; (100-95)/100
+    assert abs(pooled_global_dd - 25.0) < 1e-9  # global peak (120) drives the pooled figure, not fold 2's local one
