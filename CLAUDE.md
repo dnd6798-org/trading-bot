@@ -1410,6 +1410,92 @@ and `data_ingestion.py`'s live fetch are untouched.
    selection, DTE, credit target) and fold structure against this
    confirmed 2.5-year window.
 
+2. **Field-level availability check (executed) — extends finding 1, same
+   step, not a new milestone.** Finding 1 confirmed the DATE floor for
+   daily bars; this checked what FIELDS actually exist historically,
+   since a credit-spread strategy needs enough to reconstruct
+   approximately what a ~30-delta put would have cost/paid at any past
+   date. Same script, extended in place (not a new file, same one-off
+   convention). Checked via SDK introspection (`OptionHistoricalDataClient`'s
+   method surface, `Bar`/`Trade`/`Quote`/`OptionsSnapshot`/`OptionsGreeks`
+   model fields) AND confirmed live against the account, not assumed from
+   the SDK alone.
+
+   **Result: only trade-derived data has a historical record. Bid/ask and
+   IV/greeks do not.** Confirmed available historically (2024-01-18
+   forward, same floor as finding 1): daily OHLCV bars
+   (open/high/low/close/volume/trade_count/vwap) and raw historical trade
+   prints (`get_option_trades()` — price/size/timestamp/exchange/
+   conditions/tape, tick-level). Confirmed NOT available historically at
+   any date, checked directly rather than inferred: bid/ask
+   (`OptionHistoricalDataClient` has no historical-quotes method at all —
+   only `get_option_latest_quote`, current-moment only) and implied
+   volatility/greeks (`implied_volatility`/`greeks` fields exist only on
+   `OptionsSnapshot`, which is also latest-only — there is no
+   timestamp-indexed historical counterpart anywhere in this SDK surface).
+
+   **Practical implication for the strategy design (flagged, not
+   resolved — this is a design input for the next step, not a decision
+   made here):** a ~30-delta put's historical price cannot be looked up
+   directly. It would need to be reconstructed: use the underlying's
+   historical price + the option's own historical trade/bar price to
+   back out an implied vol via Black-Scholes (treating the historical
+   trade/bar close as a stand-in for the true price, since no historical
+   bid/ask/mid exists to anchor to), then derive an approximate delta
+   from that IV to identify which strike was ~30-delta on a given day.
+   This is a real step down in fidelity from a strategy that could just
+   read historical delta/IV off the data feed directly, and introduces
+   its own estimation error (no way to distinguish a historical print
+   from being on the bid, ask, or in between).
+
+   **Secondary findings, both confirmed live against the account, both
+   informational — neither blocks backtesting since they're about
+   real-time/live access, not historical data:**
+   - This account's OPRA (real-time consolidated options feed) agreement
+     is NOT signed — a live snapshot request with `feed=OPRA` returns a
+     403 (`"OPRA agreement is not signed"`). Historical bar requests with
+     `feed=OPRA` do NOT hit this error (confirmed working in finding 1's
+     ceiling check) — the restriction is specific to live/real-time
+     snapshot access, not historical data, so it doesn't affect this
+     track's backtesting plan, but would need resolving before any live
+     put-credit-spread trading.
+   - Even on the INDICATIVE feed (the one that works), live IV/greeks
+     coverage was sparse in a 5-strike same-expiry sample tested just now
+     — only 1 of 5 nearby SPY strikes had non-null `implied_volatility`/
+     `greeks` on its snapshot, the other 4 returned a valid bid/ask quote
+     but `None` for IV/greeks. Read as "Alpaca's snapshot greeks
+     computation appears to require a fresher/more liquid quote than bare
+     quote availability guarantees," not further diagnosed. Reinforces
+     the finding above rather than contradicting it — greeks access is
+     unreliable even live, let alone historically.
+
+   **Gaps/data-quality notes, informational, from the same probing:**
+   - Per-contract coverage within the usable window is NOT uniform even
+     for near-ATM strikes — one specific tested contract
+     (`SPY240117C00475000`, a Jan 2024 monthly) returned zero bars AND
+     zero trade prints despite being well inside the confirmed
+     2024-01-18+ floor window; other contracts in the same test batch had
+     dense coverage. Some individual strike/expiry combinations may
+     simply have no prints at all, not just thin ones — worth checking
+     per-contract when the actual credit-spread mechanics are designed,
+     not assuming every 30-delta candidate on every historical date will
+     have data.
+   - Far-dated series (e.g., a Dec 2027 LEAPS expiry) get listed
+     progressively — bars for that whole expiry only start ~2025-01-02/03
+     regardless of strike, well after the account's general 2024-01-18
+     options-data floor. Confirmed this is a listing-timing artifact (two
+     different strikes on the same far expiry both start on the same
+     later date), not a data gap — but means a point-in-time historical
+     options chain must be queried as of each historical date, not
+     assumed from today's active contract list.
+
+   **No fold structure or adopt bar decided this step either — reporting
+   availability only, per instruction.** Same next step as finding 1:
+   design the put credit spread mechanics and fold structure, pending a
+   separate, explicit go-ahead — this finding is input to that design
+   (specifically, how strikes get selected without historical delta),
+   not a substitute for it.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1527,8 +1613,13 @@ options account approval level and probes `get_option_bars()` directly
 against manually-constructed OCC symbols to find the real historical bar
 floor, rather than trusting `GetOptionContractsRequest`'s contract-search
 range (which turned out to disagree with the real bar-data floor by 15
-days — see "Track C findings" above). No production code touched yet —
-`data_ingestion.py`/`execution.py` have no options-specific functions
+days — see "Track C findings" above). Extended in place (finding 2, same
+file) to also probe `get_option_trades()` (historical tick data — works,
+same floor), confirm no historical-quotes method exists on
+`OptionHistoricalDataClient`, and confirm `implied_volatility`/`greeks`
+exist only on the latest-only `OptionsSnapshot`, checked live against the
+account rather than assumed from the SDK. No production code touched yet
+— `data_ingestion.py`/`execution.py` have no options-specific functions
 yet; those come with the actual strategy implementation, not this
 diagnostic step.
 
