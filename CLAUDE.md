@@ -1347,6 +1347,69 @@ and `data_ingestion.py`'s live fetch are untouched.
    **No adopt/reject verdict rendered — raw numbers only, per
    instruction; decision deferred to the planning chat.**
 
+### Track C findings
+
+1. **Options historical data availability check (executed) — first step
+   per instruction, not a backtest.** Before locking any fold structure or
+   adopt bar for the SPY put credit spread strategy (spec v25 §2, §10.5),
+   checked what this account's Alpaca options data plan actually makes
+   available, given both prior equity tracks hit an undiscovered data
+   floor (stock data truncated at 2016-01-04, Track B finding) and options
+   data is generally sparser industry-wide. New one-off script
+   `scripts/check_options_data_availability.py` (same non-maintained
+   convention as `select_universe.py`/`verify_finding12_sizing.py`/
+   `compute_gem_benchmarks.py`).
+
+   **Account approval:** `options_approved_level` = 3, `options_trading_level`
+   = 3 on the paper account (equity $100,000, unrelated to the $10,000
+   paper-validation notional used for backtest position sizing) — level 3
+   covers defined-risk multi-leg spreads, so no approval-level blocker for
+   the put credit spread structure.
+
+   **Two different floors found, NOT the same — the contract-metadata one
+   is a trap, flagged explicitly:** `GetOptionContractsRequest(status=
+   'inactive')` search suggested SPY contract metadata is queryable back
+   to expirations on/after ~2024-01-03. But testing actual
+   `get_option_bars()` calls directly against manually-constructed OCC
+   symbols (bypassing the contract-search floor entirely) found **zero
+   bars for every SPY expiry/strike/call-or-put tested before 2024-01-18**
+   — including near-ATM strikes on the same 2024-01-03 expiry the
+   contract-metadata search said it could find — and **dense, continuous
+   daily coverage from 2024-01-18 onward** (confirmed via a full-life scan
+   of a March 2024 expiry: 40 bars, one per trading day, listing date to
+   expiry, real volume throughout). **The real, usable floor for
+   backtesting is 2024-01-18, not the ~2024-01-03 the contract-metadata
+   search implied** — the lesson carried forward from Track B (derive the
+   usable window from actual data timestamps, not from a search endpoint's
+   own reported range) applied a second time, and would have been wrong a
+   second time if not checked directly.
+
+   **Ceiling:** confirmed current through 2026-08-07 (session date
+   2026-08-09, same ~2-day lag pattern as the equity feeds) via a
+   long-dated LEAPS contract still trading. **Feed parameter (OPRA vs.
+   INDICATIVE) makes no difference** — both returned identical bar counts
+   and date ranges, so this floor is a genuine account/data-plan
+   limitation, not a feed-tier artifact.
+
+   **Usable window: 2024-01-18 → 2026-08-07, roughly 2.5 years.** This is
+   shorter than both prior tracks (Track A ~9.5yr usable, Track B
+   ~10.6yr) — most likely because Alpaca's options market-data product
+   itself is newer than its equity data, not an account-tier restriction
+   specific to this account (the floor lines up with when Alpaca is
+   generally understood to have launched options market data, not with
+   any SPY-specific listing gap — SPY options have traded for decades).
+   2.5 years is short enough that fold structure needs care to avoid the
+   sample-starvation failure mode findings 9 (crypto RSI mean-reversion,
+   3 trades) and 13 (weekly-gated Donchian, 44-54 trades) already hit in
+   this repo — flagged for the next step, not resolved here per
+   instruction ("not a full backtest yet").
+
+   **No fold structure or adopt bar decided this step — reporting
+   availability only, per instruction.** Next step (separate, explicit
+   go-ahead needed): design the put credit spread mechanics (strike
+   selection, DTE, credit target) and fold structure against this
+   confirmed 2.5-year window.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1457,18 +1520,34 @@ breaker mechanism specifically) — see "Track A findings" 2 and 3 above
 for the full result, the max-drawdown-understates-risk caveat, the v1
 whipsaw diagnosis, and the v2 peak-reset fix.
 
+**Track C:** `scripts/check_options_data_availability.py` (new, one-off,
+not meant to be maintained — same convention as `select_universe.py`/
+`verify_finding12_sizing.py`/`compute_gem_benchmarks.py`). Confirms SPY
+options account approval level and probes `get_option_bars()` directly
+against manually-constructed OCC symbols to find the real historical bar
+floor, rather than trusting `GetOptionContractsRequest`'s contract-search
+range (which turned out to disagree with the real bar-data floor by 15
+days — see "Track C findings" above). No production code touched yet —
+`data_ingestion.py`/`execution.py` have no options-specific functions
+yet; those come with the actual strategy implementation, not this
+diagnostic step.
+
 ### Not yet decided (blocks next steps)
 
-Track A circuit-breaker mechanics (all-time-peak-style trigger checked
-daily, exit to BIL, unconditional resume at next scheduled evaluation)
-were specified and executed this session, diagnosed as causing a
-permanent whipsaw in their original (v1) form, and corrected (v2,
-peak-reset-on-resume) — see "Track A findings" 2 and 3 above. v2 clears
-the pre-committed bar on both thresholds and meaningfully reduces true
-cumulative drawdown versus base GEM (24.58%/24.94% vs 33.79%) while
-keeping most of the return. No adopt/reject verdict has been rendered on
-any Track A variant (base, v2-15%, v2-20%) — that decision is explicitly
-deferred to the planning chat, not made in this repo.
+**UPDATE: this is now resolved — Track A is CLOSED.** Track A
+circuit-breaker mechanics (all-time-peak-style trigger checked daily,
+exit to BIL, unconditional resume at next scheduled evaluation) were
+specified and executed, diagnosed as causing a permanent whipsaw in their
+original (v1) form, and corrected (v2, peak-reset-on-resume) — see "Track
+A findings" 2 and 3 above. v2 clears the pre-committed bar on both
+thresholds and meaningfully reduces true cumulative drawdown versus base
+GEM (24.58%/24.94% vs 33.79%) while keeping most of the return —
+BUT Track A finding 4's mandatory buy-and-hold comparison (see above)
+showed all three GEM variants (base, v2-15%, v2-20%) underperform a
+simple static 60/40 SPY/AGG buy-and-hold on BOTH return and drawdown over
+the same window. Verdict rendered: Track A is CONCLUDED, no adopt, no
+further GEM work planned. Track C (options premium-selling) has since
+started — see "Blocked/pending" below.
 
 Four strategy families tested against the original BTC/USD + ETH/USD,
 1-2 asset universe are closed or inconclusive on their own terms — none
@@ -1634,6 +1713,33 @@ be checked and any truncation flagged BEFORE locking a test window or
 running any backtest — see below for that check's result. Track C
 remains locked as a concept but not yet started — do not begin it without
 a fresh, explicit instruction to switch tracks.
+
+**UPDATE: Track A is now fully CONCLUDED (base GEM + both v2
+circuit-breaker variants — see Track A findings 1-4 above).** None of the
+three variants beat a simple static 60/40 SPY/AGG buy-and-hold on return
+or drawdown; the 60/40 blend dominates on both. No further GEM work is
+planned. This closes Track A the same way the crypto search closed at
+finding 14 — a concluded line, not an open one.
+
+**NEW MILESTONE, STARTING NOW: Track C.** Options premium-selling — the
+third and final track (spec v23 §2's original three-track split). The
+originally-specified structure (cash-secured put-writing, modeled on
+Cboe's PUT index) turned out to need far more capital than the $10,000
+paper-validation notional supports at SPY's current price (~$50-60k to
+cash-secure one contract) — pivoted to a defined-risk **put credit
+spread** instead: same premium-collection thesis, a fraction of the
+capital, but an honest step down in evidence quality (Cboe's PUT index
+tracks pure cash-secured puts, not spreads — there is no equivalent
+published long-run index for the spread structure specifically). Logged
+in spec v25 §2 and §10.5. Per the same "check data depth before locking a
+window" lesson Track B/A already had to apply twice, the first step is
+checking Alpaca's actual SPY options historical data availability on this
+account — not assumed, given both prior equity tracks hit an undiscovered
+floor and options data is generally sparser industry-wide. **Result (see
+Track C finding 1 below): usable window confirmed as 2024-01-18 →
+2026-08-07, ~2.5 years — shorter than either prior track.** No fold
+structure or adopt bar decided yet; that is the next step, pending a
+fresh go-ahead.
 
 ## Hard rules — never do these
 
