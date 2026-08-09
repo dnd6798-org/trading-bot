@@ -137,6 +137,27 @@ simulates. The backtest's "resume automatically, unconditionally, at the
 next scheduled date" is the simplest testable proxy for that process, not
 a claim that live trading would behave identically.
 
+PEAK-RESET FIX (this revision, user instruction — see simulate_gem()'s
+docstring for full detail): the ORIGINAL variants (CLAUDE.md Track A
+finding 2, now logged as REJECTED — specification flaw) tracked the
+breach trigger's peak as the strategy's TRUE all-time high, never reset.
+Combined with unconditional resume, this was diagnosed as a permanent
+lockout: once equity fell behind that peak by more than the threshold,
+every freshly-resumed position read as already-breached on day 0 (no
+price movement needed), forcing an immediate re-exit with no way to ever
+close the gap — ~89-97% of that version's "circuit_breaker" exits were
+zero-day whipsaws, not genuine drawdown events. THE FIX: the tracked
+peak now RESETS to current equity at the moment of resuming (not at the
+moment of breach, and not before) — deliberately changing what the
+guardrail promises, from "bounds cumulative drawdown from the strategy's
+true all-time peak" to "bounds drawdown since the last resume." The
+alternative (not resetting) was a lockout, not stricter protection, so
+this is a correctness fix, not a loosening of the guardrail. The TRUE
+cumulative all-time-peak drawdown is still fully recoverable for
+REPORTING purposes from `daily_equity_curve` alone (see
+slice_continuous_drawdown_by_folds()) — only the TRIGGER's internal peak
+resets, not the reporting.
+
 Two parallel equity series are returned by simulate_gem(), not one:
   - `trades` / a TRADE-CLOSE equity curve (via slice_gem_trades_by_folds,
     unchanged from before) — still used for net%/gross%/win-rate/etc.
@@ -151,11 +172,20 @@ Two parallel equity series are returned by simulate_gem(), not one:
     new trades (breach exits), so it changes simulation outcomes, not
     just reporting.
 
-SWITCH vs. BREACH counting: the per-fold "position change" count used for
-the thin-sample flag now counts BOTH exit_reason "switch" and
-"circuit_breaker" (both are real reallocation events with real
-transaction costs) — reported as separate switch/breach columns in the
-printed table, and summed for the thin-sample check.
+SWITCH vs. BREACH vs. RESUME counting: a "resume" (the trade that closes
+a BIL breach-holding at the next scheduled evaluation) is now its own
+exit_reason, distinct from a "switch" (a normal, non-breach-driven GEM
+reallocation) — needed to attribute transaction costs to the breaker
+mechanism specifically (breach + resume) versus normal monthly rotation
+(switch + eol), per instruction. For the per-fold "position change"
+count used for the thin-sample flag, "switch" and "resume" are pooled
+together with "circuit_breaker" (all three are real reallocation events
+with real transaction costs) — reported as separate switch/breach
+columns in the printed table (resume counts folded into "switch" there
+for that specific table, since the fold table predates this distinction
+and the thin-sample check doesn't need the finer split), and summed for
+the thin-sample check. attribute_breaker_costs() gives the finer
+breach/resume/normal split used in the cost-attribution report.
 
 Usage:
     python scripts/backtest_gem.py
@@ -199,7 +229,7 @@ class GemTrade:
     exit_timestamp: str
     entry_price: float
     exit_price: float
-    exit_reason: str  # "switch" | "circuit_breaker" | "eol"
+    exit_reason: str  # "switch" | "resume" | "circuit_breaker" | "eol"
     gross_pnl: float
     fees_paid: float
     pnl: float  # net of fees
@@ -284,9 +314,31 @@ def simulate_gem(
     resuming at the next scheduled monthly evaluation regardless of
     recovery.
 
-    Returns (trades, trade_close_equity_curve, daily_equity_curve).
-    `trades` is in exit-chronological order. `daily_equity_curve` is a
-    list of (date, equity) tuples, one per trading day in `calendar`.
+    Returns (trades, trade_close_equity_curve, daily_equity_curve,
+    reset_dates). `trades` is in exit-chronological order.
+    `daily_equity_curve` is a list of (date, equity) tuples, one per
+    trading day in `calendar`. `reset_dates` is a list of dates on which
+    the breaker's tracked peak was reset (see FIX below) — starts with
+    `calendar[0]` (the implicit initial reset) plus one entry per
+    breach-then-resume cycle.
+
+    FIX (this revision): the breaker's tracked peak now RESETS to current
+    equity at the moment of RESUMING trading (not at the moment of
+    breach, and never before). This is a deliberate change to what the
+    guardrail promises: it now bounds drawdown SINCE THE LAST RESUME, not
+    cumulative drawdown from the strategy's true all-time peak. The prior
+    (unfixed) design's alternative, confirmed against real results, was a
+    permanent lockout — once equity fell behind the true all-time peak by
+    more than the threshold, every freshly-resumed position read as
+    already-breached on day 0 (mark_equity == entry_equity == pre-resume
+    equity, already past the threshold relative to the never-reset peak),
+    forcing an immediate re-exit with no way to ever close the gap. See
+    CLAUDE.md's Track A finding 2 (the original, now-rejected variants)
+    for the full diagnosis this fix responds to. The TRUE cumulative
+    drawdown from the strategy's actual all-time peak is still fully
+    recoverable for reporting from `daily_equity_curve` alone (it doesn't
+    depend on what internal peak the trigger used) — see
+    slice_continuous_drawdown_by_folds()'s pooled_global_dd.
     """
     cost_frac_per_leg = fee_pct / 100 + slippage_bps / 10000
     live_eval_month_ends = month_end_dates[MOMENTUM_LOOKBACK_MONTHS:]
@@ -296,6 +348,7 @@ def simulate_gem(
     trades = []
     trade_close_equity_curve = [capital]
     daily_equity_curve = []
+    reset_dates = [calendar[0]] if calendar else []
 
     equity = capital
     peak_equity = capital
@@ -354,9 +407,11 @@ def simulate_gem(
             if held_asset is None:
                 _open_position(desired, date, equity)
             elif in_breach:
-                new_equity = _close_position(date, "switch")  # unconditional resume, per instruction
+                new_equity = _close_position(date, "resume")  # unconditional resume, per instruction
                 _open_position(desired, date, new_equity)
                 in_breach = False
+                peak_equity = new_equity  # FIX: reset tracked peak here, not before -- see docstring
+                reset_dates.append(date)
             elif desired != held_asset:
                 new_equity = _close_position(date, "switch")
                 _open_position(desired, date, new_equity)
@@ -381,7 +436,7 @@ def simulate_gem(
         new_equity = _close_position(final_date, "eol")
         daily_equity_curve[-1] = (final_date, new_equity)
 
-    return trades, trade_close_equity_curve, daily_equity_curve
+    return trades, trade_close_equity_curve, daily_equity_curve, reset_dates
 
 
 def compute_gem_fold_boundaries(month_end_dates, num_folds=NUM_FOLDS):
@@ -440,7 +495,7 @@ def slice_gem_trades_by_folds(trades, equity_curve, folds, capital):
         fold_curve = equity_curve[start_idx:end_idx + 1]
         starting_equity = fold_curve[0] if fold_curve else capital
         fold_summaries.append(summarize(fold_trades, fold_curve if fold_curve else [starting_equity], starting_equity))
-        fold_switch_counts.append(sum(1 for t in fold_trades if t.exit_reason == "switch"))
+        fold_switch_counts.append(sum(1 for t in fold_trades if t.exit_reason in ("switch", "resume")))
         fold_breach_counts.append(sum(1 for t in fold_trades if t.exit_reason == "circuit_breaker"))
 
     pooled_start_idx = boundaries[0]
@@ -448,7 +503,7 @@ def slice_gem_trades_by_folds(trades, equity_curve, folds, capital):
     pooled_curve = equity_curve[pooled_start_idx:]
     pooled_starting_equity = pooled_curve[0] if pooled_curve else capital
     pooled_summary = summarize(pooled_trades, pooled_curve if pooled_curve else [pooled_starting_equity], pooled_starting_equity)
-    pooled_switch_count = sum(1 for t in pooled_trades if t.exit_reason == "switch")
+    pooled_switch_count = sum(1 for t in pooled_trades if t.exit_reason in ("switch", "resume"))
     pooled_breach_count = sum(1 for t in pooled_trades if t.exit_reason == "circuit_breaker")
 
     return fold_summaries, fold_switch_counts, fold_breach_counts, pooled_summary, pooled_switch_count, pooled_breach_count
@@ -474,13 +529,60 @@ def slice_continuous_drawdown_by_folds(daily_equity_curve, folds):
     return fold_dds, pooled_global_dd
 
 
+def compute_leg_max_drawdowns(daily_equity_curve, reset_dates):
+    """
+    Splits `daily_equity_curve` into "legs" bounded by `reset_dates` (see
+    simulate_gem()'s PEAK-RESET FIX) — each leg starts fresh at a reset
+    point and uses ITS OWN local peak (exactly compute_max_drawdown_pct's
+    normal behavior when given just that leg's own values). The breaker's
+    JOB is to keep every leg's own drawdown bounded near the configured
+    threshold; this is the sanity-check metric for that, distinct from
+    the pooled GLOBAL (never-resetting) figure
+    slice_continuous_drawdown_by_folds() reports, which answers a
+    different question (could cumulative loss across many reset cycles
+    still add up over time). Returns (leg_dds, worst_leg_dd).
+    """
+    if not daily_equity_curve:
+        return [], 0.0
+    boundaries = reset_dates + [daily_equity_curve[-1][0]]
+    leg_dds = []
+    for i in range(len(boundaries) - 1):
+        leg_start, leg_end = boundaries[i], boundaries[i + 1]
+        is_last = i == len(boundaries) - 2
+        if is_last:
+            values = [e for d, e in daily_equity_curve if leg_start <= d <= leg_end]
+        else:
+            values = [e for d, e in daily_equity_curve if leg_start <= d < leg_end]
+        if values:
+            leg_dds.append(compute_max_drawdown_pct(values))
+    worst_leg_dd = max(leg_dds) if leg_dds else 0.0
+    return leg_dds, worst_leg_dd
+
+
+def attribute_breaker_costs(trades):
+    """
+    Splits fees_paid across three buckets: breach exits ("circuit_breaker"
+    — the forced defensive exit itself), resumes ("resume" — the forced
+    reallocation out of BIL back into a risky asset at the next scheduled
+    evaluation, itself only happening because a breach occurred), and
+    normal monthly rotation ("switch" + "eol" — GEM's own signal-driven
+    reallocation, unrelated to the breaker). "Breaker-attributable" cost
+    is breach + resume; "normal monthly rotation" cost is everything
+    else. Returns (breach_fees, resume_fees, normal_fees).
+    """
+    breach_fees = sum(t.fees_paid for t in trades if t.exit_reason == "circuit_breaker")
+    resume_fees = sum(t.fees_paid for t in trades if t.exit_reason == "resume")
+    normal_fees = sum(t.fees_paid for t in trades if t.exit_reason in ("switch", "eol"))
+    return breach_fees, resume_fees, normal_fees
+
+
 def run_variant(symbol_data, calendar, month_end_dates, folds, breaker_drawdown_pct, label):
     """Runs one variant (base GEM if breaker_drawdown_pct is None, else a breaker threshold) net and gross, and assembles its full report data."""
-    net_trades, net_trade_curve, net_daily_curve = simulate_gem(
+    net_trades, net_trade_curve, net_daily_curve, net_reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, fee_pct=GEM_COMMISSION_PCT, slippage_bps=GEM_SLIPPAGE_BPS,
         breaker_drawdown_pct=breaker_drawdown_pct,
     )
-    gross_trades, gross_trade_curve, gross_daily_curve = simulate_gem(
+    gross_trades, gross_trade_curve, gross_daily_curve, _ = simulate_gem(
         symbol_data, calendar, month_end_dates, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=breaker_drawdown_pct,
     )
@@ -541,7 +643,7 @@ def run_variant(symbol_data, calendar, month_end_dates, folds, breaker_drawdown_
         print(f"    fold {fold['fold']} net-of-cost: {'positive' if net_folds[i]['total_return_pct'] > 0 else 'negative/zero'} ({net_folds[i]['total_return_pct']:.2f}%)")
     print(f"    pooled net-of-cost: {'positive' if net_pooled['total_return_pct'] > 0 else 'negative/zero'} ({net_pooled['total_return_pct']:.2f}%)")
 
-    return {
+    result = {
         "label": label,
         "trades": net_trades,
         "pooled_net_pct": net_pooled["total_return_pct"],
@@ -549,6 +651,34 @@ def run_variant(symbol_data, calendar, month_end_dates, folds, breaker_drawdown_
         "pooled_switches": net_pooled_switches,
         "pooled_breaches": net_pooled_breaches,
     }
+
+    if breaker_drawdown_pct is not None:
+        # Extra diagnostics specific to the breaker variants, per instruction:
+        # per-leg drawdown sanity check, genuine-vs-whipsaw breach count, cost attribution.
+        leg_dds, worst_leg_dd = compute_leg_max_drawdowns(net_daily_curve, net_reset_dates)
+        breach_trades = [t for t in net_trades if t.exit_reason == "circuit_breaker"]
+        zero_day_breaches = [t for t in breach_trades if t.entry_timestamp[:10] == t.exit_timestamp[:10]]
+        genuine_breaches = [t for t in breach_trades if t.entry_timestamp[:10] != t.exit_timestamp[:10]]
+        breach_fees, resume_fees, normal_fees = attribute_breaker_costs(net_trades)
+        total_fees = breach_fees + resume_fees + normal_fees
+
+        print(f"\n  --- breaker-specific diagnostics ---")
+        print(f"  reset cycles: {len(net_reset_dates)}  |  worst single reset-cycle leg drawdown: {worst_leg_dd:.2f}%  (threshold: {breaker_drawdown_pct:.0f}% -- sanity check: should land near the threshold)")
+        print(f"  circuit-breaker exits: {len(breach_trades)} total  |  genuine multi-day breaches: {len(genuine_breaches)}  |  zero-day same-day re-breaches: {len(zero_day_breaches)} (should be near zero now)")
+        for t in genuine_breaches:
+            days_held = (datetime.fromisoformat(t.exit_timestamp) - datetime.fromisoformat(t.entry_timestamp)).days
+            print(f"    genuine breach: {t.asset} {t.entry_timestamp[:10]} -> {t.exit_timestamp[:10]} ({days_held}d held), pnl=${t.pnl:.2f}")
+        print(f"  transaction costs: breaker-attributable (breach+resume) ${breach_fees + resume_fees:.2f}  |  normal monthly rotation ${normal_fees:.2f}  |  total ${total_fees:.2f}")
+
+        result.update({
+            "worst_leg_dd_pct": worst_leg_dd,
+            "genuine_breach_count": len(genuine_breaches),
+            "zero_day_breach_count": len(zero_day_breaches),
+            "breaker_attributable_fees": breach_fees + resume_fees,
+            "normal_rotation_fees": normal_fees,
+        })
+
+    return result
 
 
 def main():
@@ -583,6 +713,12 @@ def main():
         f"recovery. Real deployment would require manual review/clearance per spec §7 (halt_state.py's live "
         f"convention) -- a live resume would likely be slower and more conservative than this backtest simulates."
     )
+    print(
+        f"PEAK-RESET FIX (v2, this revision): the breaker's tracked peak now resets to current equity at the moment "
+        f"of RESUMING (not at breach, and not before) -- bounds drawdown SINCE THE LAST RESUME, not cumulative "
+        f"drawdown from the strategy's true all-time peak. The original (v1) variants are REJECTED as a "
+        f"specification flaw -- see CLAUDE.md Track A finding 2 -- and are not reproduced by this script anymore."
+    )
 
     folds = compute_gem_fold_boundaries(month_end_dates, num_folds=NUM_FOLDS)
     print(f"\nfold boundaries ({NUM_FOLDS} folds, no separate training span):")
@@ -590,7 +726,7 @@ def main():
         print(f"  fold {fold['fold']}: test {fold['test_start']} -> {fold['test_end']}")
 
     variants = [("Base GEM (no circuit breaker)", None)] + [
-        (f"GEM + {pct:.0f}% circuit breaker", pct) for pct in BREAKER_THRESHOLDS_PCT
+        (f"GEM + {pct:.0f}% circuit breaker (v2, peak-reset-on-resume)", pct) for pct in BREAKER_THRESHOLDS_PCT
     ]
     results = [
         run_variant(symbol_data, calendar, month_end_dates, folds, threshold, label)
@@ -602,12 +738,21 @@ def main():
         [{
             "variant": r["label"],
             "pooled_net%": f"{r['pooled_net_pct']:.2f}",
-            "true_max_dd%": f"{r['pooled_true_dd_pct']:.2f}",
+            "true_global_dd%": f"{r['pooled_true_dd_pct']:.2f}",
+            "worst_leg_dd%": f"{r['worst_leg_dd_pct']:.2f}" if "worst_leg_dd_pct" in r else "n/a",
             "switches": r["pooled_switches"],
             "breaches": r["pooled_breaches"],
+            "genuine_breach": r.get("genuine_breach_count", "n/a"),
+            "zeroday_breach": r.get("zero_day_breach_count", "n/a"),
         } for r in results],
-        [("variant", "variant"), ("pooled_net%", "pooled_net%"), ("true_max_dd%", "true_max_dd%"), ("switches", "switches"), ("breaches", "breaches")],
+        [
+            ("variant", "variant"), ("pooled_net%", "pooled_net%"),
+            ("true_global_dd%", "true_global_dd%"), ("worst_leg_dd%", "worst_leg_dd%"),
+            ("switches", "switches"), ("breaches", "breaches"),
+            ("genuine_breach", "genuine_breach"), ("zeroday_breach", "zeroday_breach"),
+        ],
     )
+    print(f"  (true_global_dd% = continuous drawdown from the strategy's actual all-time peak, never resets; worst_leg_dd% = worst single reset-cycle leg, should sit near each variant's own threshold)")
 
     for r in results:
         print(f"\n=== {r['label']}: holding-period detail (which asset, how long, net pnl) ===")

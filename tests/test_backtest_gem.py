@@ -1,13 +1,15 @@
 """
 Verifies scripts/backtest_gem.py: month-end calendar construction, GEM's
 relative/absolute-momentum selection rule, the CONTINUOUS DAY-BY-DAY
-holding-period simulation (simulate_gem — rewritten to iterate the full
-daily calendar, not just month-end dates, so the circuit breaker can
-check drawdown daily and force a mid-month exit), slice_gem_trades_by_
-folds()'s exit-date bucketing, and the new continuous-drawdown helpers
-(compute_max_drawdown_pct, slice_continuous_drawdown_by_folds) — against
-deterministic synthetic daily candles and hand-built symbol_data dicts,
-no network calls.
+holding-period simulation (simulate_gem — iterates the full daily
+calendar so the circuit breaker can check drawdown daily and force a
+mid-month exit), the PEAK-RESET FIX (tracked peak resets to current
+equity at resume, not the strategy's never-reset all-time peak),
+slice_gem_trades_by_folds()'s exit-date bucketing, and the continuous-
+drawdown/cost-attribution helpers (compute_max_drawdown_pct,
+slice_continuous_drawdown_by_folds, compute_leg_max_drawdowns,
+attribute_breaker_costs) — against deterministic synthetic daily candles
+and hand-built symbol_data dicts, no network calls.
 """
 from src.data_ingestion import Candle
 from scripts.backtest_gem import (
@@ -18,6 +20,8 @@ from scripts.backtest_gem import (
     slice_gem_trades_by_folds,
     compute_max_drawdown_pct,
     slice_continuous_drawdown_by_folds,
+    compute_leg_max_drawdowns,
+    attribute_breaker_costs,
     GemTrade,
     MOMENTUM_LOOKBACK_MONTHS,
 )
@@ -143,7 +147,7 @@ def _breach_scenario():
 
 def test_simulate_gem_no_breaker_holds_through_the_full_drawdown():
     symbol_data, month_end_dates, calendar = _breach_scenario()
-    trades, trade_curve, daily_curve = simulate_gem(
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=None,
     )
@@ -155,7 +159,7 @@ def test_simulate_gem_no_breaker_holds_through_the_full_drawdown():
 
 def test_simulate_gem_breach_triggers_when_drawdown_crosses_threshold():
     symbol_data, month_end_dates, calendar = _breach_scenario()
-    trades, trade_curve, daily_curve = simulate_gem(
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=15.0,
     )
@@ -176,7 +180,7 @@ def test_simulate_gem_breach_triggers_when_drawdown_crosses_threshold():
 def test_simulate_gem_no_breach_when_drawdown_stays_below_threshold():
     symbol_data, month_end_dates, calendar = _breach_scenario()
     # Same price path (max drawdown ~15.5%) but a 20% threshold should never trigger.
-    trades, trade_curve, daily_curve = simulate_gem(
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=20.0,
     )
@@ -186,7 +190,7 @@ def test_simulate_gem_no_breach_when_drawdown_stays_below_threshold():
 
 def test_simulate_gem_stays_in_breach_across_multiple_days_without_rechecking():
     symbol_data, month_end_dates, calendar = _breach_scenario()
-    trades, trade_curve, daily_curve = simulate_gem(
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=15.0,
     )
@@ -201,7 +205,7 @@ def test_simulate_gem_stays_in_breach_across_multiple_days_without_rechecking():
 
 def test_simulate_gem_resumes_unconditionally_at_next_evaluation_into_whatever_gem_prescribes():
     symbol_data, month_end_dates, calendar = _breach_scenario()
-    trades, trade_curve, daily_curve = simulate_gem(
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=15.0,
     )
@@ -210,12 +214,12 @@ def test_simulate_gem_resumes_unconditionally_at_next_evaluation_into_whatever_g
     resumed = trades[2]
     assert resumed.asset == "AGG"
     assert resumed.entry_timestamp[:10] == "2017-02-28"
-    assert trades[1].exit_reason == "switch"  # the BIL holding closes via a normal scheduled switch, not another breach
+    assert trades[1].exit_reason == "resume"  # the BIL holding closes via a forced resume, distinct from a normal switch
 
 
 def test_simulate_gem_daily_equity_curve_has_one_entry_per_calendar_day():
     symbol_data, month_end_dates, calendar = _breach_scenario()
-    trades, trade_curve, daily_curve = simulate_gem(
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=15.0,
     )
@@ -227,11 +231,11 @@ def test_simulate_gem_daily_equity_curve_has_one_entry_per_calendar_day():
 
 def test_simulate_gem_breach_exit_reflects_post_fee_equity_in_the_daily_curve():
     symbol_data, month_end_dates, calendar = _breach_scenario()
-    _, _, daily_curve_no_fees = simulate_gem(
+    _, _, daily_curve_no_fees, _ = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
         breaker_drawdown_pct=15.0,
     )
-    _, _, daily_curve_with_fees = simulate_gem(
+    _, _, daily_curve_with_fees, _ = simulate_gem(
         symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.25, slippage_bps=5.0,
         breaker_drawdown_pct=15.0,
     )
@@ -241,6 +245,126 @@ def test_simulate_gem_breach_exit_reflects_post_fee_equity_in_the_daily_curve():
     breach_day_equity_no_fees = dict(daily_curve_no_fees)["2017-02-02"]
     breach_day_equity_with_fees = dict(daily_curve_with_fees)["2017-02-02"]
     assert breach_day_equity_with_fees < breach_day_equity_no_fees
+
+
+def test_simulate_gem_reset_dates_start_with_calendar_start_and_gain_one_entry_per_resume():
+    symbol_data, month_end_dates, calendar = _breach_scenario()
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+    assert reset_dates[0] == calendar[0]
+    assert reset_dates[-1] == "2017-02-28"  # the one resume in this scenario
+    assert len(reset_dates) == 2
+
+
+# --- PEAK-RESET FIX: the core regression test for this session's fix ---
+
+def _reset_fix_scenario():
+    """
+    t=12 opens SPY, which then drops 50% intramonth (idx13, "2017-02-01")
+    -- a genuine breach into BIL. At t=13 ("2017-02-28"), GEM resumes into
+    AGG. Under the FIX, the tracked peak resets to equity AT THE MOMENT
+    OF RESUME (550, in this scenario), not the original all-time peak
+    (1000). A subsequent MODEST 10% decline in AGG (well under the 15%
+    threshold measured from the reset point) must NOT trigger a second
+    breach -- even though, measured against the ORIGINAL peak, that same
+    equity level would represent a ~50% drawdown and have immediately
+    re-triggered under the pre-fix (rejected) design.
+    """
+    month_end_dates = [f"2016-{m:02d}-01" for m in range(1, 13)] + ["2017-01-31", "2017-02-28"]
+    calendar = ["2017-01-31", "2017-02-01", "2017-02-28", "2017-03-15"]
+
+    # idx0..11 = warm-up (all 100, including idx0/idx1 used as -12mo refs),
+    # then idx12="2017-01-31"(t12), idx13="2017-02-01"(breach day),
+    # idx14="2017-02-28"(t13), idx15="2017-03-15"(post-resume decline day).
+    spy_closes = [100.0] * 12 + [200.0, 100.0, 100.0, 100.0]   # t12 entry 200 -> breach day 100 (-50%); idx14=100 -> t13 trailing return 0%
+    efa_closes = [100.0] * 12 + [100.0, 100.0, 90.0, 100.0]     # t12: 0% (loses to SPY's 100%); idx14=90 -> t13 trailing return -10%
+    bil_closes = [100.0] * 12 + [100.0, 100.0, 110.0, 100.0]    # t12: 0% (SPY beats it); idx14=110 -> t13 trailing return +10% (beats both SPY/EFA -> AGG selected)
+    agg_closes = [100.0] * 12 + [100.0, 100.0, 100.0, 90.0]     # entered @100 at t13, drops 10% intramonth to 90
+
+    symbol_data = {
+        "SPY": _make_series("SPY", month_end_dates[:12] + calendar, spy_closes),
+        "EFA": _make_series("EFA", month_end_dates[:12] + calendar, efa_closes),
+        "BIL": _make_series("BIL", month_end_dates[:12] + calendar, bil_closes),
+        "AGG": _make_series("AGG", month_end_dates[:12] + calendar, agg_closes),
+    }
+    return symbol_data, month_end_dates, calendar
+
+
+def test_simulate_gem_peak_reset_prevents_immediate_rebreach_on_resume():
+    symbol_data, month_end_dates, calendar = _reset_fix_scenario()
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+
+    # Exactly one genuine breach (SPY, multi-day), one resume (BIL -> AGG),
+    # and NO second breach despite AGG's later 10%-from-reset-peak decline
+    # -- confirming the reset actually prevents the whipsaw the pre-fix
+    # design fell into.
+    assert [t.exit_reason for t in trades] == ["circuit_breaker", "resume", "eol"]
+    assert trades[0].entry_timestamp[:10] != trades[0].exit_timestamp[:10]  # genuine, not zero-day
+
+    resumed = trades[2]
+    assert resumed.asset == "AGG"
+    # entry_equity at resume = 500 (post-breach) + 50 (BIL's tiny gain while held) = 550
+    assert abs(resumed.entry_price - 100.0) < 1e-9
+
+
+def test_simulate_gem_peak_resets_to_post_resume_equity_not_the_original_peak():
+    symbol_data, month_end_dates, calendar = _reset_fix_scenario()
+    trades, trade_curve, daily_curve, reset_dates = simulate_gem(
+        symbol_data, calendar, month_end_dates, capital=1000.0, fee_pct=0.0, slippage_bps=0.0,
+        breaker_drawdown_pct=15.0,
+    )
+    resume_equity = dict(daily_curve)["2017-02-28"]
+    # The post-resume mark (550) is nowhere near the original peak (1000)
+    # -- if the peak had NOT been reset, this same day would already read
+    # as a (1000-550)/1000 = 45% drawdown, well past the 15% threshold,
+    # and would have immediately re-triggered. It didn't (see the
+    # previous test), confirming the reset actually took effect.
+    assert abs(resume_equity - 550.0) < 1e-9
+    original_peak_relative_dd = (1000.0 - resume_equity) / 1000.0 * 100
+    assert original_peak_relative_dd > 15.0  # would have re-triggered under the old, rejected design
+    assert trades[1].exit_reason == "resume" and len(trades) == 3  # confirms no re-breach actually occurred
+
+
+# --- compute_leg_max_drawdowns -------------------------------------------
+
+def test_compute_leg_max_drawdowns_splits_by_reset_points_and_uses_local_peaks():
+    daily_equity_curve = [("d1", 1000.0), ("d2", 500.0), ("d3", 550.0), ("d4", 495.0)]
+    reset_dates = ["d1", "d3"]
+
+    leg_dds, worst = compute_leg_max_drawdowns(daily_equity_curve, reset_dates)
+
+    assert len(leg_dds) == 2
+    assert abs(leg_dds[0] - 50.0) < 1e-9  # leg 1 [d1,d3): peak 1000 (d1), trough 500 (d2) -> 50%
+    assert abs(leg_dds[1] - 10.0) < 1e-9  # leg 2 [d3,d4]: peak resets to 550 (d3), trough 495 (d4) -> 10%
+    assert abs(worst - 50.0) < 1e-9
+
+
+def test_compute_leg_max_drawdowns_empty_curve_returns_empty():
+    leg_dds, worst = compute_leg_max_drawdowns([], [])
+    assert leg_dds == []
+    assert worst == 0.0
+
+
+# --- attribute_breaker_costs ---------------------------------------------
+
+def test_attribute_breaker_costs_splits_fees_by_exit_reason():
+    trades = [
+        GemTrade("SPY", 0, 1, "t0", "t1", 100, 90, "circuit_breaker", -10.0, 5.0, -15.0, -1.0),
+        GemTrade("BIL", 1, 2, "t1", "t2", 90, 92, "resume", 2.0, 1.0, 1.0, 0.1),
+        GemTrade("AGG", 2, 3, "t2", "t3", 92, 95, "switch", 3.0, 2.0, 1.0, 0.1),
+        GemTrade("AGG", 3, 4, "t3", "t4", 95, 96, "eol", 1.0, 0.5, 0.5, 0.05),
+    ]
+
+    breach_fees, resume_fees, normal_fees = attribute_breaker_costs(trades)
+
+    assert abs(breach_fees - 5.0) < 1e-9
+    assert abs(resume_fees - 1.0) < 1e-9
+    assert abs(normal_fees - 2.5) < 1e-9  # switch(2.0) + eol(0.5)
 
 
 # --- compute_gem_fold_boundaries / slice_gem_trades_by_folds -----------
@@ -273,8 +397,24 @@ def test_slice_gem_trades_by_folds_last_fold_includes_the_final_eol_trade_and_co
     assert fold_summaries[0]["trade_count"] == 0
     assert fold_summaries[1]["trade_count"] == 2  # both land in fold 2, including the eol trade
     assert pooled_breaches == 1
-    assert pooled_switches == 0  # neither trade's exit_reason is "switch" in this scenario
+    assert pooled_switches == 0  # neither trade's exit_reason is "switch"/"resume" in this scenario
     assert sum(fold_breaches) == pooled_breaches
+
+
+def test_slice_gem_trades_by_folds_counts_resume_as_a_switch_for_position_change_purposes():
+    trades = [
+        GemTrade("SPY", 0, 1, "2017-01-01T05:00:00+00:00", "2017-01-15T05:00:00+00:00", 100, 90, "circuit_breaker", -10.0, 0.0, -10.0, -1.0),
+        GemTrade("BIL", 1, 2, "2017-01-15T05:00:00+00:00", "2017-02-01T05:00:00+00:00", 105, 106, "resume", 1.0, 0.0, 1.0, 0.1),
+    ]
+    equity_curve = [1000.0, 990.0, 991.0]
+    folds = [{"fold": 1, "test_start": "2017-01-01", "test_end": "2017-02-01"}]
+
+    _, fold_switches, fold_breaches, _, pooled_switches, pooled_breaches = slice_gem_trades_by_folds(
+        trades, equity_curve, folds, capital=1000.0
+    )
+
+    assert pooled_switches == 1  # the "resume" trade counts as a position change
+    assert pooled_breaches == 1
 
 
 # --- slice_continuous_drawdown_by_folds ---------------------------------

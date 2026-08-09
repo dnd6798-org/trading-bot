@@ -1210,6 +1210,94 @@ and `data_ingestion.py`'s live fetch are untouched.
    resume, daily curve construction, post-fee equity in the daily curve),
    full suite (111 tests) passing.
 
+   **UPDATE (this session, immediately following): these two variants
+   (the "v1" all-time-peak, never-reset design) are formally REJECTED —
+   specification flaw, not a strategy verdict.** User instruction: reset
+   the tracked peak to current equity at the moment of resuming (not at
+   breach), since the alternative was a permanent lockout, not stricter
+   protection. See finding 3 below for the corrected ("v2") variants —
+   `scripts/backtest_gem.py` no longer reproduces the v1 behavior; these
+   numbers are preserved here as historical record only, per this file's
+   convention of not rewriting past findings.
+
+3. **Circuit-breaker variants, corrected (v2, peak-reset-on-resume)
+   (executed).** Same 15%/20% thresholds, same daily all-time-peak-style
+   trigger and unconditional-exit-to-BIL action as finding 2 — the ONLY
+   change is that the tracked peak now resets to current equity at the
+   moment of resuming trading, not at breach and not before (see
+   `simulate_gem()`'s "PEAK-RESET FIX" docstring section for the full
+   mechanics). This deliberately changes what the guardrail promises:
+   it now bounds drawdown SINCE THE LAST RESUME, not cumulative drawdown
+   from the strategy's true all-time peak — a correctness fix, not a
+   loosening, since the v1 alternative was a lockout.
+
+   **Result — night and day versus v1:**
+
+   | variant | pooled net | pooled gross | fold1 net | fold2 net |
+   |---|---|---|---|---|
+   | Base GEM | +138.90% | +143.39% | +4.60% | +128.39% |
+   | +15% breaker v2 | +120.09% | +125.13% | +9.60% | +100.81% |
+   | +20% breaker v2 | +133.38% | +138.48% | +3.07% | +126.42% |
+
+   **Both v2 variants clear the pre-committed bar this time** (pooled net
+   positive AND both folds individually positive) — v1's 20% variant had
+   failed on fold 1 (-3.02%); v2's 20% variant fold 1 is now +3.07%.
+
+   **Per-fold trade/switch/breach counts:** 15% variant — fold 1: 8
+   trades (6 switches, 2 breaches), fold 2: 15 trades (12 switches, 2
+   breaches). 20% variant — fold 1: 7 trades (6 switches, 1 breach), fold
+   2: 15 trades (13 switches, 1 breach). Both comfortably above the
+   3-position-change thin-sample threshold in every fold.
+
+   **Requested diagnostics, all confirmed:**
+   - **Worst single reset-cycle leg drawdown** (sanity check — should
+     land near the threshold): 15% variant 18.42%, 20% variant 24.64% —
+     both sit modestly above their own threshold (expected: a breach
+     fires once drawdown reaches/exceeds the threshold, so the triggering
+     day's own move can carry slightly past it before the exit executes),
+     not wildly beyond it. Sanity check passes.
+   - **True cumulative drawdown from the strategy's actual all-time peak**
+     (global, never resets — the number that shows whether repeated
+     reset cycles could still let a large loss accumulate): **15%
+     variant 24.58% pooled, 20% variant 24.94% pooled — both LOWER than
+     base GEM's own 33.79%.** This is the header result: the corrected
+     breaker provides real cumulative risk reduction, not just a
+     per-episode cap that could still be circumvented by accumulating
+     losses across many reset cycles.
+   - **Genuine multi-day breach count vs. residual same-day whipsaw
+     resumes:** 15% variant — 4 breach exits, **all 4 genuine
+     multi-day holds** (203d, 374d, 710d, 490d), **0 zero-day
+     whipsaws**. 20% variant — 2 breach exits, **both genuine** (377d,
+     141d), **0 zero-day whipsaws**. Confirms the fix eliminated the v1
+     whipsaw pattern entirely, not just reduced it.
+   - **Transaction costs, breaker-attributable (breach+resume) vs. normal
+     monthly rotation:** 15% variant — $102.68 breaker-attributable vs.
+     $236.80 normal rotation (total $339.48; breaker ≈30% of costs, down
+     from v1's ≈49%). 20% variant — $47.54 breaker-attributable vs.
+     $281.39 normal (total $328.93; breaker ≈14% of costs). The breaker
+     is now a minor cost driver, not the dominant one.
+
+   **Base GEM's true continuous drawdown (33.79% pooled), included here
+   for direct side-by-side context, not just as a baseline number:** both
+   breaker variants meaningfully reduce this (24.58%/24.94%) while
+   capturing MOST of base GEM's return (120.09%/133.38% of 138.90% —
+   roughly 86%/96%) — a genuinely favorable return-vs-drawdown trade
+   this time, unlike v1's "give up 97% of the return for a
+   still-not-clean drawdown number."
+
+   One breach in the 15% variant closed at a net PROFIT relative to its
+   own entry (SPY 2019-02-28→2020-03-09, +$100.09) — the position had
+   risen substantially before pulling back more than 15% from its own
+   post-resume peak, a legitimate trailing-stop-like dynamic, not an
+   anomaly.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction; decision deferred to the planning chat.** 10 tests
+   added/updated in `tests/test_backtest_gem.py` (the peak-reset
+   regression test is the load-bearing one — it directly reproduces the
+   v1 whipsaw setup and confirms a modest post-resume decline no longer
+   re-triggers), full suite (118 tests) passing.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1300,7 +1388,7 @@ crypto path via `get_alpaca_config()` — a separate client/product from
 modification to it). See "Track B findings" above for the full result and
 judgment calls made.
 
-**Track A:** `scripts/backtest_gem.py` (new — base GEM signal + monthly
+**Track A:** `scripts/backtest_gem.py` (base GEM signal + monthly
 holding-period simulator; `GemTrade` dataclass, `simulate_gem()`,
 `compute_gem_fold_boundaries()`, `slice_gem_trades_by_folds()` — a
 different trade model from every prior finding, see the module docstring
@@ -1310,25 +1398,28 @@ infrastructure). `src/data_ingestion.py`'s `fetch_historical_stock_
 candles()` gained an `adjustment` parameter (default `Adjustment.RAW`,
 Track B's behavior unchanged; Track A passes `Adjustment.ALL` — see
 "Track A findings" above for why RAW is actively wrong for a total-return
-signal like GEM's). See "Track A findings" above for the full result,
-the max-drawdown-understates-risk caveat, and judgment calls made.
+signal like GEM's). `simulate_gem()` was rewritten a second time (finding
+3) from month-end-only to a full day-by-day continuous loop — new
+`compute_max_drawdown_pct()`, `slice_continuous_drawdown_by_folds()`,
+`compute_leg_max_drawdowns()`, `attribute_breaker_costs()` helpers, a
+new `reset_dates` return value, and a new `"resume"` exit_reason
+(distinct from `"switch"`, needed to attribute transaction costs to the
+breaker mechanism specifically) — see "Track A findings" 2 and 3 above
+for the full result, the max-drawdown-understates-risk caveat, the v1
+whipsaw diagnosis, and the v2 peak-reset fix.
 
 ### Not yet decided (blocks next steps)
 
-**Track A circuit-breaker mechanics were specified and executed this
-session** (all-time-peak trigger checked daily, exit to BIL, unconditional
-resume at next scheduled evaluation) — see "Track A findings" finding 2
-above. **New open question surfaced by that result, not yet decided:**
-the "no cooldown / no peak-reset on resume" combination was diagnosed as
-causing a permanent monthly whipsaw after the first genuine breach in
-both variants (89/91 and 77/78 circuit-breaker exits were zero-day
-same-day re-breaches, not genuine drawdown events) — roughly half of each
-variant's total transaction costs came from this single mechanism. Before
-any adopt/reject call on Track A's circuit-breaker concept, the planning
-chat may want to decide whether to test a variant with a cooldown period
-and/or a peak reset on resume, as a distinct question from whether GEM +
-some drawdown overlay works at all. Not started — no fresh instruction
-given yet.
+Track A circuit-breaker mechanics (all-time-peak-style trigger checked
+daily, exit to BIL, unconditional resume at next scheduled evaluation)
+were specified and executed this session, diagnosed as causing a
+permanent whipsaw in their original (v1) form, and corrected (v2,
+peak-reset-on-resume) — see "Track A findings" 2 and 3 above. v2 clears
+the pre-committed bar on both thresholds and meaningfully reduces true
+cumulative drawdown versus base GEM (24.58%/24.94% vs 33.79%) while
+keeping most of the return. No adopt/reject verdict has been rendered on
+any Track A variant (base, v2-15%, v2-20%) — that decision is explicitly
+deferred to the planning chat, not made in this repo.
 
 Four strategy families tested against the original BTC/USD + ETH/USD,
 1-2 asset universe are closed or inconclusive on their own terms — none
