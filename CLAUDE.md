@@ -50,6 +50,12 @@ what was true when they were written — not edited retroactively, per this
 file's own convention of preserving historical record rather than
 rewriting it.
 
+**NOTE (2026-08 session, spec v24): spec v23 has since been superseded by
+spec v24** (Track B's completed result now lives at v24 §10.1, Track A's
+design/bar at v24 §10.2) — same convention, mentions of "spec v23"
+elsewhere in this file reflect what was true when written, not edited
+retroactively.
+
 ## Current status
 
 **Milestone: finding 13 was formally REJECTED** (pooled net-of-fees
@@ -1233,16 +1239,22 @@ net/gross/folds-positive — mandatory from finding 13 forward, not
 optional, and this requirement carries over to every non-crypto track
 below too.
 
-**Track B (spec v23 §10.1) EXECUTED this session.** Multi-asset ETF
-Donchian breakout + ATR trailing stop, reusing finding 14/15's signal/
-exit/sizing mechanism unchanged, ported to an 8-ETF universe (SPY, QQQ,
-IWM, EFA, AGG, GLD, DBC, VNQ) on Alpaca's commission-free stock/ETF
-product, replacing BTC/USD + ETH/USD. New script `scripts/
-backtest_etf_donchian.py`; new `src/data_ingestion.py` function
-`fetch_historical_stock_candles()` (Alpaca `StockHistoricalDataClient`,
-daily bars — a separate client/product from the crypto path, same paper
-keys). See "Track B findings" below for full detail — raw numbers only,
-no verdict rendered, per the same convention as every crypto finding.
+**Track B (8-ETF Donchian breakout with ATR trailing stop) is COMPLETE
+and PASSED.** Pooled net +73.64% over 3/3 folds net-positive, max
+drawdown 5.69% versus the 8-ETF buy-and-hold blend's 26.47% over the same
+pooled test window (return-per-unit-of-drawdown roughly 2x buy-and-hold's
+— see "Track B findings" below and the drawdown follow-up for full
+detail, including the pooled-test-window-vs-full-window distinction).
+**Logged as a viable candidate, NOT yet deployed to paper/live trading.**
+Full detail in spec v24 §10.1 (project knowledge — v24 supersedes v23 as
+of this update) and commit 593a54f. Multi-asset ETF Donchian breakout +
+ATR trailing stop, reusing finding 14/15's signal/exit/sizing mechanism
+unchanged, ported to an 8-ETF universe (SPY, QQQ, IWM, EFA, AGG, GLD,
+DBC, VNQ) on Alpaca's commission-free stock/ETF product, replacing
+BTC/USD + ETH/USD. New script `scripts/backtest_etf_donchian.py`; new
+`src/data_ingestion.py` function `fetch_historical_stock_candles()`
+(Alpaca `StockHistoricalDataClient`, daily bars — a separate client/
+product from the crypto path, same paper keys).
 
 **Data-window deviation, decided BEFORE any backtest ran (not in
 response to results):** the kickoff specified a 2006-02-03 (DBC
@@ -1259,10 +1271,24 @@ COVID crash's lead-in — a result here is evidence about post-2016
 regimes only**, not the same breadth-of-regime claim the original
 20-year design would have supported. If more history is later available
 (paid data-plan upgrade), this backtest should be rerun — the current
-result is not final evidence on the original 20-year design.
+result is not final evidence on the original 20-year design. **This
+data-truncation discovery was not previously known and now informs
+Track A's kickoff too** (see below) — any future non-crypto track must
+check actual data depth before locking a test window, not assume the
+originally-specified window is available.
 
-Track A and Track C are locked as concepts but not yet started — do not
-begin either without a fresh, explicit instruction to switch tracks.
+**NEW MILESTONE, STARTING NOW: Track A.** Dual Momentum/GEM — the design
+already specified in spec v22 §10.1 (monthly SPY/EFA relative-momentum +
+BIL absolute-momentum filter into AGG), which has never actually been
+backtested (it was superseded by the three-track pivot before its first
+run) — plus a new portfolio-level drawdown circuit-breaker overlay,
+tested at two thresholds. Full design and the pre-committed bar are in
+spec v24 §10.2 (project knowledge) — treat that section as the source of
+truth. Per instruction, actual Alpaca data depth for SPY/EFA/AGG/BIL must
+be checked and any truncation flagged BEFORE locking a test window or
+running any backtest — see below for that check's result. Track C
+remains locked as a concept but not yet started — do not begin it without
+a fresh, explicit instruction to switch tracks.
 
 ## Hard rules — never do these
 
