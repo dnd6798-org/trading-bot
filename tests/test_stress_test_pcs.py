@@ -1,13 +1,14 @@
 """
 Verifies scripts/stress_test_pcs.py's entry-timing rule (last SPY trading
 day strictly before the window), trough-finding, and the breach/sizing
-arithmetic (structural-width cap, spec §4.1 sizing) — against a small
-synthetic SPY series, no network calls.
+arithmetic (REDESIGNED: narrow-zone strikes with an assumed $1 achievable
+increment, structural-width cap, 2% defined-risk sizing override) —
+against a small synthetic SPY series, no network calls.
 """
 from src.data_ingestion import Candle
 from scripts.backtest_donchian_ensemble import PAPER_VALIDATION_CAPITAL
-from scripts.backtest import DEFAULT_RISK_PER_TRADE_PCT
-from scripts.stress_test_pcs import find_entry_date, find_trough, run_scenario
+from scripts.backtest_put_credit_spread import PCS_RISK_PER_TRADE_PCT
+from scripts.stress_test_pcs import find_entry_date, find_trough, run_scenario, ASSUMED_NARROWEST_INCREMENT_DOLLARS
 
 
 def _bar(date_str, close):
@@ -37,9 +38,21 @@ def test_find_trough_returns_minimum_close_in_window():
     assert trough_close == 70
 
 
+def test_run_scenario_width_is_the_assumed_narrowest_increment():
+    # spot 1000 -> zone center 3% OTM -> short strike round(970), long =
+    # short - $1 (the assumed carried-over increment) -> width == $1, not
+    # the old 5%/8%-OTM design's ~$30 width.
+    series = _series([("2020-01-31", 1000), ("2020-02-03", 950), ("2020-02-15", 990)])
+    window = {"label": "test", "start": "2020-02-01", "end": "2020-02-28"}
+    r = run_scenario(series, window)
+    assert r["short_strike"] == 970
+    assert r["long_strike"] == 970 - ASSUMED_NARROWEST_INCREMENT_DOLLARS
+    assert r["width"] == ASSUMED_NARROWEST_INCREMENT_DOLLARS
+
+
 def test_run_scenario_breach_capped_at_structural_width():
-    # entry spot 1000 -> short strike ~950, long strike ~920, width ~30.
-    # trough crashes far below the long strike -> breach must cap at width, not the raw shortfall.
+    # trough crashes far below both strikes -> breach must cap at the
+    # (now much narrower, $1) structural width, not the raw shortfall.
     series = _series([("2020-01-31", 1000), ("2020-02-03", 950), ("2020-02-15", 400)])
     window = {"label": "test", "start": "2020-02-01", "end": "2020-02-28"}
     r = run_scenario(series, window)
@@ -48,12 +61,12 @@ def test_run_scenario_breach_capped_at_structural_width():
     assert r["loss_pct_of_max"] == 100.0
 
 
-def test_run_scenario_sizing_uses_structural_width_not_actual_credit():
+def test_run_scenario_sizing_uses_structural_width_and_2pct_defined_risk_override():
     series = _series([("2020-01-31", 1000), ("2020-02-03", 950), ("2020-02-15", 990)])
     window = {"label": "test", "start": "2020-02-01", "end": "2020-02-28"}
     r = run_scenario(series, window)
     expected_structural_max_loss = r["width"] * 100
-    risk_amount = PAPER_VALIDATION_CAPITAL * (DEFAULT_RISK_PER_TRADE_PCT / 100)
+    risk_amount = PAPER_VALIDATION_CAPITAL * (PCS_RISK_PER_TRADE_PCT / 100)
     assert r["contracts"] == int(risk_amount // expected_structural_max_loss)
 
 

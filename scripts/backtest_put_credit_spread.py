@@ -24,13 +24,46 @@ estimation error on top of an already-approximate data source):
      off the UNDERLYING's real closing price alone (max(K-S,0) per leg)
      — no Black-Scholes anywhere in this file.
 
+REDESIGN (this session, two pre-registered changes, reasoned
+independently of the first run's zero-trade result, not a reaction to
+it — see CLAUDE.md Track C finding 3 for that result and finding 4 for
+this one):
+
+  1. STRIKE ZONE narrowed from a fixed 5%/8%-OTM target to a NARROWEST-
+     ACHIEVABLE search within a 2-4% OTM zone (NARROW_OTM_LOW/HIGH).
+     select_narrow_spread_strikes() checks the REAL listed strike ladder
+     for each cycle's own expiry (not assumed) and picks whichever
+     in-zone strike has the SMALLEST distance to its own next-lower
+     listed strike — the narrowest structurally achievable width at that
+     specific expiry, not a fixed number forced onto the chain. Confirmed
+     empirically before writing this docstring, not assumed: SPY's real
+     chain lists $1 strikes uniformly through the 2-4% OTM zone across
+     every expiry sampled (2024-02-20, 2025-07-21, 2026-06-22) — so $1 is
+     expected to be the typical achieved width, but the code does NOT
+     hardcode $1; it re-derives the achievable width fresh per cycle and
+     reports whatever it actually finds, including if some expiry's real
+     ladder doesn't support $1 there. If no in-zone strike has usable
+     data on any candidate (liquidity fallback exhausted), the cycle is
+     skipped and logged ("no_narrow_spread_with_data") rather than
+     forcing a wider width the instruction didn't ask for.
+  2. SIZING: a defined-risk-specific 2% risk-per-trade override
+     (PCS_RISK_PER_TRADE_PCT), replacing spec §4.1's global 1%
+     (DEFAULT_RISK_PER_TRADE_PCT) FOR THIS FILE ONLY — justified because
+     a credit spread's max loss is contractually fixed at entry (unlike
+     an ATR stop, price cannot gap past the protective long strike), so
+     the true risk is more precisely known than the 1% rule was
+     originally designed around. This does NOT change
+     backtest.py's DEFAULT_RISK_PER_TRADE_PCT, risk_filter.py, or any
+     .env guardrail value — those stay locked at spec §4.1's 1% for
+     every other strategy and for live enforcement. Scoped explicitly to
+     defined-risk options structures, per instruction.
+
 SIGNAL:
-  - Short leg: nearest listed SPY put strike to spot * (1 - 5%).
-  - Long leg (protection): nearest listed strike BELOW the short leg's
-    own strike, to spot * (1 - 8%) — constrained to a strictly lower
-    strike by construction (see select_spread_strikes()), so a
-    degenerate zero/negative-width spread is impossible regardless of
-    how coarse the strike ladder is at a given spot level.
+  - Short leg + long leg (protection): see REDESIGN #1 above —
+    select_narrow_spread_strikes() replaces the original fixed-%-OTM
+    select_spread_strikes() (removed, not left in as dead code — this is
+    a full replacement of the strike-selection design, not an
+    alternative kept alongside it).
   - Expiration: nearest (soonest) listed monthly expiry (3rd Friday —
     computed directly, not fetched, since standard equity index options
     settle monthly on the 3rd Friday) with DTE in [30, 45] from the
@@ -57,31 +90,35 @@ listing problem entirely rather than needing an explicit "as of" filter.
 
 DATA-GAP FALLBACK (user instruction: log and use the nearest valid
 date/strike rather than skip silently) — two independent fallback axes,
-both logged per leg in each cycle's raw data:
+both logged per cycle:
   1. DATE: if a chosen contract has no bar on the exact entry date, the
      nearest available bar within OPTION_DATA_FALLBACK_MAX_DAYS is used
      instead (see nearest_bar_close()).
-  2. STRIKE: if a contract has no usable bar at all within that date
-     window, the next-nearest-by-distance strike (up to
-     MAX_STRIKE_FALLBACK_CANDIDATES candidates) is tried instead (see
-     _select_leg_with_data()). Only if every candidate strike fails is
-     the cycle skipped, logged with reason "no_option_data_<leg>".
+  2. STRIKE: since REDESIGN #1 selects strikes by narrowest-achievable-
+     width rather than a fixed target, the "strike fallback" axis is now
+     candidate iteration through select_narrow_spread_strikes()'s
+     narrowest-first list — if the truly-narrowest candidate's legs lack
+     usable data, the next-narrowest candidate is tried, and so on. Each
+     cycle records candidate_rank (0 = narrowest available candidate had
+     usable data; 1+ = that many narrower candidates were skipped for
+     lack of data). Only if every candidate in the zone fails is the
+     cycle skipped, logged "no_narrow_spread_with_data".
 
-SIZING (user instruction: use spec §4.1's real formula — this strategy
-has a genuine, structurally-defined max loss, unlike MACD D1H1/RSI
-mean-reversion/GEM, which all lacked a natural stop-distance and fell
-back to a flat notional cap). risk_amount = equity * 1% (unchanged
-DEFAULT_RISK_PER_TRADE_PCT); max_loss_per_contract = (spread width -
-credit received) * 100; contracts = floor(risk_amount /
-max_loss_per_contract) — the position's TOTAL max loss across however
-many contracts, not a per-contract cap, matching spec §4.1's
-position-level convention (identical in spirit to every other
-backtest's risk_amount / stop_distance formula). If contracts < 1, the
-cycle is SKIPPED (no trade, equity unchanged, reason
+SIZING (user instruction: use spec §4.1's real formula, but at a
+defined-risk-specific 2% rather than the global 1% — see REDESIGN #2
+above). risk_amount = equity * PCS_RISK_PER_TRADE_PCT (2%);
+max_loss_per_contract = (spread width - credit received) * 100;
+contracts = floor(risk_amount / max_loss_per_contract) — the position's
+TOTAL max loss across however many contracts, not a per-contract cap,
+matching spec §4.1's position-level convention (identical in spirit to
+every other backtest's risk_amount / stop_distance formula). If
+contracts < 1, the cycle is SKIPPED (no trade, equity unchanged, reason
 "sizing_floor_zero") but the cycle CLOCK still advances (next entry =
 day after this cycle's own expiry) — the cadence is calendar-anchored,
 not trade-count-anchored, so a string of unsizable cycles doesn't stall
-the simulation.
+the simulation. Per instruction: if most cycles are STILL zero-sized
+even after both redesign changes, that is reported plainly, not forced
+to a non-zero number.
 
 FLAGGED, NOT SILENTLY RESOLVED: unlike every other backtest in this
 repo, sizing here is NOT fee/slippage-independent. Because slippage is
@@ -89,7 +126,7 @@ modeled as a reduction to entry credit (see FEES below), and credit
 feeds directly into max_loss_per_contract, the net-of-cost and
 gross-of-cost simulations can select a DIFFERENT contract count for the
 same cycle (gross credit is higher, so gross max loss is lower, so more
-contracts can fit the same 1% budget) — occasionally even different
+contracts can fit the same risk budget) — occasionally even different
 cycle PARTICIPATION (a cycle viable gross-of-cost but floored to zero
 net-of-cost). main() reports this divergence explicitly rather than
 letting the two "pooled trade count" numbers look independently clean
@@ -148,8 +185,12 @@ from scripts.backtest_walkforward import compute_fold_boundaries
 from scripts.backtest_donchian_ensemble import PAPER_VALIDATION_CAPITAL, compute_buy_and_hold_symbol_return
 
 UNDERLYING = "SPY"
-SHORT_OTM_PCT = 0.05  # short leg target: spot * (1 - 5%)
-LONG_OTM_PCT = 0.08   # long leg (protection) target: spot * (1 - 8%)
+# REDESIGN #1 (this session): narrowest-achievable width within a 2-4%
+# OTM zone, replacing the original fixed 5%/8%-OTM target — see module
+# docstring. NARROW_OTM_LOW/HIGH bound the zone the SHORT leg is drawn
+# from; the long leg is whatever real strike is immediately below it.
+NARROW_OTM_LOW = 0.02
+NARROW_OTM_HIGH = 0.04
 DTE_LOW = 30
 DTE_HIGH = 45
 
@@ -162,7 +203,13 @@ OPTIONS_DATA_FLOOR = date(2024, 1, 18)
 PCS_SLIPPAGE_PER_LEG_DOLLARS = 0.10  # $/share = $10/contract per leg, entry only
 PCS_COMMISSION_PER_CONTRACT = 0.0    # commission-free, per instruction
 
-MAX_STRIKE_FALLBACK_CANDIDATES = 6
+# REDESIGN #2 (this session): defined-risk-specific override of spec
+# §4.1's global 1% — see module docstring's REDESIGN section for the
+# justification and scope. Does NOT touch DEFAULT_RISK_PER_TRADE_PCT
+# (backtest.py, spec §4.1's locked global figure) — imported here only
+# for reference/comparison in diagnostics, not used for sizing.
+PCS_RISK_PER_TRADE_PCT = 2.0
+
 OPTION_DATA_FALLBACK_MAX_DAYS = 5
 
 NUM_FOLDS = 2  # user instruction, same as GEM's Track A
@@ -223,24 +270,41 @@ def select_expiry(entry_date: date, dte_low: int = DTE_LOW, dte_high: int = DTE_
     return expiry, dte, f"dte_band_widened(actual_dte={dte})"
 
 
-def select_spread_strikes(contracts, short_target: float, long_target: float):
+def select_narrow_spread_strikes(contracts, spot: float, otm_low: float = NARROW_OTM_LOW, otm_high: float = NARROW_OTM_HIGH):
     """
-    short leg = nearest strike to short_target. long leg = nearest strike
-    to long_target AMONG STRIKES STRICTLY BELOW the chosen short strike —
-    this ordering constraint (not just picking each leg's nearest strike
-    independently) is what guarantees long_strike < short_strike always,
-    even on a coarse strike ladder where the two targets might otherwise
-    round to the same or an inverted pair. Returns (short_contract,
-    long_contract_or_None, note) — note is set if no strike exists below
-    the chosen short leg (would only happen at the very bottom of a
-    chain, not expected in practice for a 5%/8%-OTM SPY spread).
+    REDESIGN #1 (this session, see module docstring): checks the REAL
+    listed strike ladder for whichever short-leg location in the
+    [otm_low, otm_high] OTM zone yields the SMALLEST achievable width to
+    its own next-lower listed strike (the long leg) — not a fixed target
+    width forced onto the chain. Every strike within the zone is a
+    candidate; each candidate's width is its distance to its own
+    immediate lower neighbor in the FULL chain (that neighbor need not
+    itself be inside the zone). Returns a list of (short_contract,
+    long_contract, width) tuples sorted narrowest-width-first, ties
+    broken by proximity to the zone's own center — so the caller (see
+    build_cycles()) can walk the list for a liquidity fallback without
+    re-deriving strikes. Returns [] if no strike falls in the zone, or if
+    every in-zone strike sits at the very bottom of the chain with
+    nothing listed below it (both real, flagged possibilities, not
+    silently defaulted).
     """
-    short_contract = min(contracts, key=lambda c: abs(c.strike_price - short_target))
-    lower = [c for c in contracts if c.strike_price < short_contract.strike_price]
-    if not lower:
-        return short_contract, None, "no_lower_strike_available"
-    long_contract = min(lower, key=lambda c: abs(c.strike_price - long_target))
-    return short_contract, long_contract, None
+    sorted_contracts = sorted(contracts, key=lambda c: c.strike_price)
+    zone_low = spot * (1 - otm_high)
+    zone_high = spot * (1 - otm_low)
+    zone_center = spot * (1 - (otm_low + otm_high) / 2)
+
+    scored = []
+    for i, c in enumerate(sorted_contracts):
+        if not (zone_low <= c.strike_price <= zone_high):
+            continue
+        if i == 0:
+            continue  # nothing listed below this strike -- can't form a spread here
+        lower = sorted_contracts[i - 1]
+        width = c.strike_price - lower.strike_price
+        scored.append((width, abs(c.strike_price - zone_center), c, lower))
+
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [(short, long, width) for width, _, short, long in scored]
 
 
 def nearest_bar_close(bars, target_date: date, max_days: int = OPTION_DATA_FALLBACK_MAX_DAYS):
@@ -264,26 +328,21 @@ def nearest_bar_close(bars, target_date: date, max_days: int = OPTION_DATA_FALLB
     return by_date[nearest_str].close, date.fromisoformat(nearest_str), distance
 
 
-def _select_leg_with_data(candidates, entry_date, option_bar_cache, max_candidates=MAX_STRIKE_FALLBACK_CANDIDATES):
+def _leg_bar_close(contract, entry_date, option_bar_cache):
     """
-    Tries `candidates` (already sorted by |strike - target|) in order,
-    fetching/caching each contract's bars around entry_date and returning
-    the first one with a usable close (see nearest_bar_close()). Returns
-    (contract, close, used_date, strike_fallback_level, date_distance) —
-    strike_fallback_level 0 means the nearest-by-distance strike worked
-    with no fallback needed; a positive level means that many
-    nearer-target candidates had no usable data and were skipped.
-    Returns all-None if every candidate (up to max_candidates) fails.
+    Fetches/caches one specific contract's bars around entry_date and
+    returns its nearest usable close (see nearest_bar_close()) — used by
+    build_cycles() to test ONE candidate spread (short, long) from
+    select_narrow_spread_strikes()'s narrowest-first list; the STRIKE
+    fallback axis is candidate iteration in the caller, not a search
+    inside this function (unlike the original design's
+    _select_leg_with_data(), removed — see module docstring's REDESIGN).
     """
-    window_start = datetime.combine(entry_date - timedelta(days=OPTION_DATA_FALLBACK_MAX_DAYS), datetime.min.time(), tzinfo=timezone.utc)
-    window_end = datetime.combine(entry_date + timedelta(days=OPTION_DATA_FALLBACK_MAX_DAYS), datetime.min.time(), tzinfo=timezone.utc)
-    for level, contract in enumerate(candidates[:max_candidates]):
-        if contract.symbol not in option_bar_cache:
-            option_bar_cache[contract.symbol] = fetch_option_bars(contract.symbol, window_start, window_end)
-        close, used_date, distance = nearest_bar_close(option_bar_cache[contract.symbol], entry_date)
-        if close is not None:
-            return contract, close, used_date, level, distance
-    return None, None, None, None, None
+    if contract.symbol not in option_bar_cache:
+        window_start = datetime.combine(entry_date - timedelta(days=OPTION_DATA_FALLBACK_MAX_DAYS), datetime.min.time(), tzinfo=timezone.utc)
+        window_end = datetime.combine(entry_date + timedelta(days=OPTION_DATA_FALLBACK_MAX_DAYS), datetime.min.time(), tzinfo=timezone.utc)
+        option_bar_cache[contract.symbol] = fetch_option_bars(contract.symbol, window_start, window_end)
+    return nearest_bar_close(option_bar_cache[contract.symbol], entry_date)
 
 
 def build_symbol_series(symbol, start, end):
@@ -335,8 +394,6 @@ def build_cycles(spy_series, window_start: date, window_end: date):
             break  # can't resolve this cycle from real data — stop here, don't half-simulate
 
         spot = spy_series["candles"][spy_series["date_index"][entry_date_str]].close
-        short_target = spot * (1 - SHORT_OTM_PCT)
-        long_target = spot * (1 - LONG_OTM_PCT)
 
         if expiry_date not in contracts_cache:
             contracts_cache[expiry_date] = fetch_option_contracts(UNDERLYING, expiry_date.isoformat(), option_type="put")
@@ -347,33 +404,35 @@ def build_cycles(spy_series, window_start: date, window_end: date):
             cycle_num += 1
             continue
 
-        short_target_contract, long_target_contract, strike_note = select_spread_strikes(contracts, short_target, long_target)
-        if long_target_contract is None:
-            skip_log.append({"cycle": cycle_num, "entry_date": entry_date_str, "expiry": expiry_date.isoformat(), "reason": strike_note})
+        # REDESIGN #1: narrowest-achievable-width candidates within the
+        # 2-4% OTM zone, real chain, sorted narrowest-first. See module
+        # docstring — the strike FALLBACK axis is now walking this list,
+        # not a target-based nearest search.
+        candidates = select_narrow_spread_strikes(contracts, spot)
+        if not candidates:
+            skip_log.append({"cycle": cycle_num, "entry_date": entry_date_str, "expiry": expiry_date.isoformat(), "reason": "no_strikes_in_otm_zone"})
             entry_idx = bisect_right(spy_dates, expiry_date.isoformat())
             cycle_num += 1
             continue
 
-        short_candidates = sorted(contracts, key=lambda c: abs(c.strike_price - short_target))
-        short_contract, short_close, short_used_date, short_level, short_dist = _select_leg_with_data(short_candidates, entry_date, option_bar_cache)
-        if short_contract is None:
-            skip_log.append({"cycle": cycle_num, "entry_date": entry_date_str, "expiry": expiry_date.isoformat(), "reason": "no_option_data_short"})
+        chosen = None
+        for candidate_rank, (short_c, long_c, width) in enumerate(candidates):
+            short_close, short_used_date, short_dist = _leg_bar_close(short_c, entry_date, option_bar_cache)
+            if short_close is None:
+                continue
+            long_close, long_used_date, long_dist = _leg_bar_close(long_c, entry_date, option_bar_cache)
+            if long_close is None:
+                continue
+            chosen = (short_c, long_c, width, candidate_rank, short_close, short_used_date, short_dist, long_close, long_used_date, long_dist)
+            break
+
+        if chosen is None:
+            skip_log.append({"cycle": cycle_num, "entry_date": entry_date_str, "expiry": expiry_date.isoformat(), "reason": "no_narrow_spread_with_data", "candidates_checked": len(candidates)})
             entry_idx = bisect_right(spy_dates, expiry_date.isoformat())
             cycle_num += 1
             continue
 
-        long_candidates = sorted([c for c in contracts if c.strike_price < short_contract.strike_price], key=lambda c: abs(c.strike_price - long_target))
-        if not long_candidates:
-            skip_log.append({"cycle": cycle_num, "entry_date": entry_date_str, "expiry": expiry_date.isoformat(), "reason": "no_lower_strike_available_post_fallback"})
-            entry_idx = bisect_right(spy_dates, expiry_date.isoformat())
-            cycle_num += 1
-            continue
-        long_contract, long_close, long_used_date, long_level, long_dist = _select_leg_with_data(long_candidates, entry_date, option_bar_cache)
-        if long_contract is None:
-            skip_log.append({"cycle": cycle_num, "entry_date": entry_date_str, "expiry": expiry_date.isoformat(), "reason": "no_option_data_long"})
-            entry_idx = bisect_right(spy_dates, expiry_date.isoformat())
-            cycle_num += 1
-            continue
+        short_contract, long_contract, width, candidate_rank, short_close, short_used_date, short_dist, long_close, long_used_date, long_dist = chosen
 
         # Expiration payoff needs ONLY the underlying's real close — no option data (see module docstring).
         expiry_idx = spy_series["date_index"].get(expiry_date.isoformat())
@@ -399,12 +458,12 @@ def build_cycles(spy_series, window_start: date, window_end: date):
             "spot_at_entry": spot,
             "short_strike": short_contract.strike_price,
             "long_strike": long_contract.strike_price,
+            "width": width,
+            "candidate_rank": candidate_rank,  # 0 = narrowest in-zone candidate had usable data; N = N narrower candidates were skipped for lack of data
             "short_symbol": short_contract.symbol,
             "long_symbol": long_contract.symbol,
             "credit_gross_per_share": short_close - long_close,
-            "short_fallback_level": short_level,
             "short_date_distance": short_dist,
-            "long_fallback_level": long_level,
             "long_date_distance": long_dist,
             "spy_close_at_expiry": spy_close_at_expiry,
         })
@@ -415,15 +474,16 @@ def build_cycles(spy_series, window_start: date, window_end: date):
 
 
 def simulate_from_cycles(
-    cycles, spy_series, capital=PAPER_VALIDATION_CAPITAL, risk_pct=DEFAULT_RISK_PER_TRADE_PCT,
+    cycles, spy_series, capital=PAPER_VALIDATION_CAPITAL, risk_pct=PCS_RISK_PER_TRADE_PCT,
     slippage_per_leg_dollars=PCS_SLIPPAGE_PER_LEG_DOLLARS,
 ):
     """
     Pure arithmetic over already-fetched `cycles` (see build_cycles()) —
     no I/O. Sizes each cycle independently off the CURRENT compounding
     equity (same convention as every other backtest here), skipping and
-    logging any cycle that can't clear a >=1-contract size under the 1%
-    risk budget or that has non-positive/nonsensical credit. See module
+    logging any cycle that can't clear a >=1-contract size under the
+    risk budget (PCS_RISK_PER_TRADE_PCT, 2% — REDESIGN #2, see module
+    docstring) or that has non-positive/nonsensical credit. See module
     docstring's SIZING and FLAGGED sections for why sizing (and therefore
     which cycles even become trades) can differ between a net-of-cost and
     gross-of-cost call.
@@ -506,7 +566,8 @@ def main():
     end = datetime.now(timezone.utc) - timedelta(minutes=20)
     start = datetime(2016, 1, 4, tzinfo=timezone.utc)  # equity-data floor — see Track B/A, fetched wide so buy-and-hold context isn't clipped
 
-    print("=== Track C: SPY put credit spread (5%/8% OTM, 30-45 DTE monthly rolling, real-data-only entry+expiration, spec §4.1 1% sizing) ===")
+    print(f"=== Track C: SPY put credit spread (narrowest-achievable width in {NARROW_OTM_LOW*100:.0f}-{NARROW_OTM_HIGH*100:.0f}% OTM zone, 30-45 DTE monthly rolling, real-data-only entry+expiration, {PCS_RISK_PER_TRADE_PCT:.0f}% defined-risk sizing) ===")
+    print(f"(REDESIGN this session vs. the first run: strike zone 5%/8% OTM -> narrowest-achievable in {NARROW_OTM_LOW*100:.0f}-{NARROW_OTM_HIGH*100:.0f}% OTM; sizing spec §4.1's global {DEFAULT_RISK_PER_TRADE_PCT:.0f}% -> a defined-risk-specific {PCS_RISK_PER_TRADE_PCT:.0f}% override, THIS FILE ONLY — see module docstring)")
     spy_series = build_symbol_series(UNDERLYING, start, end)
     if spy_series is None:
         print("SPY: no candle data returned")
@@ -529,9 +590,13 @@ def main():
         print("No cycles were built — cannot run the backtest.")
         return
 
-    fallback_short = [c for c in cycles if c["short_fallback_level"] or c["short_date_distance"]]
-    fallback_long = [c for c in cycles if c["long_fallback_level"] or c["long_date_distance"]]
-    print(f"cycles using a data-availability fallback (strike and/or date): short leg {len(fallback_short)}/{len(cycles)}, long leg {len(fallback_long)}/{len(cycles)}")
+    widths = [c["width"] for c in cycles]
+    print(f"\nachievable spread width (real chain, narrowest candidate with usable data — NOT a forced target): min=${min(widths):.2f}, mean=${sum(widths) / len(widths):.2f}, max=${max(widths):.2f}")
+    not_narrowest = [c for c in cycles if c["candidate_rank"] > 0]
+    if not_narrowest:
+        print(f"cycles where the truly-narrowest in-zone candidate lacked usable data, forcing a wider fallback candidate: {len(not_narrowest)}/{len(cycles)} (mean candidate_rank skipped: {sum(c['candidate_rank'] for c in not_narrowest) / len(not_narrowest):.1f})")
+    fallback_date = [c for c in cycles if c["short_date_distance"] or c["long_date_distance"]]
+    print(f"cycles using a date-fallback (nearest available bar, not the exact entry date) on either leg: {len(fallback_date)}/{len(cycles)}")
     widened = [c for c in cycles if c["dte_band_note"]]
     if widened:
         print(f"cycles where the 30-45 DTE band search found nothing inside and was widened: {len(widened)}/{len(cycles)}")
@@ -556,7 +621,7 @@ def main():
     only_gross = gross_sized_cycles - net_sized_cycles
     net_zero_sizing = [s for s in net_skipped if s["reason"] == "sizing_floor_zero"]
     gross_zero_sizing = [s for s in gross_skipped if s["reason"] == "sizing_floor_zero"]
-    print(f"\n=== Sizing diagnostics (spec §4.1, 1% of equity, floor to whole contracts) ===")
+    print(f"\n=== Sizing diagnostics ({PCS_RISK_PER_TRADE_PCT:.0f}% of equity, defined-risk override — see module docstring; NOT spec §4.1's global {DEFAULT_RISK_PER_TRADE_PCT:.0f}%) ===")
     print(f"cycles sized into a real trade: net-of-cost {len(net_trades)}/{len(cycles)}, gross-of-cost {len(gross_trades)}/{len(cycles)}")
     print(f"cycles skipped for zero-sizing (risk budget < 1 contract's max loss): net-of-cost {len(net_zero_sizing)}, gross-of-cost {len(gross_zero_sizing)}")
     if len(only_gross) > 0:
@@ -564,6 +629,8 @@ def main():
     if net_trades:
         contract_counts = [t.contracts for t in net_trades]
         print(f"net-of-cost contracts per trade: min={min(contract_counts)}, mean={sum(contract_counts) / len(contract_counts):.2f}, max={max(contract_counts)}")
+    else:
+        print("net-of-cost contracts per trade: n/a — 0 trades sized (reported plainly, not forced to a non-zero number, per instruction).")
 
     print(f"\n=== Portfolio-level results ({len(net_trades)} net trades / {len(cycles)} cycles) ===")
     rows = []

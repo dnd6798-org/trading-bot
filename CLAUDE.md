@@ -1612,6 +1612,100 @@ and `data_ingestion.py`'s live fetch are untouched.
    sizing formula, the strike widths, or the capital basis should change)
    since no instruction to do so has been given yet.
 
+4. **Redesigned rerun (executed): two pre-registered changes, reasoned
+   independently of finding 3's zero-trade result, not a reaction to
+   it.** (a) Strike zone narrowed from the fixed 5%/8%-OTM target to a
+   NARROWEST-ACHIEVABLE search within a 2-4% OTM zone — checked against
+   the real chain per cycle (not assumed), via new
+   `select_narrow_spread_strikes()` (replaces
+   `select_spread_strikes()`, removed, not left in as dead code — a full
+   design replacement, per the session's framing). (b) Sizing raised to
+   a **defined-risk-specific 2%** of equity per spread
+   (`PCS_RISK_PER_TRADE_PCT`), justified because a credit spread's max
+   loss is contractually fixed at entry — scoped explicitly to this file
+   only, `DEFAULT_RISK_PER_TRADE_PCT`/`risk_filter.py`/`.env` (spec
+   §4.1's global 1%) are untouched. `scripts/stress_test_pcs.py` updated
+   to match both changes (strike zone; sizing), with a flagged,
+   carried-over assumption: since no options chain exists before
+   2024-01-18, the stress test's $1 strike increment is asserted from
+   the main backtest's own confirmed-real result (see below), not
+   independently guessed for 2018/2020/2022. 8 tests
+   updated/added across both test files, full suite (142 tests) passing.
+
+   **Real strike-availability check (done before any code changed, per
+   instruction): SPY lists $1 strikes uniformly throughout the 2-4% OTM
+   zone**, confirmed across 3 sampled real expiries spanning the whole
+   backtest window (2024-02-20, 2025-07-21, 2026-06-22) — every in-zone
+   strike's immediate lower neighbor was exactly $1 away, no exceptions.
+   The rerun confirmed this holds across all 28 real cycles too: achieved
+   width was **exactly $1.00 for all 28** (min=mean=max=$1.00), and the
+   truly-narrowest in-zone candidate had usable data every time (0/28
+   needed a wider fallback candidate) — the liquidity-fallback machinery
+   built for finding 3 was never actually exercised at this width.
+
+   **Result — the sizing floor-to-zero problem is GONE, but a NEW,
+   DIFFERENT bottleneck replaced it: net credit is too thin relative to
+   the slippage assumption on most cycles, not too small to size.**
+   Sizing diagnostics: 0/28 cycles skipped for zero-sizing (net OR gross
+   — a complete reversal from finding 3's 28/28), net-of-cost contracts
+   per trade ranged 1-2 (mean 1.86) whenever a trade was actually sized.
+   But of the 28 cycles, only **7 net trades** were sized (26/28
+   sized gross-of-cost — so 19 cycles had SOME real positive credit
+   before slippage but not after): real gross credit on a $1-wide,
+   ~3%-OTM spread was consistently a few cents to ~$0.11/share, and the
+   $0.10/leg (2 legs = $0.20/share) slippage placeholder — chosen before
+   this session's redesign, when spreads were expected to be ~$18 wide
+   with much more premium — consumes most or all of that thin credit.
+   21 cycles were skipped at the simulation stage, ALL for the same
+   reason (`non_positive_credit`). This is flagged as a real, honest
+   tension: the slippage assumption was never revisited when the
+   strike-selection redesign shrank spread width by ~18x, and it now
+   plausibly dominates the trade economics — not asserted as certainly
+   wrong, since no real bid/ask exists to check it against (finding 2),
+   but worth the user's attention before any further iteration.
+
+   **Pooled backtest — portfolio-level, 2 anchored folds
+   (2024-01-18 → 2026-07-17):** pooled net-of-cost **-3.34%**, pooled
+   gross-of-cost **+1.70%** (gross is positive — the underlying edge
+   collects real credit more often than not; net is negative because of
+   the slippage/thin-credit tension above), **0/2 folds net-positive**
+   (fold 1 -1.70%, fold 2 -1.67%, both flagged THIN at 3 and 4 trades
+   respectively, below the 5-trade threshold). Win rate 71.4% (5 wins,
+   2 losses) — but the 2 losses were both `expired_itm_max_loss` (-$186,
+   -$194), large enough to outweigh five small wins ($4-$22 each) in the
+   pooled total. Buy-and-hold SPY over the same window: **+55.99%**
+   (fold 1 +10.48%, fold 2 +41.20%) — the strategy does not come close on
+   a return basis, though this is a defined-risk premium-selling
+   strategy, not a directional one, so a direct return comparison to
+   buy-and-hold is of limited relevance on its own (reported per the
+   permanent requirement regardless). **Pre-committed bar (pooled
+   net-of-cost positive AND both folds individually positive): NOT
+   cleared** — fails on both legs this time, a real result now that
+   there are real trades to evaluate, not the finding-3 non-result.
+
+   **Stress test — all 3 windows now size to real, non-zero contracts**
+   (2 contracts each, unchanged across all three since width is
+   uniformly $1): Feb 2018 total loss $200 (2.00% of equity), Feb-Mar
+   2020 $200 (2.00%), Sept-Oct 2022 $200 (2.00%) — every window still
+   breached to 100% of the (now $1, not ~$1,000) structural max loss,
+   but because sizing is no longer floored to zero, the worst-case loss
+   is now visibly BOUNDED at exactly the intended 2%-of-equity risk
+   budget in all three real historical crashes — the sizing mechanism is
+   working as designed at this width, confirmed against three
+   independent real crash windows, not just the one that happened to be
+   in the 2024-2026 pooled data.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction.** Unlike finding 3 (an empty, uninformative result), this
+   rerun gives real evidence: pooled net-of-cost is negative and neither
+   fold clears the bar, gross-of-cost is positive, and the shortfall is
+   traceable to a specific, named, flagged mechanism (slippage assumption
+   vs. thin real credit) rather than an unexplained gap — the user can
+   judge whether that mechanism itself deserves scrutiny (e.g., is
+   $0.10/leg still the right slippage assumption for a $1-wide spread)
+   before deciding on adoption, without needing another full rerun to
+   find out where the gap comes from.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1967,8 +2061,26 @@ strike-width arithmetic fact, not a signal-quality finding — the
 backtest never got to evaluate whether the underlying signal is any good
 at all. No adopt/reject verdict rendered, no fix proposed or applied —
 reported as raw numbers per instruction, decision on how to proceed
-(loosen the sizing rule, tighten the strike widths, raise the capital
-basis, or something else) deferred to the user.
+deferred to the user.
+
+**UPDATE: the user's two pre-registered fixes (see "Track C findings" 4
+above) resolved the zero-trade problem — narrower, real-chain-checked
+strikes (2-4% OTM zone, $1 achievable width, confirmed real not assumed)
+plus a 2%-of-equity defined-risk sizing override (spec §4.1's global 1%
+untouched everywhere else). Both the pooled backtest and the stress test
+now produce real, non-zero trades/contracts.** Pooled backtest: 7 real
+net trades from 28 cycles, pooled net-of-cost -3.34% (gross-of-cost
++1.70%), 0/2 folds net-positive — the pre-committed bar is NOT cleared,
+but this is now a real, informative result rather than an empty table.
+The net/gross gap is traced to a specific, named mechanism: real credit
+on a $1-wide spread is a few cents to ~$0.11/share, and the existing
+$0.10/leg slippage placeholder (chosen before the width redesign, when
+spreads were expected ~$18 wide) consumes most of it on 19/28 cycles —
+flagged, not resolved, since there's no real bid/ask to check the
+slippage assumption against (finding 2). Stress test: all 3 crash
+windows now size to 2 contracts each, and the worst-case loss is visibly
+bounded at exactly 2.00% of equity in every one — the sizing mechanism
+is confirmed working as designed. No adopt/reject verdict rendered.
 
 ## Hard rules — never do these
 

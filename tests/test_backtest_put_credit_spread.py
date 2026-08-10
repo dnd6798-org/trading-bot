@@ -1,12 +1,14 @@
 """
 Verifies scripts/backtest_put_credit_spread.py's expiry selection (3rd-
-Friday computation, 30-45 DTE band + widen-fallback), strike selection
-(long-strictly-below-short constraint), the data-gap fallback helper, and
-simulate_from_cycles()'s pure P&L/sizing arithmetic (spec §4.1 sizing,
-zero-sizing skip, expiration payoff formula) — against deterministic
-synthetic data / hand-built cycle dicts, no network calls. Real calendar
-values below (third-Friday dates, DTE) were computed once via the actual
-functions and confirmed, not hand-guessed.
+Friday computation, 30-45 DTE band + widen-fallback), the REDESIGNED
+narrow-zone strike selection (select_narrow_spread_strikes() — picks the
+real, narrowest-achievable width within a 2-4% OTM zone, not a fixed
+target), the data-gap fallback helper, and simulate_from_cycles()'s pure
+P&L/sizing arithmetic (2% defined-risk sizing override, zero-sizing skip,
+expiration payoff formula) — against deterministic synthetic data /
+hand-built cycle dicts, no network calls. Real calendar values below
+(third-Friday dates, DTE) were computed once via the actual functions and
+confirmed, not hand-guessed.
 """
 from datetime import date, timedelta
 
@@ -14,11 +16,13 @@ from src.data_ingestion import Candle, OptionContract
 from scripts.backtest_put_credit_spread import (
     third_friday,
     select_expiry,
-    select_spread_strikes,
+    select_narrow_spread_strikes,
     nearest_bar_close,
     simulate_from_cycles,
     DTE_LOW,
     DTE_HIGH,
+    NARROW_OTM_LOW,
+    NARROW_OTM_HIGH,
 )
 
 
@@ -52,35 +56,55 @@ def test_select_expiry_widens_band_when_no_candidate_falls_inside():
     assert "widened" in note
 
 
-# --- select_spread_strikes ------------------------------------------------
+# --- select_narrow_spread_strikes (REDESIGN #1) -------------------------
 
 def _put(strike, expiry="2024-03-15"):
     return OptionContract(symbol=f"SPY240315P{int(strike * 1000):08d}", strike_price=strike, expiration_date=expiry, option_type="put")
 
 
-def test_select_spread_strikes_keeps_long_strictly_below_short():
-    contracts = [_put(s) for s in [480, 490, 500, 510, 520, 530, 540]]
-    # spot ~550 -> short target 522.5 (nearest 520 or 530), long target 506 (nearest 510... but must be < short)
-    short_c, long_c, note = select_spread_strikes(contracts, short_target=522.5, long_target=506.0)
-    assert long_c.strike_price < short_c.strike_price
-    assert note is None
+def test_select_narrow_spread_strikes_picks_narrowest_achievable_width_in_zone():
+    # spot=551 -> zone [528.96, 539.98]. $1-spaced strikes throughout ->
+    # every in-zone strike achieves width=1; narrowest-first list's top
+    # candidate must be width 1, both legs inside/adjacent to the zone.
+    contracts = [_put(s) for s in range(500, 561)]
+    candidates = select_narrow_spread_strikes(contracts, spot=551.0)
+    assert candidates  # zone is non-empty and has strikes with a lower neighbor
+    short_c, long_c, width = candidates[0]
+    assert width == 1
+    assert long_c.strike_price == short_c.strike_price - 1
+    zone_low, zone_high = 551.0 * (1 - NARROW_OTM_HIGH), 551.0 * (1 - NARROW_OTM_LOW)
+    assert zone_low <= short_c.strike_price <= zone_high
 
 
-def test_select_spread_strikes_forces_long_below_short_even_when_targets_would_tie():
-    # Coarse ladder where both targets round to the SAME nearest strike --
-    # long must still land on a DIFFERENT, lower strike, not the same one.
-    contracts = [_put(s) for s in [480, 500, 520]]
-    short_c, long_c, note = select_spread_strikes(contracts, short_target=505.0, long_target=505.0)
-    assert short_c.strike_price == 500
-    assert long_c.strike_price == 480
-    assert long_c.strike_price < short_c.strike_price
+def test_select_narrow_spread_strikes_prefers_width_over_proximity_to_zone_center():
+    # Mostly $5-spaced chain, EXCEPT one extra strike (541) that creates a
+    # $1 gap to its neighbor (540) inside the zone. 545 sits closer to the
+    # zone center (543.2) than 541 does, but 541's width (1) beats 545's
+    # width (5) -- narrowest-achievable must win over proximity-to-center.
+    strikes = [530, 535, 540, 541, 545, 550]
+    contracts = [_put(s) for s in strikes]
+    candidates = select_narrow_spread_strikes(contracts, spot=560.0)  # zone ~[537.6, 548.8]
+    short_c, long_c, width = candidates[0]
+    assert short_c.strike_price == 541
+    assert long_c.strike_price == 540
+    assert width == 1
 
 
-def test_select_spread_strikes_flags_when_no_lower_strike_exists():
-    contracts = [_put(500)]
-    short_c, long_c, note = select_spread_strikes(contracts, short_target=500.0, long_target=460.0)
-    assert long_c is None
-    assert note == "no_lower_strike_available"
+def test_select_narrow_spread_strikes_returns_empty_when_zone_has_no_strikes():
+    contracts = [_put(s) for s in [400, 450, 700, 750]]  # nothing near spot=550's 2-4% OTM zone
+    candidates = select_narrow_spread_strikes(contracts, spot=550.0)
+    assert candidates == []
+
+
+def test_select_narrow_spread_strikes_skips_a_zone_strike_with_nothing_listed_below_it():
+    # The lowest strike in the WHOLE chain happens to fall inside the zone
+    # -- it can't form a spread (no lower strike exists at all) and must
+    # be excluded from candidates, not crash or silently pick a bogus long leg.
+    contracts = [_put(s) for s in [530, 535, 540, 545]]  # spot=550 -> zone [528, 539]; 530 is both in-zone AND the chain's floor
+    candidates = select_narrow_spread_strikes(contracts, spot=550.0)
+    assert all(short.strike_price != 530 for short, _, _ in candidates)
+    # 535 IS usable (530 is listed below it)
+    assert any(short.strike_price == 535 and long.strike_price == 530 for short, long, _ in candidates)
 
 
 # --- nearest_bar_close (data-gap fallback) ------------------------------
