@@ -1496,6 +1496,122 @@ and `data_ingestion.py`'s live fetch are untouched.
    (specifically, how strikes get selected without historical delta),
    not a substitute for it.
 
+3. **Design locked and executed: SPY put credit spread pooled backtest +
+   separate stress-test scenario analysis (spec v25 §10.5).** Design
+   (user instruction, this session): short leg nearest strike to spot *
+   0.95, long leg (protection) nearest strike BELOW the short leg to
+   spot * 0.92, nearest listed monthly (3rd-Friday) expiry in a 30-45 DTE
+   band, continuous monthly rolling (new entry the day after the prior
+   cycle resolves), held to expiration always (no early close). Two
+   deliberate simplifications, both user instruction, to avoid
+   compounding estimation error on top of finding 2's confirmed absence
+   of historical bid/ask/IV/greeks: strikes selected by fixed %-OTM, NOT
+   delta (delta would need a Black-Scholes IV inversion off a bar-close
+   price standing in for a true mid — one estimation layer not built);
+   both entry credit AND expiration payoff use REAL historical data
+   directly (entry credit = real historical daily-bar close per leg on
+   the entry date; expiration payoff needs NO option data at all — held
+   to expiration, a spread's value is fully determined by the
+   UNDERLYING's real closing price via intrinsic value, so there is no
+   Black-Scholes anywhere in this implementation). New
+   `scripts/backtest_put_credit_spread.py` and `scripts/stress_test_pcs.py`
+   (the required stress-test overlay, deliberately a separate script/
+   report per instruction — its numbers are never blended into the
+   pooled backtest table). New `src/data_ingestion.py` functions
+   `fetch_option_contracts()` (queries a chain by ITS OWN target
+   expiration date directly, both 'active' and 'inactive' status merged
+   — sidesteps finding 2's progressive-listing problem entirely, since a
+   contract's own metadata is static regardless of when it's queried,
+   rather than needing an explicit "as of" filter) and
+   `fetch_option_bars()` (reuses the existing `Candle` dataclass — an
+   option daily bar has the same OHLCV shape as stock/crypto, and finding
+   2 already confirmed there's nothing else historically available to
+   add). Chain queried per-expiration (never from "today's" list), with
+   two independent, logged data-gap fallbacks per leg (nearest available
+   date within 5 days, then nearest available strike, up to 6 candidates)
+   — per instruction, a missing data point is logged and worked around,
+   never silently skipped. Sizing: spec §4.1's REAL formula (unlike
+   MACD D1H1/RSI mean-reversion/GEM, this strategy has a genuine,
+   structurally-defined max loss to size off, so no flat-notional
+   fallback was needed) — risk_amount = equity × 1%, contracts =
+   floor(risk_amount / ((width − credit) × 100)). Fees: $0/contract
+   commission (per instruction) + a flagged, unmeasured slippage
+   judgment call ($0.10/share = $10/contract per leg, entry only, same
+   epistemic status as every other slippage placeholder in this repo).
+   2 anchored folds (user instruction, GEM's convention) over
+   [2024-01-18, last available data], reusing `compute_fold_boundaries()`
+   (backtest_walkforward.py) and `slice_trades_by_folds()`
+   (backtest_donchian.py) completely unchanged — this strategy is
+   single-position and strictly sequential, so entry order and exit/
+   equity-realization order are always identical, exactly what that
+   slicer already assumes. 22 new tests
+   (`tests/test_backtest_put_credit_spread.py`,
+   `tests/test_stress_test_pcs.py`), full suite (140 tests) passing.
+
+   **RESULT — the pooled backtest produced ZERO trades. Not a
+   signal-quality result: a capital/strike-width sizing mismatch,
+   confirmed quantitatively, not just observed as an empty table.**
+   28 monthly cycles were built from real data (2024-01-18 → 2026-08-10,
+   the account's confirmed options-data window) with real entry credit
+   and real expiration payoffs computed successfully for every one —
+   only 2 were skipped at the data-fetch stage (`no_contracts_for_expiry`),
+   and the data-gap fallback machinery worked as designed (used on 1/28
+   cycles for the short leg, 4/28 for the long leg — never needed on more
+   than a small minority). But EVERY SINGLE ONE of the 28 cycles was then
+   skipped at the sizing stage (`sizing_floor_zero`), both net-of-cost and
+   gross-of-cost: mean max loss per contract across the 28 real cycles was
+   **$1,710** (range $1,261–$2,085, driven by the 5%/8%-OTM design's own
+   ~$15–22 strike width on SPY at $476–$744 spot over this window) against
+   a 1%-of-$10,000 risk budget of **$100** — the budget covers only
+   **~5.8%** of one contract's structural max loss. This is a deterministic
+   arithmetic fact of the strike-width/capital combination, not sampling
+   noise or an edge case — it recurred on all 28/28 cycles regardless of
+   how much real credit was collected (real gross credit ranged
+   $0.45–$2.60/share, i.e. $45–$260/contract, itself a small fraction of
+   the $1,500–2,000 width side of the loss). Pooled/per-fold net% and
+   gross% both read 0.00% because there is no trade to generate a return
+   from — this must NOT be read as "the strategy broke even" or as any
+   information about signal quality; the backtest never got the chance to
+   evaluate the signal at all. Buy-and-hold SPY over the same pooled
+   window was +55.99% (fold 1 +10.48%, fold 2 +41.20%), reported per the
+   permanent buy-and-hold requirement, though it isn't a meaningful
+   comparison here for the same reason. Secondary, non-blocking
+   methodology note: 19/28 cycles needed the DTE-band-widen fallback
+   (actual DTE outside [30,45]) — mechanically explained, not a bug: the
+   "roll the day after the prior expiry" cadence lands each new entry
+   right after a 3rd-Friday, and the very next monthly 3rd-Friday is
+   almost always 27-29 DTE (just under the 30-day floor) while the one
+   after that is 55-63 DTE (well over the 45-day ceiling), so the exact
+   [30,45] band is structurally hard for a pure "roll immediately" cadence
+   to land inside — flagged for awareness, not a cause of the zero-trade
+   result (which is 100% sizing-driven regardless of DTE).
+
+   **Stress-test scenario analysis (SPY underlying price only, no options
+   data needed — separate report, not blended into the numbers above)
+   independently confirms the same structural mismatch, via a completely
+   different mechanism (real 2018/2020/2022 crash data instead of
+   2024-2026 real credit):** all three windows (Feb 2018 "Volmageddon",
+   Feb-Mar 2020 COVID crash, Sept-Oct 2022 bear-market low) breached to
+   **100% of the structural max loss** (short strike fully breached and
+   the trough fell past the long strike in every case: SPY fell -8.6%,
+   -30.8%, -9.8% respectively against a short strike only 5% OTM) — and
+   all three ALSO sized to **0 contracts** under the same 1%-of-$10,000
+   budget against each window's own structural width ($900, $1,000,
+   $1,100 max loss per contract respectively). Every judgment call this
+   script had to make (entry timing = last trading day before the window,
+   strikes rounded to the nearest $1 since no chain data exists that far
+   back, structural width used as "max loss" since real credit isn't
+   knowable pre-2024) is flagged explicitly in the module docstring, not
+   silently resolved.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction, same convention as every other finding in this repo.**
+   Both pieces are reported back for the user to validate together before
+   any adoption call, per the session's own framing — this finding
+   record does not pre-judge what should happen next (e.g. whether the
+   sizing formula, the strike widths, or the capital basis should change)
+   since no instruction to do so has been given yet.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -1618,10 +1734,17 @@ file) to also probe `get_option_trades()` (historical tick data — works,
 same floor), confirm no historical-quotes method exists on
 `OptionHistoricalDataClient`, and confirm `implied_volatility`/`greeks`
 exist only on the latest-only `OptionsSnapshot`, checked live against the
-account rather than assumed from the SDK. No production code touched yet
-— `data_ingestion.py`/`execution.py` have no options-specific functions
-yet; those come with the actual strategy implementation, not this
-diagnostic step.
+account rather than assumed from the SDK.
+
+New this session (finding 3 — first production strategy code for Track
+C): `scripts/backtest_put_credit_spread.py` (the pooled monthly-rolling
+backtest) and `scripts/stress_test_pcs.py` (the separate stress-test
+scenario report). `src/data_ingestion.py` gained `fetch_option_contracts()`
+and `fetch_option_bars()` — see "Track C findings" 3 above for the full
+result (28/28 cycles built successfully from real data, then 28/28
+skipped at sizing: a capital/strike-width mismatch, not a signal-quality
+result) and every judgment call made. `execution.py` remains untouched —
+still no live-trading integration for this or any track.
 
 ### Not yet decided (blocks next steps)
 
@@ -1828,9 +1951,24 @@ checking Alpaca's actual SPY options historical data availability on this
 account — not assumed, given both prior equity tracks hit an undiscovered
 floor and options data is generally sparser industry-wide. **Result (see
 Track C finding 1 below): usable window confirmed as 2024-01-18 →
-2026-08-07, ~2.5 years — shorter than either prior track.** No fold
-structure or adopt bar decided yet; that is the next step, pending a
-fresh go-ahead.
+2026-08-07, ~2.5 years — shorter than either prior track.**
+
+**UPDATE (this session): the pooled backtest and stress-test overlay
+were both executed (see "Track C findings" 3 above) — and the SAME
+capital-mismatch problem that originally forced the pivot away from
+cash-secured puts (needing ~$50-60k to cash-secure one contract) has
+resurfaced in the credit-spread structure too, just less visibly: under
+spec §4.1's real 1%-of-equity sizing formula (applied literally, per
+instruction), the 5%/8%-OTM strike design's ~$1,710 average max loss per
+contract against a $100 (1% of $10,000) risk budget means EVERY cycle
+sizes to zero contracts — 28/28 in the pooled backtest, all 3/3 in the
+independent stress-test scenarios. This is a deterministic capital/
+strike-width arithmetic fact, not a signal-quality finding — the
+backtest never got to evaluate whether the underlying signal is any good
+at all. No adopt/reject verdict rendered, no fix proposed or applied —
+reported as raw numbers per instruction, decision on how to proceed
+(loosen the sizing rule, tighten the strike widths, raise the capital
+basis, or something else) deferred to the user.
 
 ## Hard rules — never do these
 

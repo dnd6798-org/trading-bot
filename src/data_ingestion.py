@@ -15,9 +15,12 @@ from datetime import datetime
 
 from alpaca.data.enums import Adjustment
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+from alpaca.data.requests import CryptoBarsRequest, OptionBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetOptionContractsRequest
 
 from .config import get_alpaca_config
 
@@ -119,6 +122,94 @@ def fetch_historical_stock_candles(
     return [
         Candle(
             symbol=bar.symbol,
+            timestamp=bar.timestamp.isoformat(),
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+        )
+        for bar in bars
+    ]
+
+
+@dataclass
+class OptionContract:
+    symbol: str
+    strike_price: float
+    expiration_date: str  # "YYYY-MM-DD"
+    option_type: str  # "put" | "call"
+
+
+def fetch_option_contracts(
+    underlying: str, expiration_date: str, option_type: str = "put"
+) -> list[OptionContract]:
+    """
+    Track C (spec v25 §10.5, put credit spread): the strike ladder for one
+    specific expiration, queried directly by that expiration date — NOT
+    from today's active-contract list (CLAUDE.md Track C finding 2: far-
+    dated series list progressively, so "today's chain" can silently omit
+    contracts that existed as of an earlier historical date). Querying by
+    the target expiration_date itself sidesteps that entirely: a contract's
+    metadata (strike, expiration) is static regardless of when it's
+    queried, so there's no "as of" ambiguity to get wrong here.
+
+    Queries BOTH 'active' and 'inactive' status and merges the results
+    (deduplicated by symbol) — Alpaca's contract-search defaults to
+    'active' only, which returns nothing for any already-expired
+    expiration (confirmed empirically: a 0-result query for a March 2024
+    expiry with status omitted, 208 contracts with status='inactive'
+    explicitly passed). Since backtesting is inherently retrospective,
+    most expirations queried here will be 'inactive' by the time this
+    runs, but 'active' is checked too for expirations that haven't
+    resolved yet.
+    """
+    cfg = get_alpaca_config()
+    client = TradingClient(api_key=cfg.api_key, secret_key=cfg.secret_key, paper=cfg.paper)
+
+    by_symbol: dict[str, OptionContract] = {}
+    for status in ("inactive", "active"):
+        request = GetOptionContractsRequest(
+            underlying_symbols=[underlying],
+            expiration_date=expiration_date,
+            type=option_type,
+            status=status,
+            limit=1000,
+        )
+        response = client.get_option_contracts(request)
+        for c in response.option_contracts:
+            by_symbol[c.symbol] = OptionContract(
+                symbol=c.symbol,
+                strike_price=float(c.strike_price),
+                expiration_date=c.expiration_date.isoformat(),
+                option_type=str(c.type.value) if hasattr(c.type, "value") else str(c.type),
+            )
+    return sorted(by_symbol.values(), key=lambda c: c.strike_price)
+
+
+def fetch_option_bars(symbol: str, start: datetime, end: datetime) -> list[Candle]:
+    """
+    Daily OHLCV bars for one option contract (Track C — see
+    fetch_option_contracts()'s docstring for why the chain itself is
+    queried per-expiration rather than from today's list). Reuses the
+    Candle dataclass — an option daily bar has the same OHLCV shape as a
+    stock/crypto one; no bid/ask or greeks fields exist historically on
+    this account regardless (CLAUDE.md Track C finding 2), so there is
+    nothing to add.
+    """
+    cfg = get_alpaca_config()
+    client = OptionHistoricalDataClient(api_key=cfg.api_key, secret_key=cfg.secret_key)
+    request = OptionBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Day,
+        start=start,
+        end=end,
+    )
+    response = client.get_option_bars(request)
+    bars = response.data.get(symbol, [])
+    return [
+        Candle(
+            symbol=symbol,
             timestamp=bar.timestamp.isoformat(),
             open=bar.open,
             high=bar.high,
