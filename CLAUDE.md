@@ -1706,6 +1706,68 @@ and `data_ingestion.py`'s live fetch are untouched.
    before deciding on adoption, without needing another full rerun to
    find out where the gap comes from.
 
+5. **Slippage recalibration + final rerun (executed) — the TRUE final
+   structural change to this design, per instruction (no finding-6
+   variant without a fresh, explicit instruction, same binding-constraint
+   convention as the crypto search's finding 13/14 kickoff).** Finding
+   4 flagged, but didn't resolve, a real tension: `PCS_SLIPPAGE_PER_LEG_
+   DOLLARS` ($0.10/leg) was calibrated for finding 3's ~$18-wide design
+   and never rescaled after finding 4 shrank achieved width to $1.
+   Recalibrated to **$0.02/leg (2 standard minimum exchange ticks)** —
+   justified by real market structure (options priced under $3 trade in
+   $0.01 increments under standard exchange tick rules; a $1-wide,
+   penny-credit SPY spread falls squarely in that category), reasoned
+   independently of finding 4's -3.34% result, not a reaction to it.
+   Only the pooled backtest was rerun (stress test result stands,
+   already concluded per instruction — its sizing conclusion doesn't
+   depend on entry-credit slippage at all, since it uses the structural
+   width as max loss, not real credit). Only the constant changed; no
+   other mechanic touched.
+
+   **Real trade count is now substantial, not thin: 26 of 28 cycles
+   sized into a real net trade** (only 2 skipped, both
+   `non_positive_credit` — a near-complete reversal from finding 4's
+   7/28) — comfortably above the ~10-15 trade floor flagged as the bar
+   for a real test, reported explicitly per instruction.
+
+   **Result — portfolio-level, 2 anchored folds
+   (2024-01-18 → 2026-07-17):** pooled net-of-cost **-0.38%**, pooled
+   gross-of-cost **+1.70%** (unchanged from finding 4 — gross never
+   depended on the slippage assumption), win rate **88.5%** (23 wins, 3
+   losses, 0 flat). **Fold 1: -0.92% (14 trades, 85.7% win rate). Fold
+   2: +0.55% (12 trades, 91.7% win rate) — POSITIVE**, unlike finding 4
+   where both folds were negative. Confirmed directly from the trade
+   list, not estimated: 23 winning trades summed to **+$475.99** (small,
+   consistent gains, mostly $4-$54 per trade — one trade had exactly $0
+   credit and $0 pnl, both `expired_otm`); the 3 losing trades (all
+   `expired_itm_max_loss`) summed to **-$514.00**; net **-$38.00** on
+   $10,000 starting capital. This is the fat-tail profile a premium-
+   selling strategy is structurally expected to produce — frequent small
+   wins funded by rare, large, capped losses — and here the ~2 years of
+   small wins fell just short of covering three tail losses, not by a
+   wide margin. Buy-and-hold SPY over the same window: +55.99% (reported
+   per the permanent requirement; a direct return comparison remains of
+   limited relevance for a defined-risk premium strategy, same caveat as
+   finding 4).
+
+   **Pre-committed bar (pooled net-of-cost positive AND both folds
+   individually positive): NOT cleared** — pooled net-of-cost is
+   negative (though only slightly: -0.38%, a $38 shortfall on $10,000)
+   and fold 1 is negative even though fold 2 is positive. Both legs of
+   the bar fail on the letter of the rule, but this is now unambiguously
+   a real, adequately-sampled test of the underlying signal (26 trades,
+   not 7 or 0) — the two prior findings' zero/thin-trade problems are
+   fully resolved, and this result is not attributable to a
+   sizing-floor or slippage-calibration artifact the way findings 3 and
+   4 were.
+
+   **No adopt/reject verdict rendered — raw numbers only, per
+   instruction, same convention as every other finding in this repo.**
+   Per the user's own explicit framing at this step's kickoff, this is
+   the concluding result for Track C's put credit spread design — no
+   further structural iteration (finding 6) is authorized without a
+   fresh, explicit instruction.
+
 ### Code state
 
 `scripts/backtest.py` (baseline signal + fee model + calibration/
@@ -2081,6 +2143,23 @@ slippage assumption against (finding 2). Stress test: all 3 crash
 windows now size to 2 contracts each, and the worst-case loss is visibly
 bounded at exactly 2.00% of equity in every one — the sizing mechanism
 is confirmed working as designed. No adopt/reject verdict rendered.
+
+**UPDATE: Track C's put credit spread design is now CONCLUDED (see
+"Track C findings" 5 above) — the user's own explicit framing at this
+step's kickoff, no finding-6 structural variant without a fresh, explicit
+instruction.** Final recalibration: the $0.10/leg slippage placeholder
+(sized for finding 3's ~$18-wide design) was never rescaled after finding
+4 shrank width to $1 — recalibrated to $0.02/leg (2 standard minimum
+exchange ticks, real market-structure justification) and the pooled
+backtest rerun alone (stress test stands unchanged). Real trade count is
+now substantial (26/28 cycles, not 7/28 or 0/28): pooled net-of-cost
+**-0.38%**, gross-of-cost +1.70%, win rate 88.5% (23 wins summing
++$475.99, 3 losses summing -$514.00, net -$38.00 on $10,000). Fold 1
+negative (-0.92%), fold 2 positive (+0.55%) — the pre-committed bar
+(pooled net positive AND both folds individually positive) is NOT
+cleared, but this is now a real, adequately-sampled result, not a
+sizing-floor or slippage-calibration artifact. No adopt/reject verdict
+rendered — decision on Track C's put credit spread deferred to the user.
 
 ## Hard rules — never do these
 

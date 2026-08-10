@@ -136,11 +136,23 @@ FEES: commission-free (user instruction, $0/contract — Alpaca's
 options product, same framing Track B used for ETFs) plus a slippage
 JUDGMENT CALL, not a measured number (same epistemic status as every
 other slippage placeholder in this repo — see backtest.py's
-DEFAULT_SLIPPAGE_BPS docstring): PCS_SLIPPAGE_PER_LEG_DOLLARS ($0.10/
-share = $10/contract per leg, applied only at ENTRY — both legs, credit
-reduced by 2x this amount). No slippage is modeled at expiration:
-expiring ITM legs settle/exercise automatically, there is no execution
-crossing a spread the way a discretionary close would.
+DEFAULT_SLIPPAGE_BPS docstring): PCS_SLIPPAGE_PER_LEG_DOLLARS, applied
+only at ENTRY (both legs, credit reduced by 2x this amount). No slippage
+is modeled at expiration: expiring ITM legs settle/exercise
+automatically, there is no execution crossing a spread the way a
+discretionary close would.
+
+RECALIBRATED (this session, finding 5 — the TRUE final structural change
+to this design, per instruction; see CLAUDE.md Track C finding 5):
+$0.10/leg -> $0.02/leg (2 standard minimum ticks). Justification:
+standard exchange tick rules quote options priced under $3 in $0.01
+increments — a $1-wide, penny-credit SPY spread (finding 4's confirmed
+real width) falls squarely in that category, so 2 ticks ($0.02) is a
+more realistic conservative-but-not-punitive slippage estimate than the
+original $0.10/leg, which was calibrated for finding 3's ~$18-wide
+design (options priced well above $3, wider legal tick increments) and
+was never rescaled when the width dropped in finding 4. Reasoned
+independently of finding 4's -3.34% net result, not a reaction to it.
 
 FOLDS: 2 anchored folds (user instruction) over
 [2024-01-18, last available data date] — no separate initial-training
@@ -200,7 +212,7 @@ DTE_HIGH = 45
 OPTIONS_DATA_FLOOR = date(2024, 1, 18)
 
 # Judgment calls, both flagged in the module docstring — not measured facts.
-PCS_SLIPPAGE_PER_LEG_DOLLARS = 0.10  # $/share = $10/contract per leg, entry only
+PCS_SLIPPAGE_PER_LEG_DOLLARS = 0.02  # $/share = $2/contract per leg, entry only — finding 5 recalibration, see module docstring
 PCS_COMMISSION_PER_CONTRACT = 0.0    # commission-free, per instruction
 
 # REDESIGN #2 (this session): defined-risk-specific override of spec
@@ -567,7 +579,7 @@ def main():
     start = datetime(2016, 1, 4, tzinfo=timezone.utc)  # equity-data floor — see Track B/A, fetched wide so buy-and-hold context isn't clipped
 
     print(f"=== Track C: SPY put credit spread (narrowest-achievable width in {NARROW_OTM_LOW*100:.0f}-{NARROW_OTM_HIGH*100:.0f}% OTM zone, 30-45 DTE monthly rolling, real-data-only entry+expiration, {PCS_RISK_PER_TRADE_PCT:.0f}% defined-risk sizing) ===")
-    print(f"(REDESIGN this session vs. the first run: strike zone 5%/8% OTM -> narrowest-achievable in {NARROW_OTM_LOW*100:.0f}-{NARROW_OTM_HIGH*100:.0f}% OTM; sizing spec §4.1's global {DEFAULT_RISK_PER_TRADE_PCT:.0f}% -> a defined-risk-specific {PCS_RISK_PER_TRADE_PCT:.0f}% override, THIS FILE ONLY — see module docstring)")
+    print(f"(cumulative redesign vs. finding 3's first run: strike zone 5%/8% OTM -> narrowest-achievable in {NARROW_OTM_LOW*100:.0f}-{NARROW_OTM_HIGH*100:.0f}% OTM (finding 4); sizing spec §4.1's global {DEFAULT_RISK_PER_TRADE_PCT:.0f}% -> a defined-risk-specific {PCS_RISK_PER_TRADE_PCT:.0f}% override, THIS FILE ONLY (finding 4); slippage $0.10/leg -> ${PCS_SLIPPAGE_PER_LEG_DOLLARS:.2f}/leg, 2 min ticks (finding 5, this run) — see module docstring. TRUE FINAL structural iteration on this design, per instruction.)")
     spy_series = build_symbol_series(UNDERLYING, start, end)
     if spy_series is None:
         print("SPY: no candle data returned")
