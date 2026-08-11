@@ -642,20 +642,322 @@ being asked.**
    value pulled from the same import, not two numbers that happen to
    agree today. Full suite (170 tests) passing after both fixes.
 
+**MILESTONE CLOSED: Track B guardrail rescaling is COMPLETE and LOCKED
+(spec v33), committed as `0641b09` on `paper`, 170/170 tests passing.**
+Final Track B guardrail overrides (via `get_track_b_guardrail_config()`,
+`src/config.py`):
+
+| guardrail | global (crypto/Track A) | Track B |
+|---|---|---|
+| max trades/day | 6 | 8 (ENTRIES ONLY — `today_entry_count`, explicitly documented to exclude exits after the contract-ambiguity fix above) |
+| max daily loss | 3% | 4% |
+| max total open-risk budget | 1.5% | 8% (undiscounted, = 8 slots x 1% per-trade cap) |
+| max position notional | 25% | 55% (now the single canonical source — `MAX_SINGLE_POSITION_NOTIONAL_PCT`, `src/config.py` — imported by both `risk_filter.py` and `backtest_etf_donchian.py` after the real drift found and fixed above; the live guardrail path had been silently using the legacy 25% instead of 55%) |
+| max risk per trade | 1% | unchanged (1%) |
+| max drawdown | 10% | unchanged (10%) |
+
+**Portfolio-level concentration: no hard guardrail added, by design.**
+Soft, non-blocking Telegram alert only (`check_asset_class_
+concentration()`), firing when combined notional in a group exceeds 65%,
+using the 4-group asset-class split confirmed with the user before
+implementation: Domestic Equities {SPY, QQQ, IWM}, International
+Equities {EFA}, Bonds {AGG}, Alternatives {GLD, DBC, VNQ}. International
+Equities and Bonds are singleton groups that structurally can never
+trigger the alert alone (a single position is capped at 55%, below the
+65% threshold) — **this is correct, not a gap**, since the alert's
+purpose is catching multi-position correlated clustering, not bounding
+any single position (that's `MAX_SINGLE_POSITION_NOTIONAL_PCT`'s job).
+
+**Explicit open prerequisite for the next milestone:** `check_drawdown_
+limit()` and `evaluate()` in `risk_filter.py` are still
+`NotImplementedError` — correctly out of scope for this milestone, but
+must be implemented as the FIRST task of the `execution.py` milestone,
+since `execution.py` cannot function without a working `evaluate()`.
+
+**UPDATE: the `execution.py` design session (claude.ai chat interface) is
+COMPLETE. Full architecture LOCKED, ready for implementation — this is
+now the source of truth for the `execution.py` milestone, superseding
+the generic spec §3.1 description where the two disagree (that
+description is crypto-era/intraday; Track B's actual design differs
+deliberately, per below).**
+
+- **Cadence:** daily, ~30-60 min post-market-close — NOT the continuous
+  intraday loop spec §3.1 originally described (that applies to crypto,
+  not Track B).
+
+- **Signal computation:** import directly from
+  `scripts/backtest_donchian_ensemble.py` / `scripts/
+  backtest_etf_donchian.py` — including `universe_order` for the
+  slot-priority tie-break (fixed list order: SPY, QQQ, IWM, EFA, AGG,
+  GLD, DBC, VNQ — not signal-strength ranked, confirmed against the code
+  during pre-design fact-checking). No reimplementation, specifically to
+  avoid the kind of constant drift already found and fixed once (the
+  `MAX_SINGLE_POSITION_NOTIONAL_PCT` duplication, spec v32/v33
+  clarification pass).
+
+- **Entry: market order, submitted post-close, filled at next session's
+  open.** Market-on-close is structurally impossible for this strategy
+  — the Donchian signal needs the close to confirm it fired, and MOC
+  orders must be submitted before the close. Next-open is the only
+  honest live equivalent. This is a genuine overnight gap versus the
+  backtest's same-day-close fill assumption (confirmed by direct code
+  trace: `backtest_donchian_ensemble.py` fills at the SAME bar's close
+  that generated the signal, no next-bar-open fill anywhere in that
+  path) — NOT just execution friction, and tracked as its own metric,
+  separate from the existing 5bps/leg slippage placeholder: **"signal-
+  to-fill overnight gap."**
+
+- **Stop mechanism — fully traced against the actual backtest code before
+  locking this design, not assumed:** the backtest's "trailing stop" is
+  a STATIC level per session, checked once against that day's low, and
+  only moves once daily (post-close, computed for the next session) —
+  never an intraday-trailing mechanism. `extreme_close` (highest CLOSE
+  since entry, confirmed NOT highest high) and `prior_atr` are both
+  anchored to T-1 for a given day T's check; the bump to include T's own
+  close only happens after that day's check clears (see the three
+  fact-check exchanges that traced this line-by-line). Consequences
+  locked into the design:
+  - **Order type: plain `stop`, not Alpaca's native `trailing_stop`** —
+    the ATR recompute is a once-daily software job; the resting order
+    itself is static and broker-checked all session, matching the
+    backtest exactly (a native trailing-stop order would trail
+    continuously intraday, which the backtest never does).
+  - **`extreme_close_0` anchors to the SIGNAL day's close (`close_T`),
+    not the fill day's** — matches the backtest's first stop check
+    (which uses `atr[T]` against T+1's low) and avoids a one-directional
+    bug where anchoring to the fill day would make the live stop looser
+    than the backtest's on breakout-then-reversal trades.
+  - **Initial stop (`close_T - 3.0*ATR(T)`) is fully computable before
+    the entry order is even submitted** — both inputs are known from the
+    signal-day close, before the next-open fill happens.
+  - **Time-in-force: GTC, not DAY** — a deliberate deviation from a
+    literal day-by-day replica. A DAY stop expires at close regardless
+    of whether the next day's recompute job actually runs; GTC means a
+    stale-but-present stop always rests if the recompute job fails,
+    never zero protection.
+  - **Replace via Alpaca's order-replace (PATCH), not cancel-then-
+    resubmit** — avoids a window with no resting stop. Ratchet-only:
+    replace only when the new level is more favorable, matching
+    `extreme_close`'s max()-only ratchet in the backtest.
+
+- **Position sizing: computed AFTER fill confirmation**, using the
+  actual fill price and the pre-computed fixed stop price
+  (`qty = risk_budget / (fill_price - stop_price)`) — pins realized
+  per-trade risk at exactly 1% regardless of gap size, at the cost of
+  entry and stop being two separate order submissions rather than one
+  atomic bracket. The resulting gap-size variance in notional SIZE (not
+  risk) should be watched during soak review alongside the overnight-gap
+  metric — same root cause (the next-open fill), two different visible
+  symptoms.
+
+- **Unprotected-window safeguard:** since entry and stop can't be
+  bundled atomically (Alpaca doesn't support bracket/OCO for this
+  structure any more than it does for crypto — see "Hard rules" below,
+  a related but distinct gap), the period between fill confirmation and
+  stop submission succeeding is the system's highest-risk failure state.
+  Requires retry logic on stop submission and an immediate, distinct
+  Telegram alert if it fails or is delayed — NOT folded into generic
+  error handling.
+
+- **Position/state source of truth: Alpaca's account and order state
+  directly — no local position database.** Local storage is for
+  signal-lookback market data and audit logs only.
+
+- **Guardrail integration point:** candidate signals generated post-close
+  (day T) are passed through `risk_filter.evaluate()` before any entry
+  order is submitted for T+1. **This is a hard prerequisite:
+  `evaluate()` and `check_drawdown_limit()` are still
+  `NotImplementedError` and must be built as the FIRST task of this
+  milestone** — carried forward unchanged from the guardrail-rescaling
+  milestone's closing note.
+
+- **Fail-safe behavior:** a data/API failure halts new ENTRIES for that
+  day only. Already-open positions stay protected by their resting GTC
+  stop orders independent of bot uptime — the GTC choice above is what
+  makes this fail-safe property hold.
+
+**UPDATE: `execution.py` milestone EXECUTED — this design is now
+IMPLEMENTED, not just locked.** Two prerequisite `risk_filter.py`
+methods, then the full Track B daily execution pipeline, then a real
+paper-account dry run. 43 new tests (`tests/test_execution.py`), 8 new
+tests (`tests/test_risk_filter.py`, `check_drawdown_limit()`/
+`evaluate()`), full suite 225/225 passing.
+
+1. **`risk_filter.py` prerequisites — DONE, per instruction (do not
+   proceed past this step until implemented and tested).**
+   `check_drawdown_limit()`: peak-to-trough equity check against the
+   global 10% threshold (no Track-B override — confirmed identical
+   across `get_guardrail_config()`/`get_track_b_guardrail_config()`,
+   per `config.get_track_b_guardrail_config()`'s own docstring), halts
+   via the same `halt_state.set_halt()` mechanism as `check_daily_loss_
+   limit()`. `evaluate()`: the single-entry-point orchestrator — runs
+   daily-loss, drawdown, trade-count, and open-risk-budget checks in
+   that order (daily-loss/drawdown can each halt independently; both
+   run regardless of an earlier halt in the same call, cheap and
+   idempotent) and returns a `RiskDecision` whose `position_size` field
+   carries the GRANTED risk % (min of the 1% per-trade target and
+   whatever's left of the open-risk budget). The 5th named guardrail
+   (position notional cap, §4.1) is deliberately NOT a pass/fail gate
+   in `evaluate()` — same reasoning `check_combined_open_risk_budget()`
+   already documented for itself: the actual notional a given risk %
+   produces depends on the entry ATR-to-price ratio, unknowable until
+   sizing time, so it's enforced downstream in `execution.py`'s sizing
+   step reading `guardrails.max_position_size_pct` directly.
+
+2. **Signal generation** — `execution.py` imports `build_symbol_series()`
+   from `scripts/backtest_etf_donchian.py` (Track B's own already-locked
+   backtest module) rather than reimplementing, per instruction. That
+   module itself reuses `simulate_rotational_ensemble()` et al. from
+   `scripts/backtest_donchian_ensemble.py`, so the live signal path
+   traces back to the exact same `compute_donchian_levels()`/
+   `compute_atr()` primitives the Track B backtest validated,
+   transitively, with no second copy anywhere. `universe_order` (fixed
+   list order: SPY, QQQ, IWM, EFA, AGG, GLD, DBC, VNQ) is the
+   slot-priority tie-break — no separate slot-count gate exists in
+   `execution.py`, since `MAX_CONCURRENT_POSITIONS` equals the full
+   8-symbol universe size, so the cap is structurally satisfied by
+   "skip any symbol already holding a position" alone (confirmed, not
+   assumed, in the guardrail-rescaling milestone).
+
+3. **Entry order flow — the flagged qty-before-fill tension, resolved
+   as a documented judgment call, NOT confirmed with the user.** Per
+   the pre-implementation flag: the locked design's "qty computed AFTER
+   fill confirmation" cannot be literally true — Alpaca requires a qty
+   on the entry order at submission time, before the next-session fill
+   price is known. Resolution implemented: `estimate_pre_fill_qty()`
+   substitutes the signal day's own close (`close_T`, the same anchor
+   the stop price already uses) as a pre-fill proxy for the unknown
+   fill price; the entry order is submitted and filled at that qty and
+   is NEVER resubmitted or resized afterward; `compute_realized_risk()`
+   computes what risk was ACTUALLY taken post-fill, purely for
+   reporting — any deviation from the 1% target is treated as an
+   accepted, tracked consequence of the next-open-fill design, the same
+   "signal-to-fill overnight gap" the locked design already names for
+   TIMING, just showing up here as notional-SIZE variance instead (same
+   root cause, two visible symptoms). **This is very likely not what
+   the locked design's sentence intended and should get a real
+   chat-interface design-call confirmation before this module is
+   trusted with live capital** — flagged in `execution.py`'s module
+   docstring, not silently treated as settled.
+
+   **A second, related design gap was discovered during implementation
+   (not anticipated by the locked brief) and is flagged the same way:**
+   bridging the overnight submit-to-fill gap ACROSS separate daily-job
+   invocations. The brief's "submitted post-close... stop submitted
+   immediately after fill confirms" can't hold across a single ~30-60
+   min post-close job when the fill itself doesn't happen until hours
+   (or, over a weekend, days) later — a single process call can't block
+   that long. Resolution implemented: `poll_order_until_terminal()`'s
+   default timeout is short (60s, only enough to catch an IMMEDIATE
+   outcome — a reject or an actual same-session fill during market
+   hours); `confirm_entry_fill()` now distinguishes THREE outcomes, not
+   two — filled, genuinely-rejected, and PENDING (still open with zero
+   fill, the ordinary expected state for a next-session-open fill, not
+   a failure, no alert); a new `protect_unprotected_fills()` runs as
+   the FIRST phase of every `run_daily_execution_job()` call, finding
+   any Alpaca position with no resting stop yet and recomputing its
+   stop price purely from ITS OWN entry date's signal-day close/ATR
+   (`compute_stop_price_for_entry_date()` — the formula only ever
+   depends on public price history for the entry date, so it's always
+   re-derivable on demand and never needs to be persisted, consistent
+   with "no local position database"). **Net effect, reported plainly:
+   a position that fills between two daily runs can now be unprotected
+   for up to about one full trading day** — worse than the locked
+   design's apparent assumption of near-immediate post-fill protection.
+   This is a real, material gap in the locked design as read literally,
+   not introduced by this implementation; a genuinely correct fix
+   likely needs a THIRD, separate scheduled invocation shortly after
+   each session's open (calling `protect_unprotected_fills()` on its
+   own) — not built this milestone, flagged for the same design-call as
+   the qty gap above.
+
+4. **Stop order flow** — `submit_stop_order()` (plain `stop`, TIF=GTC,
+   qty not notional — confirmed the existing sizing code already
+   outputs qty). `submit_stop_order_with_retry()`: retries with backoff
+   (default 3 retries, `(5, 15, 30)`s) then fires an immediate, distinct
+   `URGENT — UNPROTECTED POSITION` Telegram alert on total failure,
+   deliberately not folded into generic error handling, per instruction.
+   Daily ratchet (`ratchet_position_stop()`): recomputes `extreme_close`
+   since entry and the T-1-anchored-ATR candidate stop, replaces via
+   Alpaca's PATCH `replace_order_by_id()` (not cancel-then-resubmit)
+   only when strictly more favorable (`compute_ratcheted_stop_price()`'s
+   max()-only ratchet, identical formula to `simulate_rotational_
+   ensemble()`'s exit block).
+
+5. **Fail-safe behavior — verified, not just asserted from the order
+   type.** `run_daily_execution_job()`'s only try/except around data
+   fetch means any data/API failure skips BOTH the daily ratchet and
+   new entries for that run, but touches no resting order — confirmed
+   directly in the dry run (see below) via `replace_stop_order_if_
+   favorable()`'s unfavorable-candidate branch, which correctly declined
+   to call Alpaca's replace endpoint at all. The daily ratchet itself
+   runs even while `halt_state.py` reports halted (only ever tightens
+   protection, never opens new risk); new entries are skipped entirely
+   while halted.
+
+6. **Tests — all required categories covered, 43 tests in
+   `tests/test_execution.py`:** sizing/stop-anchoring math (signal-day-
+   close anchoring, T-1-anchored ATR reference via a deliberately
+   large decoy today's-ATR value, ratchet-only max()-logic, the
+   notional second-stage cap); a simulated unprotected-window failure
+   (`submit_stop_order_with_retry` exhausting all attempts — both in
+   isolation and end-to-end via `submit_entry_and_stop`, confirming the
+   URGENT alert fires and `stop_order_submitted=False` while the
+   entry's real fill is still correctly reported); the new pending-fill
+   three-way classification (a still-open zero-fill order must NOT be
+   treated as rejected); and `protect_unprotected_fills()`'s discovery/
+   protect/alert-on-unrecoverable paths.
+
+7. **End-to-end paper-account dry run — EXECUTED against the real paper
+   account (`scripts/dry_run_execution_track_b.py`, one-off, not meant
+   to be maintained, same convention as `select_universe.py`). Market
+   was closed at run time (2026-08-11 ~18:03 ET) — used a marketable
+   extended-hours LIMIT order as a DRY-RUN-ONLY expedient (documented
+   in the script, NOT how production Track B submits entries) so the
+   full flow could be validated in one sitting rather than waiting for
+   next open.** Result: real entry filled (1 share SPY @ $770.72), real
+   GTC stop order submitted and resting ($765.72), the ratchet-only
+   replace correctly DECLINED an unfavorable candidate (no API call
+   made). **New, real finding from live testing, not previously known:**
+   Alpaca rejects a PATCH replace on an order still in `accepted` status
+   (HTTP 422, "cannot replace order in accepted status") — a
+   newly-submitted stop needs a short settle window before it's
+   replaceable. Not expected to matter in real production use (the
+   daily ratchet runs once per day, long after any same-day-submitted
+   stop has settled), and already fail-safe by construction —
+   `run_daily_execution_job()`'s per-position try/except around
+   `ratchet_position_stop()` turns any such exception into a safe no-op
+   (alert + "existing resting stop unchanged"), not a crash — but
+   flagged in `replace_stop_order_if_favorable()`'s docstring since it
+   was unknown before this dry run. The script cleaned up after itself
+   (cancelled the stop, closed the position via a second extended-hours
+   limit order since the plain-market close order predictably sat
+   PENDING outside market hours) — paper account left flat, +$0.13 net
+   P&L from the round trip, no residual test position.
+
+**Not yet done:** the third, separate near-open scheduled invocation
+flagged in gap 2 above (`position_management.py`, still untouched);
+`data_ingestion.py`'s live/streaming fetch (`fetch_latest_candle()`,
+`validate_data()`); spec §3.2 journaling/audit-log persistence of
+`run_daily_execution_job()`'s returned log dict; and the crypto/Track A
+bracket-order gap (`place_entry_order()`/`place_exit_orders()`, still
+`NotImplementedError`, unrelated to Track B and explicitly untouched).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
 data), `scripts/backtest.py`, and `scripts/backtest_trend_filter.py` are
-real and working, with passing tests. **UPDATE (Track B guardrail-
-implementation milestone, spec v32): `risk_filter.py` is no longer 100%
-stub** — `check_trade_count_limit()`, `check_daily_loss_limit()`,
-`check_combined_open_risk_budget()`, and the new `check_asset_class_
-concentration()` are real and tested; `check_drawdown_limit()` and
-`evaluate()` (the single-entry-point wiring) remain `NotImplementedError`
-— see "Current status" above. Everything else in `src/` is still a stub
-with a docstring pointing to the spec section it implements —
-`execution.py`, `position_management.py`, and `data_ingestion.py`'s live
-fetch are untouched.
+real and working, with passing tests. `risk_filter.py` is now FULLY
+implemented — `check_trade_count_limit()`, `check_daily_loss_limit()`,
+`check_combined_open_risk_budget()`, `check_asset_class_concentration()`,
+`check_drawdown_limit()`, and `evaluate()` are all real and tested; no
+`NotImplementedError` remains in this file. **`src/execution.py` is now
+real and tested for Track B** (see above) — the legacy crypto/Track A
+bracket-order-blocked functions (`place_entry_order()`/
+`place_exit_orders()`) remain `NotImplementedError`, unchanged, still
+correctly blocked on the separate crypto OCO-emulation gap ("Hard
+rules"). `position_management.py` and `data_ingestion.py`'s live fetch
+remain untouched stubs.
 
 ### Findings so far (2026-08 session, spans several rounds)
 
@@ -2547,13 +2849,35 @@ current instruction.
 
 ### Blocked/pending, unrelated to backtest
 
-`execution.py`'s OCO-fallback design is still waiting on a strategy
-family reaching an adopt decision before it makes sense to start — on
-top of its own separate crypto bracket-order design gap (see "Hard
-rules" below). The correlation/open-risk-budget guardrail redesign
-needed to generalize spec §4.3 from 2 assets to 10 (finding 10) is also
-blocked/pending — not started, and explicitly not part of the current
-milestone.
+**UPDATE: `execution.py` is no longer blocked for Track B — see "Current
+status" for the full executed milestone.** `place_entry_order()`/
+`place_exit_orders()` (the legacy crypto/Track A OCO-fallback path) stay
+`NotImplementedError`, still correctly blocked on the separate crypto
+bracket-order design gap (see "Hard rules" below) — that gap is
+irrelevant to Track B specifically, since Track B's exit is a single ATR
+trailing stop with no take-profit leg at all, so there's nothing to
+OCO-emulate. The correlation/open-risk-budget guardrail redesign needed
+to generalize spec §4.3 from 2 assets to 10 (finding 10) remains
+blocked/pending — not started, and explicitly not part of any Track B
+milestone to date.
+
+**New, explicitly flagged and NOT yet resolved:** two real design gaps
+surfaced while implementing/dry-running `execution.py` this session (full
+detail in "Current status") —
+  1. the entry-qty-before-fill sequencing tension (Alpaca needs a qty at
+     submission time; the locked design's risk-pinned formula needs the
+     unknown fill price) is resolved here with a pre-fill close_T proxy,
+     documented as a placeholder, not confirmed with the user;
+  2. bridging the overnight submit-to-fill gap across separate daily-job
+     invocations means a newly-filled position can now sit unprotected
+     for up to about a full trading day before `protect_unprotected_
+     fills()` (run at the START of the next `run_daily_execution_job()`
+     call) catches it up — a genuinely correct fix likely needs a THIRD,
+     separate scheduled invocation shortly after each session's open,
+     not built this milestone.
+Both need a real chat-interface design-call confirmation before this
+module should be trusted with live capital — do not treat either as
+settled without a fresh, explicit instruction.
 
 **Crypto strategy family: CLOSED, no further milestones.** Finding 14
 (corrected long-horizon design — 100-day Donchian channel, daily entries,

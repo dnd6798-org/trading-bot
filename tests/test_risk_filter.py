@@ -1,18 +1,18 @@
 """
-Track B guardrail-implementation milestone (spec v32). Covers exactly the
-three risk_filter.py checks implemented this session — check_trade_count_
-limit(), check_daily_loss_limit(), check_combined_open_risk_budget() —
-against both the global .env config (get_guardrail_config(), unaffected,
-still governs crypto/Track A) and the new Track B override config
-(get_track_b_guardrail_config(), spec v32). check_drawdown_limit() and
-evaluate() are still NotImplementedError, out of scope this session — not
-tested here.
+Track B guardrail-implementation milestone (spec v32) plus the execution.py
+milestone's two prerequisite checks. Covers all five risk_filter.py
+checks — check_trade_count_limit(), check_daily_loss_limit(),
+check_combined_open_risk_budget(), check_drawdown_limit(), and the
+evaluate() orchestrator — against both the global .env config
+(get_guardrail_config(), unaffected, still governs crypto/Track A) and
+the Track B override config (get_track_b_guardrail_config(), spec v32).
 
-check_daily_loss_limit()'s halt path is tested against the REAL
-halt_state.py mechanism (not mocked) — redirected to a tmp_path file via
-monkeypatch so tests never touch the repo-root halt_state.json — since
-"same mechanism as the existing daily-loss circuit breaker" means halt_
-state.py's real persisted-halt design, not a substitute.
+check_daily_loss_limit()/check_drawdown_limit()'s halt paths are tested
+against the REAL halt_state.py mechanism (not mocked) — redirected to a
+tmp_path file via monkeypatch so tests never touch the repo-root
+halt_state.json — since "same mechanism as the existing daily-loss
+circuit breaker" means halt_state.py's real persisted-halt design, not a
+substitute.
 """
 from types import SimpleNamespace
 
@@ -26,11 +26,15 @@ from src.config import (
     get_track_b_guardrail_config,
     MAX_SINGLE_POSITION_NOTIONAL_PCT,
 )
+from src.signal_generation import TradeSignal, SignalDirection
 from src.risk_filter import (
     check_trade_count_limit,
     check_daily_loss_limit,
+    check_drawdown_limit,
     check_combined_open_risk_budget,
     check_asset_class_concentration,
+    evaluate,
+    RiskDecision,
     TRACK_B_ASSET_CLASS_GROUPS,
     CONCENTRATION_ALERT_THRESHOLD_PCT,
 )
@@ -321,3 +325,144 @@ def test_concentration_alert_singleton_groups_can_never_trigger_alone():
 
 def test_concentration_alert_default_threshold_constant_is_65():
     assert CONCENTRATION_ALERT_THRESHOLD_PCT == 65.0
+
+
+# --- check_drawdown_limit: real halt_state.py mechanism, peak-relative -----
+
+def test_check_drawdown_limit_within_limit_returns_true_and_does_not_halt():
+    account_state = SimpleNamespace(equity=9_500.0, peak_equity=10_000.0)  # -5.0% from peak
+    cfg = get_guardrail_config()  # 10.0% limit
+
+    assert check_drawdown_limit(account_state, cfg) is True
+    assert halt_state.load_halt_state().halted is False
+
+
+def test_check_drawdown_limit_breach_halts_via_the_real_halt_state_mechanism():
+    account_state = SimpleNamespace(equity=8_900.0, peak_equity=10_000.0)  # -11.0%, breaches -10.0%
+
+    result = check_drawdown_limit(account_state, get_guardrail_config())
+
+    assert result is False
+    state = halt_state.load_halt_state()
+    assert state.halted is True
+    assert "drawdown" in state.reason.lower()
+    assert state.halted_at is not None
+
+
+def test_check_drawdown_limit_breaches_at_exactly_the_threshold():
+    # Mirrors check_daily_loss_limit's at-or-past-the-limit convention —
+    # exactly 10.0% off peak must halt, not just anything past it.
+    account_state = SimpleNamespace(equity=9_000.0, peak_equity=10_000.0)  # exactly -10.0%
+
+    assert check_drawdown_limit(account_state, get_guardrail_config()) is False
+    assert halt_state.load_halt_state().halted is True
+
+
+def test_check_drawdown_limit_has_no_track_b_override_uses_same_global_10pct():
+    # Explicit per config.get_track_b_guardrail_config()'s own docstring:
+    # max_drawdown_pct is passed through unchanged, no Track-B rescale —
+    # confirm both configs actually agree, not just documented to.
+    global_cfg = get_guardrail_config()
+    track_b_cfg = get_track_b_guardrail_config()
+    assert track_b_cfg.max_drawdown_pct == global_cfg.max_drawdown_pct == 10.0
+
+    account_state = SimpleNamespace(equity=8_900.0, peak_equity=10_000.0)  # -11.0%, breaches either config identically
+    assert check_drawdown_limit(account_state, global_cfg) is False
+    halt_state.clear_halt()
+    assert check_drawdown_limit(account_state, track_b_cfg) is False
+
+
+def test_check_drawdown_limit_handles_zero_peak_equity_without_dividing_by_zero():
+    account_state = SimpleNamespace(equity=0.0, peak_equity=0.0)
+    assert check_drawdown_limit(account_state, get_guardrail_config()) is True
+    assert halt_state.load_halt_state().halted is False
+
+
+# --- evaluate(): single entry-point orchestration ---------------------------
+
+def _signal(symbol="SPY"):
+    return TradeSignal(symbol=symbol, direction=SignalDirection.LONG, entry_price=450.0, atr=5.0, timestamp="2026-08-11")
+
+
+def _healthy_account():
+    return SimpleNamespace(day_start_equity=10_000.0, equity=10_050.0, peak_equity=10_100.0)
+
+
+def test_evaluate_approves_when_every_check_clears_and_grants_the_per_trade_risk_pct():
+    cfg = get_track_b_guardrail_config()  # 1% per-trade target, 8% budget
+    decision = evaluate(_signal(), _healthy_account(), open_positions=[], today_entry_count=0, guardrails=cfg)
+
+    assert isinstance(decision, RiskDecision)
+    assert decision.approved is True
+    assert decision.reason == "approved"
+    assert abs(decision.position_size - cfg.max_risk_per_trade_pct) < 1e-9
+
+
+def test_evaluate_rejects_on_daily_loss_breach_and_halts():
+    cfg = get_track_b_guardrail_config()  # -4.0% limit
+    account_state = SimpleNamespace(day_start_equity=10_000.0, equity=9_500.0, peak_equity=10_100.0)  # -5.0% today
+
+    decision = evaluate(_signal(), account_state, open_positions=[], today_entry_count=0, guardrails=cfg)
+
+    assert decision.approved is False
+    assert "daily loss" in decision.reason
+    assert halt_state.load_halt_state().halted is True
+
+
+def test_evaluate_rejects_on_drawdown_breach_and_halts():
+    cfg = get_track_b_guardrail_config()  # 10.0% limit, no Track-B override
+    account_state = SimpleNamespace(day_start_equity=10_000.0, equity=9_800.0, peak_equity=11_500.0)  # -14.8% from peak, but only -2.0% today
+
+    decision = evaluate(_signal(), account_state, open_positions=[], today_entry_count=0, guardrails=cfg)
+
+    assert decision.approved is False
+    assert "drawdown" in decision.reason
+    assert halt_state.load_halt_state().halted is True
+
+
+def test_evaluate_rejects_on_trade_count_limit_without_halting():
+    cfg = get_track_b_guardrail_config()  # cap 8
+
+    decision = evaluate(_signal(), _healthy_account(), open_positions=[], today_entry_count=8, guardrails=cfg)
+
+    assert decision.approved is False
+    assert "trade count" in decision.reason
+    # Trade-count is a soft gate, not a halt-worthy breach — must not
+    # touch halt_state at all, unlike the daily-loss/drawdown checks.
+    assert halt_state.load_halt_state().halted is False
+
+
+def test_evaluate_rejects_when_open_risk_budget_is_exhausted():
+    cfg = get_track_b_guardrail_config()  # 8% budget
+    open_positions = [SimpleNamespace(risk_pct=1.0) for _ in range(8)]  # fully committed
+
+    decision = evaluate(_signal(), _healthy_account(), open_positions=open_positions, today_entry_count=0, guardrails=cfg)
+
+    assert decision.approved is False
+    assert "risk budget" in decision.reason
+    assert halt_state.load_halt_state().halted is False
+
+
+def test_evaluate_shrinks_granted_position_size_to_whatevers_left_of_the_risk_budget():
+    cfg = get_track_b_guardrail_config()  # 1% per-trade target, 8% budget
+    # 7.5% already committed — only 0.5% left, below the 1% per-trade target.
+    open_positions = [SimpleNamespace(risk_pct=7.5)]
+
+    decision = evaluate(_signal(), _healthy_account(), open_positions=open_positions, today_entry_count=0, guardrails=cfg)
+
+    assert decision.approved is True
+    assert abs(decision.position_size - 0.5) < 1e-9
+
+
+def test_evaluate_checks_run_in_order_daily_loss_before_drawdown_before_count_before_budget():
+    # A candidate that breaches BOTH daily loss and drawdown simultaneously
+    # must be rejected for daily loss first (checked first in evaluate()),
+    # not drawdown — pins the documented check order, not just "some check
+    # rejects it".
+    cfg = get_track_b_guardrail_config()
+    account_state = SimpleNamespace(day_start_equity=10_000.0, equity=9_000.0, peak_equity=11_000.0)  # -10% today AND -18.2% from peak
+
+    decision = evaluate(_signal(), account_state, open_positions=[], today_entry_count=0, guardrails=cfg)
+
+    assert decision.approved is False
+    assert "daily loss" in decision.reason

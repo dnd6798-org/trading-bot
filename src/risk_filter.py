@@ -20,15 +20,21 @@ centralized so it's auditable in one file rather than scattered checks
 (spec §5 falsifiability/auditability principle).
 
 BUILD-SESSION SCOPE NOTE (Track B guardrail-implementation milestone,
-spec v32): only the three checks below that correspond to the three
-Track-B-rescaled numbers (check_trade_count_limit, check_daily_loss_limit,
-check_combined_open_risk_budget) are implemented this session, each
-against a minimal, locally-documented duck-typed input shape — a full
-AccountState/Position type, check_drawdown_limit() (no Track-B override,
-out of scope this session), and evaluate() (the single-entry-point wiring,
-execution.py-adjacent) are deliberately left as NotImplementedError,
-per this repo's "one session = one milestone" convention and this
-milestone's explicit instruction not to proceed into execution.py.
+spec v32): the three checks that correspond to the three Track-B-rescaled
+numbers (check_trade_count_limit, check_daily_loss_limit,
+check_combined_open_risk_budget) were implemented that session, each
+against a minimal, locally-documented duck-typed input shape.
+check_drawdown_limit() and evaluate() were deliberately left as
+NotImplementedError at that point, per that milestone's explicit
+instruction not to proceed into execution.py.
+
+UPDATE (execution.py milestone): check_drawdown_limit() and evaluate()
+are now implemented — see each function's own docstring. Still no full
+AccountState/Position dataclass here; both remain duck-typed to the
+minimal attributes each check needs, with execution.py responsible for
+building objects that satisfy that shape from Alpaca's real account/
+order/position state (this module's own "no local position database"
+convention, spec §3.1.4).
 """
 from dataclasses import dataclass
 
@@ -95,7 +101,39 @@ def check_trade_count_limit(today_entry_count: int, guardrails: GuardrailConfig)
 
 
 def check_drawdown_limit(account_state, guardrails: GuardrailConfig) -> bool:
-    raise NotImplementedError
+    """
+    True = current equity is still within guardrails.max_drawdown_pct of
+    the account's peak equity, trading may continue. False = breached,
+    and this call has ALREADY halted trading via halt_state.set_halt()
+    before returning — same mechanism/convention as
+    check_daily_loss_limit() above (spec §4.5/§7's persisted-until-a-
+    human-clears-it halt).
+
+    account_state is duck-typed to the minimal shape this check needs:
+    `equity` (current) and `peak_equity` (the account's all-time-high
+    equity). Per this module's "no local position database" convention
+    (execution.py's locked design, CLAUDE.md), `peak_equity` is expected
+    to be derived by the caller from Alpaca's own account/portfolio-
+    history data (e.g. the max of get_portfolio_history()'s equity
+    series) — NOT tracked in a local file here. This is the global spec
+    §4.3 guardrail (10%, unchanged for Track B — no Track-B override
+    exists, see config.get_track_b_guardrail_config()'s docstring), so
+    max_drawdown_pct is read the same way regardless of which
+    GuardrailConfig (global or Track B) is passed in.
+
+    Breach is defined at-or-past the threshold (drawdown_pct >=
+    max_drawdown_pct halts), mirroring check_daily_loss_limit()'s own
+    at-or-past-the-limit convention.
+    """
+    if account_state.peak_equity <= 0:
+        return True
+    drawdown_pct = (account_state.peak_equity - account_state.equity) / account_state.peak_equity * 100
+    within_limit = drawdown_pct < guardrails.max_drawdown_pct
+    if not within_limit:
+        halt_state.set_halt(
+            f"drawdown limit breached: {drawdown_pct:.2f}% from peak (limit {guardrails.max_drawdown_pct:.2f}%)"
+        )
+    return within_limit
 
 
 def check_combined_open_risk_budget(open_positions, new_signal: TradeSignal, guardrails: GuardrailConfig) -> float | None:
@@ -128,10 +166,60 @@ def check_combined_open_risk_budget(open_positions, new_signal: TradeSignal, gua
 def evaluate(signal: TradeSignal, account_state, open_positions, today_entry_count: int, guardrails: GuardrailConfig) -> RiskDecision:
     """
     Single entry point — every candidate must go through this before
-    execution.py ever sees it. today_entry_count: see check_trade_count_
-    limit()'s docstring — entries only, never exits.
+    execution.py ever sees it (execution.py milestone, spec §3.1.3/§3.1.4
+    boundary). Runs, in order:
+
+      1. check_daily_loss_limit() — account-level, halts on breach.
+      2. check_drawdown_limit() — account-level, halts on breach.
+      3. check_trade_count_limit() — today_entry_count: see check_trade_
+         count_limit()'s docstring, entries only, never exits.
+      4. check_combined_open_risk_budget() — the remaining portfolio
+         risk-budget %, or a reject if fully committed.
+
+    Checks 1-2 run (and can halt) even if an earlier one in this same
+    call already breached — cheap and idempotent (halt_state.set_halt()
+    just re-writes the same halted=True file), and keeps each check's
+    own halt side effect self-contained rather than adding short-circuit
+    logic that could accidentally skip a real breach on some future
+    reordering.
+
+    Position notional cap (spec §4.1, guardrails.max_position_size_pct —
+    the 5th named guardrail) is deliberately NOT a pass/fail gate here,
+    same reasoning check_combined_open_risk_budget()'s own docstring
+    already gives for why it doesn't decide sizing outright: a candidate
+    signal isn't invalid just because ITS eventual position might need to
+    be sized down. It can't be evaluated as a simple % gate at this stage
+    either way — the actual notional a given risk_pct produces depends on
+    the entry-ATR-to-price ratio, which isn't knowable until the sizing
+    step (same AGG-style pathology already documented in
+    scripts/backtest_donchian_ensemble.py's entry_sizing_log). Whether
+    the notional cap actually binds is therefore resolved downstream, in
+    execution.py's sizing step, reading guardrails.max_position_size_pct
+    directly off the SAME GuardrailConfig object this function was
+    called with — not decided here.
+
+    On approval, RiskDecision.position_size carries the GRANTED risk %
+    of equity for this trade (min of the standard per-trade target,
+    guardrails.max_risk_per_trade_pct, and whatever remains of the open-
+    risk budget) — execution.py multiplies this by equity to get the
+    live risk_amount for its position-sizing formula, the same
+    equal-risk-contribution concept already validated in the Track B
+    backtest (simulate_rotational_ensemble()'s total_risk_budget_pct
+    mechanism).
     """
-    raise NotImplementedError("Build session — implement each check above first, then wire together")
+    if not check_daily_loss_limit(account_state, guardrails):
+        return RiskDecision(approved=False, reason="daily loss limit breached")
+    if not check_drawdown_limit(account_state, guardrails):
+        return RiskDecision(approved=False, reason="drawdown limit breached")
+    if not check_trade_count_limit(today_entry_count, guardrails):
+        return RiskDecision(approved=False, reason="trade count limit reached")
+
+    available_risk_pct = check_combined_open_risk_budget(open_positions, signal, guardrails)
+    if available_risk_pct is None:
+        return RiskDecision(approved=False, reason="open-risk budget exhausted")
+
+    granted_risk_pct = min(guardrails.max_risk_per_trade_pct, available_risk_pct)
+    return RiskDecision(approved=True, reason="approved", position_size=granted_risk_pct)
 
 
 # --- Soft concentration monitoring (spec v32) -------------------------------
