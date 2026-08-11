@@ -83,6 +83,56 @@ def get_guardrail_config() -> GuardrailConfig:
     )
 
 
+def get_track_b_guardrail_config() -> GuardrailConfig:
+    """
+    Track B (spec v32) guardrail overrides, layered on top of
+    get_guardrail_config()'s global .env numbers rather than replacing
+    them — crypto/Track A keep reading get_guardrail_config() unchanged.
+    Reuses the SAME GuardrailConfig dataclass (not a separate type) so
+    risk_filter.py's checks work identically regardless of which config
+    is passed in — the same Track-B-only-override/shared-function pattern
+    already used for MAX_SINGLE_POSITION_NOTIONAL_PCT
+    (backtest_etf_donchian.py overriding simulate_rotational_ensemble()'s
+    notional_sanity_cap_pct parameter, spec v30 §10.2), applied to the
+    live guardrail config instead of a backtest parameter.
+
+    The legacy spec §4.2 numbers (3% daily loss, 6 trades/day,
+    1.5% combined open-risk) were sized for intraday BTC/ETH crypto
+    trading and don't transfer to Track B's actual cadence (daily-bar
+    signal evaluation across an 8-symbol universe, ~2-3 trades/month
+    pooled — see "Track B findings", CLAUDE.md). Only 3 of 6 fields are
+    rescaled here:
+      - max_trades_per_day: 6 -> 8, matching the 8-symbol universe size
+        (can never legitimately bind — each symbol fires at most once/day
+        — retained as a defense-in-depth duplicate-order/scheduler-bug
+        catcher, a separate code path from MAX_CONCURRENT_POSITIONS).
+      - max_daily_loss_pct: 3% -> 4%, rescaled from "3x per-trade risk"
+        (the crypto framing) to roughly half the new open-risk budget
+        below, sized for several concurrent positions gapping through
+        their stops on the same shock day, not sequential intraday losses.
+      - max_combined_open_risk_pct: 1.5% -> 8%, deliberately UNDISCOUNTED
+        (= MAX_CONCURRENT_POSITIONS(8) x max_risk_per_trade_pct(1%)),
+        matching exactly what Track B's original backtest validated (the
+        slot cap never bound, no cross-symbol correlation discount was
+        applied there — see "Track B findings" and the notional-
+        concentration milestone, spec v30 §10.2) rather than introducing
+        a new, never-backtested correlation discount at this stage.
+    max_risk_per_trade_pct, max_position_size_pct, and max_drawdown_pct
+    are passed through UNCHANGED from the global config —
+    max_drawdown_pct in particular has no Track-B override by explicit
+    instruction (not cadence-dependent, stays at the global 10%).
+    """
+    base = get_guardrail_config()
+    return GuardrailConfig(
+        max_risk_per_trade_pct=base.max_risk_per_trade_pct,
+        max_position_size_pct=base.max_position_size_pct,
+        max_daily_loss_pct=float(_get("MAX_DAILY_LOSS_PCT_TRACK_B", required=False, default="4.0")),
+        max_trades_per_day=int(_get("MAX_TRADES_PER_DAY_TRACK_B", required=False, default="8")),
+        max_combined_open_risk_pct=float(_get("MAX_TOTAL_OPEN_RISK_PCT_TRACK_B", required=False, default="8.0")),
+        max_drawdown_pct=base.max_drawdown_pct,
+    )
+
+
 def get_strategy_config() -> StrategyConfig:
     atr_raw = _get("ATR_MULTIPLIER", required=False, default="")
     return StrategyConfig(

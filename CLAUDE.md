@@ -452,14 +452,165 @@ tested, stands as the historical record).
    already-known "risk budget never bound in Track B's original run"
    fact).
 
+**UPDATE: Track B guardrail rescaling is now LOCKED (spec v32,
+chat-side design — this repo update records the decision per this file's
+own "update whenever a real decision is made" rule, no code changed this
+session).** The legacy spec §4.2 guardrail numbers (1% risk/trade, 25%
+max position, 3% daily loss, 6 trades/day cap, 1.5% combined open-risk,
+10% max drawdown — the ones locked in "Hard rules" below) were sized for
+intraday BTC/ETH crypto trading and do not transfer cleanly to Track B's
+actual cadence (daily-bar signal evaluation across an 8-symbol universe,
+~2-3 trades/month pooled, per "Track B findings"). New Track-B-specific
+OVERRIDES, additive alongside the global `.env` numbers (which stay
+untouched and still govern crypto/Track A) and alongside the already-
+implemented `MAX_CONCURRENT_POSITIONS=8`/`MAX_SINGLE_POSITION_NOTIONAL_
+PCT=55%`:
+
+- `MAX_TRADES_PER_DAY_TRACK_B = 8` (was global 6) — matches the 8-symbol
+  universe size. Can never legitimately bind (only 8 symbols exist, each
+  fires at most once per day) — retained purely as a defense-in-depth
+  duplicate-order/scheduler-bug catcher, on a separate code path from the
+  slot cap, not as an active trading constraint.
+- `MAX_DAILY_LOSS_PCT_TRACK_B = 4%` (was global 3%) — rescaled from "3x
+  per-trade risk cap" (the crypto framing) to roughly half the new total
+  open-risk budget below, sized for several concurrent positions gapping
+  through their stops on the same shock day, not sequential intraday
+  losses (which don't happen at daily-bar cadence).
+- `MAX_TOTAL_OPEN_RISK_PCT_TRACK_B = 8%` (was 1.5% for BTC+ETH combined)
+  — deliberately UNDISCOUNTED (= 8 slots x 1% per-trade cap), matching
+  exactly what Track B's original backtest validated (the slot cap never
+  bound in that run — see "Track B findings" — and no cross-symbol
+  correlation discount was applied there either) rather than introducing
+  a new, never-backtested correlation discount at this stage.
+- `MAX_DRAWDOWN_PCT` stays at the global **10%**, unchanged — not
+  cadence-dependent, so no Track-B override needed.
+
+**Portfolio-level concentration cap: decided NOT to add as a hard
+trading guardrail.** The notional-concentration milestone's 55%
+single-position cap (spec v30 §10.2, above) was proven to be a
+sizing-FORMULA-pathology fix (AGG's low ATR-to-price ratio demanding an
+oversized position), not a diversification control — and Track B's
+passed backtest never had, or needed, any concentration constraint.
+Instead: a soft, non-blocking Telegram monitoring alert fires when
+combined notional across positions in the same asset-class grouping
+exceeds ~60-65% of equity — visibility for a human, not an enforced
+trading rule.
+
+**This closes deployment-prep item 2 (spec §2). Next up: the
+`execution.py` build for Track B** — still blocked on its own separate
+crypto bracket-order design gap being irrelevant for Track B specifically
+(Alpaca DOES support real bracket/OCO orders for stocks/ETFs, unlike
+crypto — see "Hard rules" below), but no longer blocked on guardrail
+numbers being undefined. Not started this session.
+
+**UPDATE: the rescaled Track B guardrails above are now IMPLEMENTED as
+config overrides (spec v32), same pattern as `MAX_SINGLE_POSITION_
+NOTIONAL_PCT` — Track-B-only, shared defaults untouched for Track
+A/crypto.** This was a genuine, scoped `risk_filter.py` implementation
+step (not just config), since "correctly gate at their new values" and
+"correctly halts trading" needed real check logic to test against — see
+that module's new "BUILD-SESSION SCOPE NOTE" for exactly what was and
+wasn't implemented.
+
+1. **Config** — `src/config.py` gained `get_track_b_guardrail_config()`,
+   returning the SAME `GuardrailConfig` dataclass as `get_guardrail_
+   config()` (not a new type), with `max_trades_per_day`/`max_daily_
+   loss_pct`/`max_combined_open_risk_pct` rescaled to 8/4.0/8.0 and
+   `max_risk_per_trade_pct`/`max_position_size_pct`/`max_drawdown_pct`
+   passed through unchanged from the global config. Three new optional
+   env vars (`MAX_TRADES_PER_DAY_TRACK_B`, `MAX_DAILY_LOSS_PCT_TRACK_B`,
+   `MAX_TOTAL_OPEN_RISK_PCT_TRACK_B`), added to both `.env` and
+   `.env.example` with the locked defaults — not `required=True` like
+   the global guardrail vars, so a `.env` predating this session still
+   works via code-level defaults matching the locked values exactly.
+
+2. **`risk_filter.py`** — implemented exactly the 3 checks that
+   correspond to the 3 rescaled numbers: `check_trade_count_limit()`
+   (pure gate, `today_trade_count < guardrails.max_trades_per_day`),
+   `check_daily_loss_limit()` (gates on `guardrails.max_daily_loss_pct`;
+   on breach, calls `halt_state.set_halt()` itself — the SAME,
+   already-tested, persisted-until-a-human-clears-it mechanism every
+   other halt reason uses, not a new one built for Track B — rather than
+   returning a bool for some undefined caller to act on, matching the
+   module's own "centralized, auditable in one file" framing), and
+   `check_combined_open_risk_budget()` (sums open positions'
+   `.risk_pct`, returns remaining budget against `guardrails.max_
+   combined_open_risk_pct`, or `None` if exhausted — the same equal-
+   risk-contribution concept already validated in the Track B backtest,
+   `simulate_rotational_ensemble()`'s `total_risk_budget_pct`, ported to
+   the live check). `check_drawdown_limit()` and `evaluate()` (the
+   single-entry-point wiring) are deliberately left `NotImplementedError`
+   — no Track-B override for the former, execution.py-adjacent scope for
+   the latter, per this milestone's explicit instruction not to proceed
+   into `execution.py`. `account_state`/`open_positions` are duck-typed
+   to the minimal attributes each check needs (`day_start_equity`/
+   `equity`; `.risk_pct`) — a full `AccountState`/`Position` type is
+   deferred to the `execution.py` milestone, flagged in both functions'
+   docstrings rather than silently invented here.
+
+3. **Soft concentration monitoring — asset-class grouping confirmed with
+   the user BEFORE implementation** (same "flag it, don't guess"
+   convention as the 55% notional-cap threshold deviation, spec v30
+   §10.2), not assumed. Pulled the real 8-symbol Track B universe from
+   `scripts/backtest_etf_donchian.py`'s `UNIVERSE` (SPY, QQQ, IWM, EFA,
+   AGG, GLD, DBC, VNQ) and proposed 3 grouping options plus a custom-spec
+   option; **confirmed grouping:**
+
+   | group | symbols |
+   |---|---|
+   | Domestic Equities | SPY, QQQ, IWM |
+   | International Equities | EFA |
+   | Bonds | AGG |
+   | Alternatives | GLD, DBC, VNQ |
+
+   Flagged and confirmed as understood, not silently accepted: International
+   Equities and Bonds are singleton groups and can structurally never
+   trigger the alert alone, since a single position is capped at 55%
+   notional (`MAX_SINGLE_POSITION_NOTIONAL_PCT`, spec v30 §10.2), below
+   the 65% alert threshold — only Domestic Equities and Alternatives can
+   realistically ever fire it with the current universe. New
+   `check_asset_class_concentration()` in `risk_filter.py` — explicitly
+   NOT part of the `RiskDecision` approve/reject flow, never rejects or
+   resizes a trade, purely sums each group's open positions'
+   `.notional_pct_of_equity` (deliberately the same field name as the
+   Track B backtest's `entry_sizing_log`, spec v29 §10.1 — not a
+   coincidence) and fires `telegram_bot.send_message()` (still its own
+   `NotImplementedError` stub — tests redirect it via monkeypatch, same
+   convention as `halt_state`) when a group exceeds `CONCENTRATION_
+   ALERT_THRESHOLD_PCT` (65.0). Returns the triggered group names for
+   logging only.
+
+4. **Tests** — new `tests/test_risk_filter.py`, 17 tests: config
+   layering (3 fields overridden, 3 passed through, global config
+   unaffected); `check_trade_count_limit`/`check_combined_open_risk_
+   budget` gating side-by-side at the global vs. Track B values,
+   including a same-input-opposite-outcome test for each (the clearest
+   proof the override actually changes behavior rather than being
+   unused); `check_daily_loss_limit` halting via the REAL `halt_state.py`
+   mechanism (not mocked, redirected to a `tmp_path` file via
+   monkeypatch) including a same-loss-opposite-halt-outcome test between
+   global (3%, breaches) and Track B (4%, doesn't) thresholds, plus a
+   zero-day-start-equity edge case; `check_asset_class_concentration`
+   firing exactly at >65% (not at exactly 65%), never touching the
+   position list or returning anything but a plain list, the singleton-
+   group non-triggering behavior, and a regression guard that the
+   grouping constant covers exactly the 8 confirmed symbols. Full suite
+   (167 tests) passing.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
 data), `scripts/backtest.py`, and `scripts/backtest_trend_filter.py` are
-real and working, with passing tests. Everything else in `src/` is still
-a stub with a docstring pointing to the spec section it implements —
-`execution.py`, `position_management.py`, `risk_filter.py`'s real checks,
-and `data_ingestion.py`'s live fetch are untouched.
+real and working, with passing tests. **UPDATE (Track B guardrail-
+implementation milestone, spec v32): `risk_filter.py` is no longer 100%
+stub** — `check_trade_count_limit()`, `check_daily_loss_limit()`,
+`check_combined_open_risk_budget()`, and the new `check_asset_class_
+concentration()` are real and tested; `check_drawdown_limit()` and
+`evaluate()` (the single-entry-point wiring) remain `NotImplementedError`
+— see "Current status" above. Everything else in `src/` is still a stub
+with a docstring pointing to the spec section it implements —
+`execution.py`, `position_management.py`, and `data_ingestion.py`'s live
+fetch are untouched.
 
 ### Findings so far (2026-08 session, spans several rounds)
 
@@ -2174,6 +2325,23 @@ calls in `main()`. 5 new tests (3 in
 See "Current status" above for the full quantification, root-cause
 confirmation, cap-threshold rationale, and rerun sensitivity results.
 
+**Track B guardrail-implementation milestone (spec v32):**
+`src/config.py` gained `get_track_b_guardrail_config()` (returns the same
+`GuardrailConfig` dataclass, 3 fields rescaled, 3 passed through). Three
+new optional env vars (`.env`, `.env.example`):
+`MAX_TRADES_PER_DAY_TRACK_B`, `MAX_DAILY_LOSS_PCT_TRACK_B`, `MAX_TOTAL_
+OPEN_RISK_PCT_TRACK_B`. `src/risk_filter.py` — previously 100% stub —
+gained real implementations of `check_trade_count_limit()`, `check_
+daily_loss_limit()` (calls `halt_state.set_halt()` on breach), `check_
+combined_open_risk_budget()`, and a new, explicitly non-blocking `check_
+asset_class_concentration()` plus the confirmed `TRACK_B_ASSET_CLASS_
+GROUPS`/`CONCENTRATION_ALERT_THRESHOLD_PCT` constants (fires via `src/
+telegram_bot.py`'s `send_message()`, itself still a stub — tests
+monkeypatch it). `check_drawdown_limit()` and `evaluate()` remain
+`NotImplementedError`, out of scope. New `tests/test_risk_filter.py` (17
+tests), full suite (167 tests) passing. See "Current status" above for
+the full implementation detail and the confirmed asset-class grouping.
+
 **Track A:** `scripts/backtest_gem.py` (base GEM signal + monthly
 holding-period simulator; `GemTrade` dataclass, `simulate_gem()`,
 `compute_gem_fold_boundaries()`, `slice_gem_trades_by_folds()` — a
@@ -2486,7 +2654,14 @@ rendered — decision on Track C's put credit spread deferred to the user.
   an explicit, current instruction to do so in the session. The numbers in
   `.env` (1% risk/trade, 25% max position, 3% daily loss, 6 trades/day cap,
   1.5% combined open-risk, 10% max drawdown) are locked decisions (spec
-  §4.1–4.3) — treat them as load-bearing, not tunable defaults.
+  §4.1–4.3) — treat them as load-bearing, not tunable defaults. **Track B
+  guardrail rescaling (spec v32, "Current status") is a separate,
+  additive set of Track-B-specific overrides layered alongside these
+  global numbers, not a replacement of them** — the global `.env` numbers
+  still govern crypto/Track A; `risk_filter.py` will need to branch on
+  which track/strategy is active once it's actually implemented, per the
+  same never-fork-on-`TRADING_ENV` discipline in "Environment" below
+  (branch on the strategy/track, not by duplicating logic).
 - **Never let a promotion to `main`/live happen without the Telegram
   approve step.** Even if paper results look great. No auto-merge, no
   timeout-based promotion.
