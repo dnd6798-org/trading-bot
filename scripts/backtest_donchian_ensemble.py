@@ -207,6 +207,22 @@ guardrail, which remains explicitly out of scope):
     exposure is bounded at ~8% of equity (not ~100% notional exposure the
     way finding 11/12's notional-cap framing was) — a materially tighter,
     risk-denominated bound than finding 12's notional-denominated one.
+    **CORRECTION (Track B risk-budget stress-test milestone, spec v29
+    §10.1): the "near-zero-ATR edge case" characterization above is WRONG
+    for at least one real, non-degenerate symbol — see
+    scripts/backtest_etf_donchian.py's module docstring for the full
+    finding. AGG (a Track B universe symbol, low-ATR-relative-to-price
+    bonds) hit this exact NOTIONAL_SANITY_CAP_PCT backstop on 13 of its
+    15 trades in the real Track B backtest, each one sized to exactly
+    100% of account equity — this was silently true in Track B's
+    already-passed run too (confirmed by rerunning that exact 8-slot/8%
+    configuration with the new instrumentation below), just never visible
+    before this milestone added `entry_sizing_log`. The "worst-case ~8%
+    risk exposure" framing above only bounds the RISK-budget path; the
+    notional backstop is a structurally separate, unbounded-by-that-8%-
+    number path, and for low-volatility instruments it is the one that
+    actually governs sizing. Not fixed here — flagged for whatever design
+    picks this strategy back up (execution.py, guardrail rescaling).
   - Entry cadence (FINDING 14: reverted): entries evaluated DAILY again
     (finding 13's weekly Monday-only gate is diagnosed as the cause of
     finding 13's failure, not the sizing change — see module docstring's
@@ -391,6 +407,7 @@ def simulate_rotational_ensemble(
     fee_pct=DEFAULT_TAKER_FEE_PCT,
     slippage_bps=DEFAULT_SLIPPAGE_BPS,
     entry_eval_dates=None,
+    entry_sizing_log=None,
 ):
     """
     Day-by-day portfolio walk-forward across the shared daily calendar
@@ -407,6 +424,16 @@ def simulate_rotational_ensemble(
     `entry_eval_dates`, if given, restricts entry evaluation (NOT exit/
     stop monitoring, which always runs daily) to that date set — None
     (default) preserves finding 12's every-day behavior.
+
+    Track B risk-budget stress-test milestone (spec v29 §10.1): `entry_
+    sizing_log`, if given a list, gets one dict appended per accepted
+    entry (target vs. granted risk_amount, and whether the risk budget
+    shrunk it) — purely additive, read-only instrumentation for that
+    milestone's diagnostic script. Default None appends nothing and
+    changes no other behavior; sizing math itself is untouched, and the
+    return signature is unchanged regardless of this argument, so every
+    existing caller (Track A/B, the crypto ensemble, every test in this
+    file) is unaffected.
 
     Returns (trades, equity_curve, skipped_log) — trades/equity_curve in
     EXIT-chronological order (equity only moves on a realized close, same
@@ -497,6 +524,7 @@ def simulate_rotational_ensemble(
 
             target_risk_amount = equity * (risk_pct / 100)
             risk_amount = min(target_risk_amount, available_risk_budget)
+            shrunk_by_risk_budget = risk_amount < target_risk_amount - 1e-9
             stop_distance = atr_multiplier * entry_atr
             if stop_distance <= 0:
                 continue
@@ -506,9 +534,26 @@ def simulate_rotational_ensemble(
             # edge case) — not a per-slot design choice, see docstring.
             max_notional = equity * (notional_sanity_cap_pct / 100)
             notional = position_size * candle.close
-            if notional > max_notional:
+            shrunk_by_notional_cap = notional > max_notional
+            if shrunk_by_notional_cap:
                 position_size = max_notional / candle.close
                 risk_amount = position_size * stop_distance
+
+            if entry_sizing_log is not None:
+                entry_sizing_log.append({
+                    "date": date,
+                    "symbol": symbol,
+                    "equity": equity,
+                    "committed_risk_before": committed_risk,
+                    "available_risk_budget": available_risk_budget,
+                    "target_risk_amount": target_risk_amount,
+                    "granted_risk_amount": risk_amount,
+                    # Attributed separately so a rare notional-backstop shrink
+                    # (near-zero-ATR edge case) is never mistaken for the
+                    # risk-budget mechanism this milestone is diagnosing.
+                    "shrunk_by_risk_budget": shrunk_by_risk_budget,
+                    "shrunk_by_notional_cap": shrunk_by_notional_cap,
+                })
 
             open_positions[symbol] = {
                 "entry_index": idx,

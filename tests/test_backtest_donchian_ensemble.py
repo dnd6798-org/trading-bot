@@ -227,6 +227,132 @@ def test_simulate_rotational_ensemble_skips_when_risk_budget_exhausted_even_with
     assert any(s["symbol"] == "C" and s["reason"] == "no_risk_budget_available" for s in skipped_log)
 
 
+# --- Track B risk-budget stress-test milestone (spec v29 §10.1) -------------
+# Diagnostic milestone, NOT a re-test of Track B's already-passed verdict —
+# see CLAUDE.md. Track B's original run had MAX_CONCURRENT_POSITIONS == the
+# full 8-symbol universe size, so the slot cap could never bind and the
+# portfolio risk budget was the only thing that could ever shrink a trade
+# (and even that path was never exercised: 0 no_risk_budget_available skips
+# in that run). These tests construct a single scenario where BOTH
+# constraints are forced to bind together, to close that honesty gap at the
+# unit level before the real-data rerun below.
+
+def test_simulate_rotational_ensemble_binds_both_slot_cap_and_risk_budget_in_one_scenario():
+    # 6 symbols (A-F, universe order) all fire an entry signal on day0.
+    # max_positions=4 and total_risk_budget_pct=3.5% ($3.50 on $100 equity)
+    # are chosen so that, walking the universe in order:
+    #   A: available=3.50, target=1.00 -> granted 1.00 (committed 1.00)
+    #   B: available=2.50, target=1.00 -> granted 1.00 (committed 2.00)
+    #   C: available=1.50, target=1.00 -> granted 1.00 (committed 3.00)
+    #   D: available=0.50, target=1.00 -> SHRUNK to 0.50 (committed 3.50,
+    #      this is also the 4th and final slot)
+    #   E: len(open_positions) == max_positions(4) already -> skipped
+    #      "no_slot_available" (slot check runs before the budget check,
+    #      so this is true even though the budget also happens to be
+    #      exhausted at this point)
+    #   F: same as E
+    # This exercises the slot-count cap AND the risk-budget shrink AND a
+    # partial-shrink (not just a full skip) in a single, real-shaped run.
+    # day1 closes away from day0 (110, not flat at 100) so exit_price !=
+    # entry_price for every symbol — needed to recover each trade's
+    # position_size below as gross_pnl / (exit_price - entry_price)
+    # without a division-by-zero on a flat trade.
+    d0, d1 = "2021-01-01", "2021-01-02"
+    universe = ["A", "B", "C", "D", "E", "F"]
+    symbol_data = {
+        sym: _make_series(sym, [_candle(sym, d0, close=100, high=105, low=95),
+                                 _candle(sym, d1, close=110, high=115, low=90)],
+                           atr=[10.0, 10.0], entry_indices=[0])
+        for sym in universe
+    }
+
+    trades, equity_curve, skipped_log = simulate_rotational_ensemble(
+        symbol_data, universe, max_positions=4, atr_multiplier=2.5,
+        capital=100.0, risk_pct=1.0, total_risk_budget_pct=3.5,
+        fee_pct=0.0, slippage_bps=0.0,
+    )
+
+    entered_symbols = {t.symbol for t in trades}
+    assert entered_symbols == {"A", "B", "C", "D"}
+    assert len(trades) == 4  # no over-allocation: exactly 4 slots filled, not 6
+
+    sizes = {t.symbol: t.gross_pnl / (t.exit_price - t.entry_price) for t in trades}
+    # A/B/C got their full $1.00 target (25 = 2.5x ATR(10) stop distance).
+    assert abs(sizes["A"] - (1.00 / 25.0)) < 1e-9
+    assert abs(sizes["B"] - (1.00 / 25.0)) < 1e-9
+    assert abs(sizes["C"] - (1.00 / 25.0)) < 1e-9
+    # D was shrunk to the $0.50 remaining in the budget, not rejected
+    # outright and not silently granted its full $1.00 target.
+    assert abs(sizes["D"] - (0.50 / 25.0)) < 1e-9
+
+    e_skip = next(s for s in skipped_log if s["symbol"] == "E")
+    f_skip = next(s for s in skipped_log if s["symbol"] == "F")
+    assert e_skip["reason"] == "no_slot_available"
+    assert f_skip["reason"] == "no_slot_available"
+    # No crash, no incorrect rejection of a valid trade: D (whose target
+    # exceeded the remaining budget) was still granted a shrunk trade, not
+    # skipped outright the way E/F (genuinely out of slots) were.
+    assert not any(s["symbol"] == "D" for s in skipped_log)
+
+
+def test_simulate_rotational_ensemble_entry_sizing_log_attributes_shrink_to_risk_budget_not_notional_cap():
+    # Same A/B two-symbol shrink setup as the existing finding-13 test
+    # above, but exercised through the new entry_sizing_log instrumentation
+    # (added for this milestone) to directly verify the target-vs-granted
+    # arithmetic and the shrink attribution, not just the resulting trade
+    # sizes.
+    d0, d1 = "2021-01-01", "2021-01-02"
+    symbol_data = {
+        "A": _make_series("A", [_candle("A", d0, close=100, high=105, low=95),
+                                 _candle("A", d1, close=110, high=115, low=90)],
+                           atr=[10.0, 10.0], entry_indices=[0]),
+        "B": _make_series("B", [_candle("B", d0, close=100, high=105, low=95),
+                                 _candle("B", d1, close=110, high=115, low=90)],
+                           atr=[10.0, 10.0], entry_indices=[0]),
+    }
+    entry_sizing_log = []
+
+    trades, _, skipped_log = simulate_rotational_ensemble(
+        symbol_data, ["A", "B"], max_positions=2, atr_multiplier=2.5,
+        capital=100.0, risk_pct=1.0, total_risk_budget_pct=1.5,
+        fee_pct=0.0, slippage_bps=0.0, entry_sizing_log=entry_sizing_log,
+    )
+
+    assert len(entry_sizing_log) == 2
+    a_log = next(e for e in entry_sizing_log if e["symbol"] == "A")
+    b_log = next(e for e in entry_sizing_log if e["symbol"] == "B")
+
+    assert abs(a_log["target_risk_amount"] - 1.0) < 1e-9
+    assert abs(a_log["granted_risk_amount"] - 1.0) < 1e-9
+    assert a_log["shrunk_by_risk_budget"] is False
+    assert a_log["shrunk_by_notional_cap"] is False
+
+    assert abs(b_log["target_risk_amount"] - 1.0) < 1e-9
+    assert abs(b_log["granted_risk_amount"] - 0.5) < 1e-9
+    assert b_log["shrunk_by_risk_budget"] is True
+    assert b_log["shrunk_by_notional_cap"] is False
+    # available_risk_budget at B's entry = 1.5 budget - 1.0 already
+    # committed by A = 0.5, matching the granted amount exactly.
+    assert abs(b_log["available_risk_budget"] - 0.5) < 1e-9
+
+
+def test_simulate_rotational_ensemble_default_entry_sizing_log_is_none_and_unaffects_return_signature():
+    # Backward-compatibility guard: every existing caller (Track A, Track
+    # B, this file's other ~20 tests) calls without entry_sizing_log — the
+    # new parameter must be fully opt-in, with the return shape unchanged.
+    d0, d1 = "2021-01-01", "2021-01-02"
+    symbol_data = {
+        "A": _make_series("A", [_candle("A", d0, close=100, high=105, low=95), _flat_candle("A", d1, close=100)],
+                           atr=[10.0, 10.0], entry_indices=[0]),
+    }
+
+    result = simulate_rotational_ensemble(symbol_data, ["A"], capital=100.0, fee_pct=0.0, slippage_bps=0.0)
+
+    assert len(result) == 3
+    trades, equity_curve, skipped_log = result
+    assert len(trades) == 1
+
+
 # --- simulate_rotational_ensemble: finding 13 weekly entry cadence -----------
 
 def test_simulate_rotational_ensemble_never_enters_a_signal_outside_entry_eval_dates():

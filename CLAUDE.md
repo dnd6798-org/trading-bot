@@ -166,6 +166,122 @@ started yet, this update only records the decision to start per this
 file's own "update whenever a real decision is made" rule. Track A and
 Track C are locked as concepts but not yet started.
 
+**UPDATE (2026-08-11 session): the three-track plan is now fully
+CONCLUDED.** Track A (GEM + drawdown circuit breaker) was **rejected** —
+both circuit-breaker variants and base GEM itself are dominated by a
+simple static 60/40 SPY/AGG buy-and-hold on both return and drawdown (see
+Track A finding 4). Track B (8-ETF Donchian breakout + ATR trailing stop)
+**passed** — pooled net-of-costs +73.64%, 3/3 folds net-positive, true
+max drawdown 5.69% versus the 8-ETF buy-and-hold blend's 26.47% over the
+same pooled window (see "Track B findings" and the drawdown follow-up).
+Track C (SPY put credit spread) was **rejected** — a near-breakeven miss
+(pooled net-of-cost -0.38%, fold 1 negative) on a capital-constrained
+structure, though its stress-test risk-control mechanism (worst-case loss
+bounded at exactly the intended 2%-of-equity budget across three real
+historical crash windows) was independently validated (see "Track C
+findings" 5).
+
+**Track B is therefore the project's sole surviving candidate, and the
+project is now moving into deployment-prep engineering, not further
+strategy search.**
+
+**NEW MILESTONE, STARTING NOW: close Track B's one known backtest gap.**
+The original Track B backtest never exercised the risk-budget
+shrink-under-pressure path — `MAX_CONCURRENT_POSITIONS` was set to 8,
+exactly equal to the full 8-symbol universe size, so the slot-count cap
+could never bind on its own and the portfolio-level risk budget was never
+the thing doing the shrinking (same unexercised-mechanism caveat already
+flagged for the crypto ensemble in findings 13/14). This is a
+**diagnostic milestone, not a re-test of Track B's already-passed
+verdict** — the goal is to confirm the risk-budget mechanism behaves as
+designed under real pressure, not to re-litigate the adopt decision. Full
+design in spec v29 §10.1 (project knowledge) — treat that section as the
+source of truth for this milestone.
+
+**UPDATE: Track B risk-budget stress-test milestone EXECUTED.** Two
+required checks, both done:
+
+1. **Unit-level correctness** — a new synthetic scenario in
+   `tests/test_backtest_donchian_ensemble.py`
+   (`test_simulate_rotational_ensemble_binds_both_slot_cap_and_risk_budget_in_one_scenario`):
+   6 symbols fire on the same day against `max_positions=4`,
+   `total_risk_budget_pct=3.5%` on $100 equity — 3 symbols get their full
+   1% target, a 4th is correctly SHRUNK (not rejected) to the $0.50
+   remaining in the budget, and the last 2 are correctly SKIPPED for
+   `no_slot_available` once the 4th slot fills (verified the slot check
+   runs before the budget check, so this reason is reported even though
+   the budget is also exhausted at that point). No crash, no
+   over-allocation, no incorrect rejection of the shrinkable 4th trade.
+   Two companion tests exercise a new, purely-additive `entry_sizing_log`
+   instrumentation parameter added to `simulate_rotational_ensemble()`
+   (backtest_donchian_ensemble.py) for this milestone: one confirms the
+   shrink is correctly attributed to the risk budget specifically (not
+   conflated with the separate notional-backstop path — see below), the
+   other confirms the parameter is fully backward-compatible (defaults to
+   `None`, return signature unchanged) so every existing caller (Track A,
+   Track B, the crypto ensemble, all prior tests) is unaffected. 3 new
+   tests, full suite (145 tests) passing.
+
+2. **Real-data behavioral check** — new one-off script
+   `scripts/stress_test_track_b_risk_budget.py` (not meant to be
+   maintained, same convention as `select_universe.py`/
+   `verify_finding12_sizing.py`) reran Track B's exact real
+   2016-01-04→2026-08-11 8-symbol data through `simulate_rotational_
+   ensemble()` with `MAX_CONCURRENT_POSITIONS` cut 8→4 and the risk
+   budget cut proportionally (4×1%=4%, was 8%). Result: 196 trades taken,
+   88 signals skipped (all `no_slot_available` — the slot cap now
+   genuinely binds), and **14 of 196 entries were correctly shrunk by the
+   risk budget**, all 14 spot-checked and verified exactly
+   (`granted_risk_amount == available_risk_budget` in every case, to
+   floating precision) — the shrink-under-pressure path works correctly
+   when actually exercised. A portfolio-wide check confirmed no entry
+   ever pushed committed risk above the budget cap, and max concurrent
+   open positions never exceeded 4 — both PASS across the full run, not
+   just the spot-checked subset. Per instruction, no net/gross/folds
+   numbers from this reduced-cap rerun were reported or evaluated as an
+   adopt/reject bar — this is diagnostic only.
+
+   **Unexpected finding (the main thing this milestone actually
+   surfaced): the risk budget is not the only thing that can shrink a
+   trade, and the OTHER mechanism is not the rare edge case it was
+   documented as.** `NOTIONAL_SANITY_CAP_PCT` (100% of equity,
+   `backtest_donchian_ensemble.py`) — described in every prior finding as
+   a "loose... essentially never binds for these liquid symbols" leverage
+   backstop — bound on 13 of the 196 entries in the reduced-cap rerun,
+   **all 13 on AGG**. Rerunning Track B's ORIGINAL unchanged 8-slot/8%
+   configuration with the same new instrumentation confirmed this isn't a
+   reduced-cap artifact: **13 of AGG's 15 total trades (87%) in the real,
+   already-passed Track B backtest hit this same backstop, each one sized
+   to EXACTLY 100% of account equity** — silently true in the result
+   already reported as a pass, just invisible before this milestone's
+   instrumentation existed. Root cause: AGG (bonds) has a very small ATR
+   relative to its price, so the 1%-of-equity risk-based sizing formula
+   demands an oversized position off AGG's tight stop distance, and the
+   100%-notional backstop — not the risk budget — is what actually caps
+   it. This does NOT change any trade Track B took or its reported
+   returns (the resize arithmetic itself is correct, confirmed by the
+   spot-check above) and does NOT reopen Track B's verdict, but it does
+   mean the "~8% worst-case aggregate risk exposure" mental model
+   documented alongside this strategy is incomplete: a single AGG
+   position could, and repeatedly did, consume the entire account's
+   notional on its own — a real concentration/leverage consideration
+   flagged for whatever picks Track B up next (execution.py, guardrail
+   rescaling), not resolved in this milestone. Corrected in place, not
+   silently rewritten: the stale "essentially never binds"/"only the risk
+   budget can shrink a trade" claims in both `backtest_etf_donchian.py`'s
+   and `backtest_donchian_ensemble.py`'s module docstrings now carry an
+   explicit correction note pointing to this finding, per this repo's own
+   convention of flagging discovered inaccuracies rather than rewriting
+   history.
+
+   **No further action taken this milestone** — per instruction, scope
+   stayed limited to the stress test itself. `execution.py`, guardrail
+   rescaling, and paper-soak infrastructure remain untouched and are the
+   logical next steps, but require a fresh, explicit instruction to
+   start — in particular, any of that follow-on work should account for
+   the notional-backstop finding above, not just the risk-budget
+   mechanism this milestone was originally scoped to check.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
@@ -1857,6 +1973,20 @@ crypto path via `get_alpaca_config()` — a separate client/product from
 `fetch_historical_candles()`'s `CryptoHistoricalDataClient`, not a
 modification to it). See "Track B findings" above for the full result and
 judgment calls made.
+
+**Track B risk-budget stress-test milestone (spec v29 §10.1):**
+`simulate_rotational_ensemble()` (`backtest_donchian_ensemble.py`) gained
+one new, purely-additive parameter, `entry_sizing_log=None` — logs
+target-vs-granted risk per accepted entry and attributes any shrink to
+either the risk budget or the notional sanity backstop specifically, when
+a list is passed; default `None` changes no behavior and no return
+signature for any existing caller. New one-off diagnostic script
+`scripts/stress_test_track_b_risk_budget.py` (not meant to be
+maintained). 3 new tests in `tests/test_backtest_donchian_ensemble.py`.
+See "Current status" above for the full result, including the notional-
+backstop finding (AGG sized to 100% of equity on 13/15 trades) and the
+resulting docstring corrections in both `backtest_etf_donchian.py` and
+`backtest_donchian_ensemble.py`.
 
 **Track A:** `scripts/backtest_gem.py` (base GEM signal + monthly
 holding-period simulator; `GemTrade` dataclass, `simulate_gem()`,

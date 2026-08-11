@@ -81,11 +81,37 @@ full universe size — a judgment call (the kickoff specified "up to N
 concurrent open positions" without pinning N). At N=8 the slot-COUNT cap
 never binds on its own (every symbol can always find a slot if it wants
 one); TOTAL_PORTFOLIO_RISK_BUDGET_PCT (8 x 1% = 8%, same derivation as
-finding 13/14) is therefore the only sizing constraint that can actually
-shrink a trade, which is arguably the more honest test of equal-risk-
-contribution sizing than letting a tight slot cap do double duty as an
-implicit risk control the way the crypto milestones' narrower N/universe
-ratio did.
+finding 13/14) was believed at the time to be the only sizing constraint
+that could actually shrink a trade, which was arguably the more honest
+test of equal-risk-contribution sizing than letting a tight slot cap do
+double duty as an implicit risk control the way the crypto milestones'
+narrower N/universe ratio did.
+
+**CORRECTION (Track B risk-budget stress-test milestone, spec v29
+§10.1, run after this backtest's verdict was already locked in): the
+claim above — that the risk budget is the only thing that can shrink a
+trade — was WRONG, discovered only once the new `entry_sizing_log`
+instrumentation made it visible.** `NOTIONAL_SANITY_CAP_PCT` (100%,
+backtest_donchian_ensemble.py), described everywhere in this codebase as
+a "loose... essentially never binds for these liquid symbols" leverage
+backstop, in fact bound on **13 of AGG's 15 total trades (87%) in this
+exact backtest** — every one of those 13 was sized to EXACTLY 100% of
+account equity in AGG alone, not the 1%-of-equity risk-based size the
+strategy's own design intends. Root cause: AGG (bonds) has a very small
+ATR relative to its price, so the risk-based formula
+(position_size = risk_amount / (ATR_MULTIPLIER * ATR)) demands a very
+large position to hit a $100-scale 1%-equity risk target off a tiny stop
+distance — the notional backstop is not a rare edge case for this
+symbol, it is AGG's normal, silently-operating sizing path. This does
+NOT change any trade that was taken or Track B's reported returns (the
+resize logic itself computed correctly — see the stress-test milestone's
+report) and does NOT reopen Track B's passed verdict, but it does mean
+the "worst-case ~8% aggregate risk exposure" mental model this docstring
+and backtest_donchian_ensemble.py's both describe is incomplete: a
+single AGG position could, and repeatedly did, consume 100% of account
+notional on its own, which is a real concentration/leverage
+consideration for anything built on top of this strategy (execution.py,
+guardrail rescaling) — flagged for that future work, not resolved here.
 
 NEW THIS MILESTONE, not part of any crypto finding: a Pattern Day Trader
 (PDT) / same-day round-trip check (check_no_same_day_round_trips()).
