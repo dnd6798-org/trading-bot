@@ -190,6 +190,26 @@ ATR_MULTIPLIER = 3.0   # unchanged from finding 14/15 — see module docstring
 MAX_CONCURRENT_POSITIONS = 8  # = universe size, a judgment call — see module docstring
 TOTAL_PORTFOLIO_RISK_BUDGET_PCT = MAX_CONCURRENT_POSITIONS * DEFAULT_RISK_PER_TRADE_PCT
 
+# Notional-concentration cap (spec v30 §10.2), replacing the shared
+# simulate_rotational_ensemble()'s notional_sanity_cap_pct DEFAULT of
+# 100% (a Track-B-only override, same convention as ETF_SLIPPAGE_BPS
+# below — the crypto ensemble's own default is untouched). Grounded in
+# scripts/quantify_track_b_notional_concentration.py's real-data result,
+# NOT the milestone kickoff's example 20-25% range: across all 219 real
+# trades in Track B's original backtest, every one of the 7 non-AGG
+# symbols' uncapped, risk-based position sizing topped out at 54.6% of
+# equity (global max across 204 non-AGG entries) — a 20-25% cap would
+# have bound on 66-87% of those otherwise-healthy trades, not just AGG's
+# pathological ones (see the quantification script's threshold-sweep
+# table). 55% sits one point above that empirical non-AGG ceiling: 0/204
+# non-AGG entries affected, 15/15 AGG entries affected (all of them, not
+# just the 13 that tripped the old 100% cap — 2 more of AGG's own
+# entries, at 56.3%/79.2% uncapped demand, were previously invisible
+# because they happened to fall under 100% despite still being far above
+# every other symbol's own ceiling). See CLAUDE.md for the full
+# quantification and the resulting rerun's sensitivity.
+MAX_SINGLE_POSITION_NOTIONAL_PCT = 55.0
+
 # Commission-free stock/ETF product (Alpaca) — the only fee-model change
 # from the crypto findings' 0.25%/leg taker fee. Slippage widened from
 # GEM's 2bps to 5bps per instruction (DBC/VNQ are less liquid than the
@@ -274,6 +294,12 @@ def parse_args():
     parser.add_argument("--atr-multiplier", type=float, default=ATR_MULTIPLIER)
     parser.add_argument("--folds", type=int, default=NUM_FOLDS)
     parser.add_argument("--initial-train-days", type=int, default=INITIAL_TRAIN_DAYS)
+    # spec v30 §10.2: replaces simulate_rotational_ensemble()'s shared
+    # 100%-of-equity notional_sanity_cap_pct default for THIS script only
+    # — see MAX_SINGLE_POSITION_NOTIONAL_PCT above for the data-grounded
+    # rationale. Pass --max-position-notional-pct 100 to reproduce Track
+    # B's original, already-passed behavior exactly.
+    parser.add_argument("--max-position-notional-pct", type=float, default=MAX_SINGLE_POSITION_NOTIONAL_PCT)
     return parser.parse_args()
 
 
@@ -312,15 +338,18 @@ def main():
             f"  |  test {fold['test_start'].date()} -> {fold['test_end'].date()}"
         )
     print(f"(fee model: {ETF_COMMISSION_PCT:.2f}% commission + {ETF_SLIPPAGE_BPS:.0f}bps slippage per leg)")
+    print(f"max single-position notional: {args.max_position_notional_pct:.1f}% of equity (spec v30 §10.2 — pass --max-position-notional-pct 100 to reproduce Track B's original passed behavior)")
     print("NOTE: window excludes the 2008 financial crisis and the 2020 COVID crash's lead-in — see module docstring.")
 
     net_trades, net_curve, skipped_log = simulate_rotational_ensemble(
         symbol_data, universe_order, max_positions=args.max_positions, atr_multiplier=args.atr_multiplier,
         capital=PAPER_VALIDATION_CAPITAL, fee_pct=ETF_COMMISSION_PCT, slippage_bps=ETF_SLIPPAGE_BPS,
+        notional_sanity_cap_pct=args.max_position_notional_pct,
     )
     gross_trades, gross_curve, _ = simulate_rotational_ensemble(
         symbol_data, universe_order, max_positions=args.max_positions, atr_multiplier=args.atr_multiplier,
         capital=PAPER_VALIDATION_CAPITAL, fee_pct=0.0, slippage_bps=0.0,
+        notional_sanity_cap_pct=args.max_position_notional_pct,
     )
 
     net_folds, net_pooled = slice_ensemble_trades_by_folds(net_trades, net_curve, folds, PAPER_VALIDATION_CAPITAL)

@@ -532,12 +532,20 @@ def simulate_rotational_ensemble(
 
             # Loose leverage/numerical sanity backstop only (near-zero-ATR
             # edge case) — not a per-slot design choice, see docstring.
+            # CORRECTION (Track B notional-concentration milestone, spec
+            # v30 §10.2): this characterization was wrong for at least one
+            # real symbol (AGG) — see the module docstring's correction
+            # note above and scripts/quantify_track_b_notional_
+            # concentration.py for the full quantification.
             max_notional = equity * (notional_sanity_cap_pct / 100)
             notional = position_size * candle.close
+            uncapped_notional_pct_of_equity = (notional / equity * 100) if equity else 0.0
             shrunk_by_notional_cap = notional > max_notional
             if shrunk_by_notional_cap:
                 position_size = max_notional / candle.close
                 risk_amount = position_size * stop_distance
+            final_notional = position_size * candle.close
+            notional_pct_of_equity = (final_notional / equity * 100) if equity else 0.0
 
             if entry_sizing_log is not None:
                 entry_sizing_log.append({
@@ -550,9 +558,23 @@ def simulate_rotational_ensemble(
                     "granted_risk_amount": risk_amount,
                     # Attributed separately so a rare notional-backstop shrink
                     # (near-zero-ATR edge case) is never mistaken for the
-                    # risk-budget mechanism this milestone is diagnosing.
+                    # risk-budget mechanism the prior milestone diagnosed.
                     "shrunk_by_risk_budget": shrunk_by_risk_budget,
                     "shrunk_by_notional_cap": shrunk_by_notional_cap,
+                    # Added for the notional-concentration milestone (spec
+                    # v30 §10.2): root-cause and severity diagnostics.
+                    # entry_price/entry_atr/atr_to_price_pct let the
+                    # ATR-to-price-ratio root-cause claim be checked
+                    # directly instead of inferred; uncapped_notional_pct_
+                    # of_equity is what the risk-based formula NATURALLY
+                    # wanted before any cap trimmed it (the severity
+                    # measure), notional_pct_of_equity is what it actually
+                    # got (the binding measure).
+                    "entry_price": candle.close,
+                    "entry_atr": entry_atr,
+                    "atr_to_price_pct": (entry_atr / candle.close * 100) if candle.close else 0.0,
+                    "uncapped_notional_pct_of_equity": uncapped_notional_pct_of_equity,
+                    "notional_pct_of_equity": notional_pct_of_equity,
                 })
 
             open_positions[symbol] = {

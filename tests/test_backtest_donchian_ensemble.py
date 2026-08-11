@@ -336,6 +336,72 @@ def test_simulate_rotational_ensemble_entry_sizing_log_attributes_shrink_to_risk
     assert abs(b_log["available_risk_budget"] - 0.5) < 1e-9
 
 
+def test_simulate_rotational_ensemble_entry_sizing_log_reports_notional_and_atr_price_fields():
+    # Notional-concentration milestone (spec v30 §10.2): entry_sizing_log
+    # gained entry_price/entry_atr/atr_to_price_pct and uncapped/final
+    # notional_pct_of_equity fields, used to root-cause and quantify the
+    # notional-backstop finding. A: ATR=10 on a $100 close -> stop_distance
+    # = 2.5*10 = 25, target risk $1 on $100 equity -> position_size =
+    # 1/25 = 0.04, notional = 0.04*100 = $4 = 4% of equity, well under
+    # the loose 100% default backstop, so uncapped == final here.
+    d0, d1 = "2021-01-01", "2021-01-02"
+    symbol_data = {
+        "A": _make_series("A", [_candle("A", d0, close=100, high=105, low=95),
+                                 _candle("A", d1, close=110, high=115, low=90)],
+                           atr=[10.0, 10.0], entry_indices=[0]),
+    }
+    entry_sizing_log = []
+
+    simulate_rotational_ensemble(
+        symbol_data, ["A"], max_positions=1, atr_multiplier=2.5,
+        capital=100.0, risk_pct=1.0, fee_pct=0.0, slippage_bps=0.0,
+        entry_sizing_log=entry_sizing_log,
+    )
+
+    assert len(entry_sizing_log) == 1
+    log = entry_sizing_log[0]
+    assert abs(log["entry_price"] - 100.0) < 1e-9
+    assert abs(log["entry_atr"] - 10.0) < 1e-9
+    assert abs(log["atr_to_price_pct"] - 10.0) < 1e-9  # 10/100 * 100
+    assert abs(log["uncapped_notional_pct_of_equity"] - 4.0) < 1e-9  # $4 notional / $100 equity
+    assert abs(log["notional_pct_of_equity"] - 4.0) < 1e-9  # not capped, so matches uncapped
+    assert log["shrunk_by_notional_cap"] is False
+
+
+def test_simulate_rotational_ensemble_notional_pct_diverges_from_uncapped_when_backstop_binds():
+    # Same tiny-atr_multiplier setup as the existing notional-backstop
+    # test above (test_simulate_rotational_ensemble_sizes_off_shared_
+    # equity_and_caps_at_notional_sanity_backstop), but checked through
+    # entry_sizing_log: uncapped_notional_pct_of_equity should reflect
+    # what the risk-based formula NATURALLY wanted (>100%, since the
+    # tiny atr_multiplier makes the stop distance tiny), while
+    # notional_pct_of_equity (final) should be pinned at the 25% backstop
+    # actually applied — the two fields must diverge exactly when the
+    # backstop binds, not report the same (already-capped) number twice.
+    d0, d1 = "2021-01-01", "2021-01-02"
+    symbol_data = {
+        "A": _make_series(
+            "A",
+            [_candle("A", d0, close=100, high=105, low=95), _candle("A", d1, close=100, high=100.5, low=99.6)],
+            atr=[10.0, 10.0], entry_indices=[0],
+        ),
+    }
+    entry_sizing_log = []
+
+    simulate_rotational_ensemble(
+        symbol_data, ["A"], max_positions=4, atr_multiplier=0.05,  # tiny stop distance -> oversized risk-based size
+        capital=100.0, risk_pct=1.0, notional_sanity_cap_pct=25.0, fee_pct=0.0, slippage_bps=0.0,
+        entry_sizing_log=entry_sizing_log,
+    )
+
+    assert len(entry_sizing_log) == 1
+    log = entry_sizing_log[0]
+    assert log["shrunk_by_notional_cap"] is True
+    assert log["uncapped_notional_pct_of_equity"] > 25.0  # what the formula wanted, uncapped
+    assert abs(log["notional_pct_of_equity"] - 25.0) < 1e-6  # what it actually got, pinned at the backstop
+    assert log["uncapped_notional_pct_of_equity"] != log["notional_pct_of_equity"]
+
+
 def test_simulate_rotational_ensemble_default_entry_sizing_log_is_none_and_unaffects_return_signature():
     # Backward-compatibility guard: every existing caller (Track A, Track
     # B, this file's other ~20 tests) calls without entry_sizing_log — the

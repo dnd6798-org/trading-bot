@@ -282,6 +282,176 @@ required checks, both done:
    the notional-backstop finding above, not just the risk-budget
    mechanism this milestone was originally scoped to check.
 
+**UPDATE: milestone confirmed complete and committed (23f8e02, full
+suite 145/145 passing).** Both required checks passed: the unit test
+correctly shrinks a symbol to remaining budget rather than rejecting it
+outright, and correctly skips further signals once slots fill; the
+real-data rerun (8→4 slots/budget) produced 196 trades, 88 skipped for
+`no_slot_available`, and 14 correctly shrunk entries, all 14 spot-checked
+exact.
+
+**Reframing of the notional-backstop finding above, now that it's been
+sat with: this is a real sizing-formula defect, not a documentation
+issue.** 13 of AGG's 15 trades in Track B's original passed 8-slot
+backtest were undiversified, 100%-of-account-equity positions, not
+risk-budgeted allocations — because AGG's low ATR-to-price ratio causes
+the risk-based sizing formula to demand an oversized position, and the
+100%-of-equity notional backstop (not the risk budget) is what actually
+governed those trades' size. This does NOT reopen Track B's passed
+verdict — pooled net +73.64%, 3/3 folds stands as the historical record,
+unchanged — but it needs to be understood and fixed before it's
+inherited by guardrail rescaling and `execution.py`, not carried forward
+silently.
+
+**NEW MILESTONE, STARTING NOW: quantify, root-cause, and fix the
+notional backstop.** Four parts: (1) quantify the backstop's binding
+frequency across all 8 Track B symbols, not just AGG (AGG was the only
+symbol observed to trigger it in the stress-test run, but that run
+wasn't designed to rule out other symbols at the margin); (2) confirm the
+root cause (low ATR-to-price ratio driving an oversized risk-based
+position, per the stress-test's working diagnosis — confirm rather than
+assume); (3) design a real, bounded max-single-position-notional cap to
+replace the 100%-of-equity fallback; (4) rerun Track B with the fix
+applied to see whether pooled return/drawdown are sensitive to it. Full
+design in spec v30 §10.2 (project knowledge) — treat that section as the
+source of truth for this milestone.
+
+**UPDATE: Track B notional-concentration milestone EXECUTED.** All four
+required parts done, diagnostic and fix-design only — does NOT reopen
+Track B's passed verdict (pooled net +73.64%, 3/3 folds, as originally
+tested, stands as the historical record).
+
+1. **Full 8-symbol quantification** — new one-off script
+   `scripts/quantify_track_b_notional_concentration.py` reran Track B's
+   ORIGINAL, unmodified configuration (max_positions=8, risk_budget=8%,
+   notional_cap=100%) over the complete real 2016-01-04→present history
+   with the (now-extended) `entry_sizing_log` instrumentation, capturing
+   every one of 219 real trades' entry ATR/price/notional detail, not
+   just AGG's. Result — every symbol's UNCAPPED (natural, pre-any-cap)
+   position-sizing demand, as % of equity:
+
+   | symbol | n | capped | mean unc% | median unc% | max unc% | mean ATR/px% |
+   |---|---|---|---|---|---|---|
+   | AGG | 15 | 13 (86.7%) | 129.0% | 131.9% | 161.5% | 0.280% |
+   | SPY | 36 | 0 | 34.1% | 34.0% | 53.7% | 1.045% |
+   | QQQ | 35 | 0 | 26.7% | 26.5% | 45.2% | 1.316% |
+   | IWM | 31 | 0 | 23.3% | 22.0% | 41.6% | 1.532% |
+   | EFA | 32 | 0 | 35.7% | 34.9% | 54.6% | 1.005% |
+   | GLD | 26 | 0 | 32.4% | 32.7% | 44.4% | 1.104% |
+   | DBC | 26 | 0 | 26.7% | 25.3% | 42.0% | 1.340% |
+   | VNQ | 18 | 0 | 26.0% | 26.6% | 33.7% | 1.317% |
+
+   **AGG is uniquely affected — confirmed, not assumed.** Zero of the
+   other 7 symbols ever tripped the 100% cap across the full 10.6-year
+   history (0/204 non-AGG entries), and the global max uncapped demand
+   across all 204 non-AGG entries was **54.6%** (EFA) — a clean, wide gap
+   below AGG's own minimum value of 56.3% and its 100%+ range where 13 of
+   15 entries actually sit. AGG's mean ATR-to-price ratio (0.280%) is
+   4.4x lower than every other symbol's mean (1.228%) — the direct
+   numerical signature of the root cause below.
+
+2. **Root cause — confirmed two ways, not assumed:** (a) algebraically,
+   `notional_pct_of_equity` for any trade whose risk wasn't already
+   shrunk by the portfolio risk budget collapses exactly to
+   `risk_pct / (ATR_MULTIPLIER × atr_to_price_fraction)` — verified
+   against all 219 real logged entries, max absolute error 0.000000
+   percentage points; (b) empirically, Spearman rank correlation between
+   `atr_to_price_pct` and `uncapped_notional_pct_of_equity` across all
+   219 entries = **−1.0000** (perfect inverse rank correlation — expected
+   given (a) is an exact, monotonic algebraic identity, not just a
+   trend). **Trailing-stop-distance interaction, checked as asked:**
+   `ATR_MULTIPLIER` (3.0x) sits in the SAME denominator term as the
+   ATR-to-price ratio (`stop_distance = ATR_MULTIPLIER × ATR`) — a
+   *smaller* multiplier would make the oversized-notional effect WORSE
+   for a given ATR/price ratio, not better; Track B's actual 3.0x (wider
+   than the crypto ensemble's earlier 2.5x, finding 14's change) was
+   already mitigating this somewhat, not causing it.
+
+3. **Cap threshold — 55% of equity, NOT the kickoff's example 20-25%
+   range, with the deviation explicitly quantified rather than silently
+   overridden.** A threshold sweep across both populations (same
+   quantification script) shows why: at 20-25%, the cap binds on
+   **66-87% of the 204 non-AGG entries** — i.e. it would systematically
+   resize the large majority of every OTHER symbol's normal, healthy,
+   risk-based trades, not just fix AGG's pathological case:
+
+   | threshold | non-AGG entries affected | AGG entries affected |
+   |---|---|---|
+   | 20% | 177/204 (86.8%) | 15/15 (100%) |
+   | 25% | 135/204 (66.2%) | 15/15 (100%) |
+   | 30% | 86/204 (42.2%) | 15/15 (100%) |
+   | 40% | 26/204 (12.7%) | 15/15 (100%) |
+   | 50% | 8/204 (3.9%) | 15/15 (100%) |
+   | **55%** | **0/204 (0.0%)** | **15/15 (100%)** |
+   | 60-75% | 0/204 (0.0%) | 14/15 (93.3%) |
+   | 100% (old default) | 0/204 (0.0%) | 13/15 (86.7%) |
+
+   55% is the cleanest break in the data: one point above the true
+   empirical non-AGG ceiling (54.6%), it fully and surgically covers
+   AGG's pathology (all 15 of its trades, not just the 13 the old 100%
+   cap caught — 2 more, at 56.3%/79.2% uncapped demand, were previously
+   invisible because they happened to fall under the old 100% threshold
+   despite being far above every other symbol's own ceiling) while
+   affecting zero trades for the other 7 symbols. Implemented as
+   `MAX_SINGLE_POSITION_NOTIONAL_PCT = 55.0` in
+   `backtest_etf_donchian.py` only (a Track-B-specific override passed as
+   `notional_sanity_cap_pct`, same convention as `ETF_SLIPPAGE_BPS` — the
+   shared `simulate_rotational_ensemble()`'s own 100% default, still used
+   by Track A/the crypto ensemble, is untouched), with a new
+   `--max-position-notional-pct` CLI flag (`--max-position-notional-pct
+   100` reproduces Track B's original passed behavior exactly).
+
+4. **Rerun sensitivity — real, non-trivial, but does NOT threaten Track
+   B's verdict.** Reran the full real 2016-2026 backtest three ways
+   (100% = original baseline sanity check, 55% = the fix, 25% = the
+   kickoff's example, for transparency):
+
+   | cap | pooled net | pooled gross | folds net-positive | pooled max DD | AGG net_pnl |
+   |---|---|---|---|---|---|
+   | 100% (baseline) | 72.63% | 84.89% | 3/3 | 5.69% | $331.55 |
+   | **55% (the fix)** | **71.24%** | **82.41%** | **3/3** | **5.70%** | **$213.36** |
+   | 25% (kickoff example) | 47.80% | 55.09% | 3/3 | 5.15% | $85.24 |
+
+   (Baseline pooled net here, 72.63%, differs from the 73.64% originally
+   reported in "Track B findings" 1 by ~1 point — expected re-fetch
+   drift, ~4 more trading days of real data now included in the fetch
+   window than the original session's run, same category as finding
+   14's "one day later" note, not attributable to any code change this
+   milestone made.) **At 55%, pooled return moves by only −1.4 points and
+   max drawdown is essentially flat (+0.01 points) — folds-net-positive
+   stays 3/3.** AGG's own net P&L contribution drops from $331.55 to
+   $213.36 (**−35.6%**) — this is the concrete answer to "how much of
+   AGG's contribution depended on the undiversified concentration": about
+   a third of what was previously reported as AGG's contribution came
+   from a single symbol sitting at up to 100% of account notional, not
+   from a properly risk-budgeted position; the other ~64% reflects a
+   genuine, correctly-sized edge that survives the fix. **At the
+   kickoff's example 25%, by contrast, pooled net drops by 25 points
+   (72.63%→47.80%)** — confirming numerically that 20-25% would have been
+   a much bigger, less targeted change than intended, consistent with
+   point 3's binding-frequency table.
+
+   **No adopt/reject verdict rendered or implied — this was a sensitivity
+   check, not a new profitability test, per instruction.** Folds-positive
+   held at 3/3 under all three settings tested; the fix is recommended
+   for adoption on correctness/concentration-risk grounds (a single
+   symbol should not structurally reach 100% of account notional), not
+   because it changed the return story.
+
+5. **Other symbols beyond AGG: none found affected.** Explicitly checked
+   and confirmed negative (point 1 above) — this is a single-symbol
+   (AGG) issue in the current 8-ETF universe, not a broader pattern, as
+   of this real-data run.
+
+6. **No other bugs or unexpected behavior found** beyond the notional-
+   backstop severity itself (already reported in the prior milestone and
+   fully quantified here). The risk-budget shrink mechanism (previous
+   milestone's subject) and the slot-count cap both continued to behave
+   correctly throughout every rerun in this milestone (0 signals skipped
+   in the 8-slot original-config quantification run, matching the
+   already-known "risk budget never bound in Track B's original run"
+   fact).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
@@ -1987,6 +2157,22 @@ See "Current status" above for the full result, including the notional-
 backstop finding (AGG sized to 100% of equity on 13/15 trades) and the
 resulting docstring corrections in both `backtest_etf_donchian.py` and
 `backtest_donchian_ensemble.py`.
+
+**Track B notional-concentration milestone (spec v30 §10.2):**
+`entry_sizing_log` (`backtest_donchian_ensemble.py`) extended with 5 more
+fields (`entry_price`, `entry_atr`, `atr_to_price_pct`,
+`uncapped_notional_pct_of_equity`, `notional_pct_of_equity`) — still
+purely additive/opt-in, no change to any existing behavior. New one-off
+script `scripts/quantify_track_b_notional_concentration.py` (not meant to
+be maintained). `backtest_etf_donchian.py` gained
+`MAX_SINGLE_POSITION_NOTIONAL_PCT = 55.0` (a Track-B-only override of the
+shared function's 100% default) and a `--max-position-notional-pct` CLI
+flag, wired into both the net and gross `simulate_rotational_ensemble()`
+calls in `main()`. 5 new tests (3 in
+`tests/test_backtest_donchian_ensemble.py`, 2 in
+`tests/test_backtest_etf_donchian.py`), full suite (150 tests) passing.
+See "Current status" above for the full quantification, root-cause
+confirmation, cap-threshold rationale, and rerun sensitivity results.
 
 **Track A:** `scripts/backtest_gem.py` (base GEM signal + monthly
 holding-period simulator; `GemTrade` dataclass, `simulate_gem()`,
