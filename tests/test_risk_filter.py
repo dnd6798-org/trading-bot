@@ -20,7 +20,12 @@ import pytest
 
 from src import halt_state
 from src import telegram_bot
-from src.config import GuardrailConfig, get_guardrail_config, get_track_b_guardrail_config
+from src.config import (
+    GuardrailConfig,
+    get_guardrail_config,
+    get_track_b_guardrail_config,
+    MAX_SINGLE_POSITION_NOTIONAL_PCT,
+)
 from src.risk_filter import (
     check_trade_count_limit,
     check_daily_loss_limit,
@@ -39,7 +44,7 @@ def isolated_halt_state(tmp_path, monkeypatch):
 
 # --- get_track_b_guardrail_config: layering, not replacement ---------------
 
-def test_track_b_config_overrides_only_the_three_rescaled_fields():
+def test_track_b_config_overrides_the_four_rescaled_fields():
     global_cfg = get_guardrail_config()
     track_b_cfg = get_track_b_guardrail_config()
 
@@ -47,19 +52,43 @@ def test_track_b_config_overrides_only_the_three_rescaled_fields():
     assert track_b_cfg.max_trades_per_day == 8
     assert track_b_cfg.max_daily_loss_pct == 4.0
     assert track_b_cfg.max_combined_open_risk_pct == 8.0
+    # Clarification fix (spec v32 clarification pass): max_position_size_pct
+    # is the SAME spec §4.1 concept as MAX_SINGLE_POSITION_NOTIONAL_PCT —
+    # originally missed, left at the stale global 25% here while the
+    # backtest already used 55%. Now overridden too, sourced from the one
+    # canonical constant (see the single-source test below).
+    assert track_b_cfg.max_position_size_pct == 55.0
+    assert track_b_cfg.max_position_size_pct == MAX_SINGLE_POSITION_NOTIONAL_PCT
 
     # Passed through unchanged from the global config — not hardcoded
     # here, compared directly against get_guardrail_config()'s own
     # values, so a future .env change can't silently desync this test.
     assert track_b_cfg.max_risk_per_trade_pct == global_cfg.max_risk_per_trade_pct
-    assert track_b_cfg.max_position_size_pct == global_cfg.max_position_size_pct
     assert track_b_cfg.max_drawdown_pct == global_cfg.max_drawdown_pct
 
     # The global config itself is untouched by the Track B override
-    # existing — crypto/Track A must see the same numbers as before.
+    # existing — crypto/Track A must see the same numbers as before,
+    # INCLUDING max_position_size_pct staying at the legacy 25% globally
+    # even though Track B now overrides its own copy to 55%.
     assert global_cfg.max_trades_per_day == 6
     assert global_cfg.max_daily_loss_pct == 3.0
     assert global_cfg.max_combined_open_risk_pct == 1.5
+    assert global_cfg.max_position_size_pct == 25.0
+
+
+def test_max_single_position_notional_pct_is_the_single_source_for_both_consumers():
+    # Regression guard for the exact gap the clarification pass fixed:
+    # get_track_b_guardrail_config() and scripts/backtest_etf_donchian.py
+    # (the backtest's own notional_sanity_cap_pct override) must both
+    # read the ONE constant in src/config.py, not two independently-set
+    # numbers that happened to agree today but could silently drift
+    # apart tomorrow (they briefly did: 25% vs. 55%, before this fix).
+    from scripts.backtest_etf_donchian import MAX_SINGLE_POSITION_NOTIONAL_PCT as backtest_constant
+
+    track_b_cfg = get_track_b_guardrail_config()
+
+    assert backtest_constant == MAX_SINGLE_POSITION_NOTIONAL_PCT == 55.0
+    assert track_b_cfg.max_position_size_pct == backtest_constant
 
 
 # --- check_trade_count_limit: gates at 6 (global) vs 8 (Track B) -----------
@@ -78,6 +107,36 @@ def test_check_trade_count_limit_gates_at_track_b_value_of_8_not_global_6():
     assert check_trade_count_limit(6, cfg) is True
     assert check_trade_count_limit(7, cfg) is True
     assert check_trade_count_limit(8, cfg) is False
+
+
+def test_check_trade_count_limit_parameter_is_explicitly_named_entry_count_not_trade_count():
+    # Regression guard for the clarification fix: the parameter was
+    # renamed today_trade_count -> today_entry_count specifically so a
+    # future caller can't ambiguously feed it entries+exits (which would
+    # falsify the "can never legitimately bind" property documented for
+    # Track B's cap of 8 — see check_trade_count_limit()'s own docstring
+    # and config.get_track_b_guardrail_config()'s docstring for why).
+    import inspect
+    params = list(inspect.signature(check_trade_count_limit).parameters)
+    assert params[0] == "today_entry_count"
+
+
+def test_check_trade_count_limit_scenario_illustrating_why_exits_must_not_be_counted():
+    # Concrete divergence, not just a documented convention: on an
+    # ordinary Track B shock day, exits are processed before entries
+    # (simulate_rotational_ensemble()'s convention, backtest_donchian_
+    # ensemble.py) — so by the time the 5th entry of the day is being
+    # evaluated, all 8 open positions may have ALREADY exited. If a
+    # single counter increments on every trade EVENT (8 exits + 4 entries
+    # so far = 12), the 5th entry is wrongly blocked even though only 4
+    # real entries have happened. Counted correctly (entries only, 4 so
+    # far), the 5th entry is correctly still allowed.
+    cfg = GuardrailConfig(1.0, 55.0, 4.0, max_trades_per_day=8, max_combined_open_risk_pct=8.0, max_drawdown_pct=10.0)
+    entries_so_far_correct = 4               # 4 real entries counted
+    entries_so_far_if_exits_also_counted = 8 + 4  # + all 8 exits, wrongly
+
+    assert check_trade_count_limit(entries_so_far_correct, cfg) is True    # 5th entry correctly still allowed
+    assert check_trade_count_limit(entries_so_far_if_exits_also_counted, cfg) is False  # wrongly blocked
 
 
 def test_check_trade_count_limit_using_real_configs_does_not_cross_contaminate():

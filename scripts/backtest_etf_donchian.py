@@ -163,6 +163,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.config import MAX_SINGLE_POSITION_NOTIONAL_PCT
 from src.data_ingestion import fetch_historical_stock_candles
 from src.signal_generation import compute_atr
 from scripts.backtest import (
@@ -193,22 +194,17 @@ TOTAL_PORTFOLIO_RISK_BUDGET_PCT = MAX_CONCURRENT_POSITIONS * DEFAULT_RISK_PER_TR
 # Notional-concentration cap (spec v30 §10.2), replacing the shared
 # simulate_rotational_ensemble()'s notional_sanity_cap_pct DEFAULT of
 # 100% (a Track-B-only override, same convention as ETF_SLIPPAGE_BPS
-# below — the crypto ensemble's own default is untouched). Grounded in
-# scripts/quantify_track_b_notional_concentration.py's real-data result,
-# NOT the milestone kickoff's example 20-25% range: across all 219 real
-# trades in Track B's original backtest, every one of the 7 non-AGG
-# symbols' uncapped, risk-based position sizing topped out at 54.6% of
-# equity (global max across 204 non-AGG entries) — a 20-25% cap would
-# have bound on 66-87% of those otherwise-healthy trades, not just AGG's
-# pathological ones (see the quantification script's threshold-sweep
-# table). 55% sits one point above that empirical non-AGG ceiling: 0/204
-# non-AGG entries affected, 15/15 AGG entries affected (all of them, not
-# just the 13 that tripped the old 100% cap — 2 more of AGG's own
-# entries, at 56.3%/79.2% uncapped demand, were previously invisible
-# because they happened to fall under 100% despite still being far above
-# every other symbol's own ceiling). See CLAUDE.md for the full
-# quantification and the resulting rerun's sensitivity.
-MAX_SINGLE_POSITION_NOTIONAL_PCT = 55.0
+# below — the crypto ensemble's own default is untouched).
+# MAX_SINGLE_POSITION_NOTIONAL_PCT is now imported from src/config.py
+# (moved there in the spec v32 guardrail-rescaling milestone's
+# clarification pass) — that module is the single source of truth for
+# this value now that it also backs get_track_b_guardrail_config()'s
+# live max_position_size_pct override, so this script and the live
+# guardrail can never independently drift apart the way they briefly did
+# before that fix (this file previously defined its own local 55.0). See
+# src/config.py for the full quantification-grounded rationale (the
+# 20-25% vs. 55% threshold-sweep data, AGG's pathology, etc.) — not
+# repeated here.
 
 # Commission-free stock/ETF product (Alpaca) — the only fee-model change
 # from the crypto findings' 0.25%/leg taker fee. Slippage widened from

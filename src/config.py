@@ -54,6 +54,29 @@ class StrategyConfig:
 TRADING_ENV = _get("TRADING_ENV", default="paper")
 IS_PAPER = TRADING_ENV.lower() == "paper"
 
+# Track B single-position notional cap (spec v30 §10.2, moved here from
+# scripts/backtest_etf_donchian.py in the spec v32 guardrail-rescaling
+# milestone's clarification pass — see CLAUDE.md). THE canonical
+# definition: both get_track_b_guardrail_config() below (as GuardrailConfig's
+# max_position_size_pct — spec §4.1's "max notional position size", the
+# same concept, just Track B's own value instead of the legacy crypto/
+# global 25%) and backtest_etf_donchian.py (as its notional_sanity_cap_pct
+# backtest override) import THIS constant rather than each hardcoding
+# their own copy — before this fix they were two independently-set
+# numbers (this GuardrailConfig field defaulted to the untouched global
+# 25% while the backtest already used 55%) that could silently drift
+# apart, not a single source of truth. Grounded in
+# scripts/quantify_track_b_notional_concentration.py's real-data result,
+# NOT a round number: across all 219 real trades in Track B's original
+# backtest, every one of the 7 non-AGG symbols' uncapped, risk-based
+# position sizing topped out at 54.6% of equity (global max across 204
+# non-AGG entries) — 55% sits one point above that empirical ceiling,
+# fully covering AGG's pathological low-ATR/price sizing (which reached
+# up to 161.5%) while affecting zero of the other 7 symbols' real trades.
+# See CLAUDE.md "Current status" for the full quantification and
+# threshold-sweep table.
+MAX_SINGLE_POSITION_NOTIONAL_PCT = 55.0
+
 
 def get_alpaca_config() -> AlpacaConfig:
     prefix = "ALPACA_PAPER" if IS_PAPER else "ALPACA_LIVE"
@@ -91,21 +114,29 @@ def get_track_b_guardrail_config() -> GuardrailConfig:
     Reuses the SAME GuardrailConfig dataclass (not a separate type) so
     risk_filter.py's checks work identically regardless of which config
     is passed in — the same Track-B-only-override/shared-function pattern
-    already used for MAX_SINGLE_POSITION_NOTIONAL_PCT
-    (backtest_etf_donchian.py overriding simulate_rotational_ensemble()'s
-    notional_sanity_cap_pct parameter, spec v30 §10.2), applied to the
-    live guardrail config instead of a backtest parameter.
+    already used for MAX_SINGLE_POSITION_NOTIONAL_PCT (above — this
+    function is one of its two consumers) applied to the live guardrail
+    config instead of a backtest parameter.
 
     The legacy spec §4.2 numbers (3% daily loss, 6 trades/day,
-    1.5% combined open-risk) were sized for intraday BTC/ETH crypto
-    trading and don't transfer to Track B's actual cadence (daily-bar
-    signal evaluation across an 8-symbol universe, ~2-3 trades/month
-    pooled — see "Track B findings", CLAUDE.md). Only 3 of 6 fields are
-    rescaled here:
-      - max_trades_per_day: 6 -> 8, matching the 8-symbol universe size
-        (can never legitimately bind — each symbol fires at most once/day
-        — retained as a defense-in-depth duplicate-order/scheduler-bug
-        catcher, a separate code path from MAX_CONCURRENT_POSITIONS).
+    1.5% combined open-risk, 25% max position size) were sized for
+    intraday BTC/ETH crypto trading and don't transfer to Track B's
+    actual cadence (daily-bar signal evaluation across an 8-symbol
+    universe, ~2-3 trades/month pooled — see "Track B findings",
+    CLAUDE.md). 4 of 6 fields are rescaled here:
+      - max_trades_per_day: 6 -> 8, matching the 8-symbol universe size.
+        CLARIFICATION (spec v32 clarification pass): this counts ENTRY
+        signals only, one per symbol per day — NOT entries + exits. The
+        "can never legitimately bind" property this number is documented
+        as having (a defense-in-depth duplicate-order/scheduler-bug
+        catcher, a separate code path from MAX_CONCURRENT_POSITIONS) is
+        FALSE if exits are also counted: all 8 slots could exit AND all 8
+        refill with new entries on the same shock day (16 events),
+        exceeding 8 on an entirely ordinary day. Whatever future caller
+        computes today's count (execution.py, not built yet) MUST count
+        entries only — see risk_filter.check_trade_count_limit()'s
+        today_entry_count parameter, named explicitly to make this
+        unambiguous rather than leaving it to a generic "trade count".
       - max_daily_loss_pct: 3% -> 4%, rescaled from "3x per-trade risk"
         (the crypto framing) to roughly half the new open-risk budget
         below, sized for several concurrent positions gapping through
@@ -117,15 +148,24 @@ def get_track_b_guardrail_config() -> GuardrailConfig:
         applied there — see "Track B findings" and the notional-
         concentration milestone, spec v30 §10.2) rather than introducing
         a new, never-backtested correlation discount at this stage.
-    max_risk_per_trade_pct, max_position_size_pct, and max_drawdown_pct
-    are passed through UNCHANGED from the global config —
-    max_drawdown_pct in particular has no Track-B override by explicit
-    instruction (not cadence-dependent, stays at the global 10%).
+      - max_position_size_pct: 25% -> MAX_SINGLE_POSITION_NOTIONAL_PCT
+        (55%, above). CLARIFICATION (spec v32 clarification pass): this
+        field is the SAME spec §4.1 concept ("max notional position
+        size") as MAX_SINGLE_POSITION_NOTIONAL_PCT — missed when this
+        function was first written, since that constant predates this
+        function and lived only in the backtest script. Now sourced from
+        the single constant above rather than left at the stale global
+        25%, which would have silently disagreed with the 55% already
+        validated for Track B.
+    max_risk_per_trade_pct and max_drawdown_pct are passed through
+    UNCHANGED from the global config — max_drawdown_pct in particular has
+    no Track-B override by explicit instruction (not cadence-dependent,
+    stays at the global 10%).
     """
     base = get_guardrail_config()
     return GuardrailConfig(
         max_risk_per_trade_pct=base.max_risk_per_trade_pct,
-        max_position_size_pct=base.max_position_size_pct,
+        max_position_size_pct=MAX_SINGLE_POSITION_NOTIONAL_PCT,
         max_daily_loss_pct=float(_get("MAX_DAILY_LOSS_PCT_TRACK_B", required=False, default="4.0")),
         max_trades_per_day=int(_get("MAX_TRADES_PER_DAY_TRACK_B", required=False, default="8")),
         max_combined_open_risk_pct=float(_get("MAX_TOTAL_OPEN_RISK_PCT_TRACK_B", required=False, default="8.0")),

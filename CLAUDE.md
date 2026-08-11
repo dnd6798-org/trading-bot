@@ -597,6 +597,51 @@ wasn't implemented.
    grouping constant covers exactly the 8 confirmed symbols. Full suite
    (167 tests) passing.
 
+**UPDATE: two real gaps corrected, both surfaced by the user's own
+closing-clarification questions on this milestone, not caught before
+being asked.**
+
+1. **`MAX_TRADES_PER_DAY_TRACK_B=8`'s "can never legitimately bind"
+   claim was ambiguous, not verified.** `check_trade_count_limit()`'s
+   parameter was named the generic `today_trade_count` — nothing in the
+   code specified whether it should count entries only or entries+exits,
+   and the "structural ceiling" reasoning (one entry per symbol per day,
+   8 symbols) only holds for entries-only: an ordinary shock day where
+   all 8 slots exit AND all 8 refill with new entries produces 8 real
+   entries (within the cap) but 16 total trade events (would exceed it
+   if both counted). Fixed: renamed to `today_entry_count` (also in
+   `evaluate()`), docstring now states the entries-only contract
+   explicitly and explains why, module docstring's §4.2 line updated.
+   Two new tests pin this: a signature-inspection regression guard on
+   the parameter name, and a scenario test showing the SAME day (4 real
+   entries + 8 exits already processed) produces opposite `check_trade_
+   count_limit()` outcomes depending on which count is passed —
+   `True` (correct, entries-only) vs. `False` (wrongly blocked, if exits
+   were also counted). No counting logic exists yet to have actually
+   miscounted anything live (execution.py isn't built) — this was a
+   contract-ambiguity fix, not a behavioral bug fix.
+
+2. **`MAX_SINGLE_POSITION_NOTIONAL_PCT` (55%, spec v30 §10.2) and
+   `GuardrailConfig.max_position_size_pct` were NOT wired to a single
+   source, and had already drifted (25% vs. 55%).** `get_track_b_
+   guardrail_config()` was written to pass `max_position_size_pct`
+   through unchanged from the global config (staying at the legacy
+   crypto-era 25%) — missed that this field is the exact same spec
+   §4.1 concept ("max notional position size") as `MAX_SINGLE_POSITION_
+   NOTIONAL_PCT`, which already existed as its own, disconnected
+   constant in `scripts/backtest_etf_donchian.py`. **Fixed:**
+   `MAX_SINGLE_POSITION_NOTIONAL_PCT` moved to `src/config.py` as the
+   one canonical definition (full quantification-grounded rationale
+   moved with it); `get_track_b_guardrail_config()` now overrides
+   `max_position_size_pct` to this constant (4 of 6 fields rescaled for
+   Track B now, not 3); `backtest_etf_donchian.py` imports the same
+   constant instead of defining its own local `= 55.0` copy. Two new
+   tests: one confirming `get_track_b_guardrail_config()` now returns
+   55% (not the stale 25%) for this field, one asserting the backtest
+   script's constant and `config.py`'s constant are literally the same
+   value pulled from the same import, not two numbers that happen to
+   agree today. Full suite (170 tests) passing after both fixes.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
@@ -2327,20 +2372,28 @@ confirmation, cap-threshold rationale, and rerun sensitivity results.
 
 **Track B guardrail-implementation milestone (spec v32):**
 `src/config.py` gained `get_track_b_guardrail_config()` (returns the same
-`GuardrailConfig` dataclass, 3 fields rescaled, 3 passed through). Three
-new optional env vars (`.env`, `.env.example`):
-`MAX_TRADES_PER_DAY_TRACK_B`, `MAX_DAILY_LOSS_PCT_TRACK_B`, `MAX_TOTAL_
-OPEN_RISK_PCT_TRACK_B`. `src/risk_filter.py` — previously 100% stub —
-gained real implementations of `check_trade_count_limit()`, `check_
-daily_loss_limit()` (calls `halt_state.set_halt()` on breach), `check_
-combined_open_risk_budget()`, and a new, explicitly non-blocking `check_
-asset_class_concentration()` plus the confirmed `TRACK_B_ASSET_CLASS_
-GROUPS`/`CONCENTRATION_ALERT_THRESHOLD_PCT` constants (fires via `src/
-telegram_bot.py`'s `send_message()`, itself still a stub — tests
+`GuardrailConfig` dataclass, 4 fields rescaled after the clarification-
+pass fix below, 2 passed through). Three new optional env vars (`.env`,
+`.env.example`): `MAX_TRADES_PER_DAY_TRACK_B`, `MAX_DAILY_LOSS_PCT_
+TRACK_B`, `MAX_TOTAL_OPEN_RISK_PCT_TRACK_B`. `src/risk_filter.py` —
+previously 100% stub — gained real implementations of `check_trade_
+count_limit()` (parameter `today_entry_count`, entries-only contract),
+`check_daily_loss_limit()` (calls `halt_state.set_halt()` on breach),
+`check_combined_open_risk_budget()`, and a new, explicitly non-blocking
+`check_asset_class_concentration()` plus the confirmed `TRACK_B_ASSET_
+CLASS_GROUPS`/`CONCENTRATION_ALERT_THRESHOLD_PCT` constants (fires via
+`src/telegram_bot.py`'s `send_message()`, itself still a stub — tests
 monkeypatch it). `check_drawdown_limit()` and `evaluate()` remain
-`NotImplementedError`, out of scope. New `tests/test_risk_filter.py` (17
-tests), full suite (167 tests) passing. See "Current status" above for
-the full implementation detail and the confirmed asset-class grouping.
+`NotImplementedError`, out of scope. **Clarification-pass fix (same
+session): `MAX_SINGLE_POSITION_NOTIONAL_PCT` (spec v30 §10.2) moved from
+`backtest_etf_donchian.py` into `src/config.py` as the single canonical
+source — now also backs `get_track_b_guardrail_config()`'s `max_
+position_size_pct` override (55%, was silently left at the stale global
+25%), and the backtest script imports the same constant instead of
+defining its own copy.** New `tests/test_risk_filter.py` (20 tests after
+the clarification-pass additions), full suite (170 tests) passing. See
+"Current status" above for the full implementation detail, the confirmed
+asset-class grouping, and both clarification fixes.
 
 **Track A:** `scripts/backtest_gem.py` (base GEM signal + monthly
 holding-period simulator; `GemTrade` dataclass, `simulate_gem()`,

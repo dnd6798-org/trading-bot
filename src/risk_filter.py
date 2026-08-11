@@ -5,8 +5,11 @@ Every trade candidate passes through here before execution — no trade
 bypasses this stage (spec §3.1). Enforces all of spec §4:
 
 - §4.1 Per-trade: max 1% risk/trade, max 25% notional position size
+  (Track B, spec v32: 55% — see config.MAX_SINGLE_POSITION_NOTIONAL_PCT,
+  also used by config.get_track_b_guardrail_config())
 - §4.2 Daily: max 3% daily loss (circuit breaker), max 6 trades/day
-  (Track B, spec v32: 4% / 8 — see config.get_track_b_guardrail_config())
+  (Track B, spec v32: 4% / 8, ENTRIES ONLY not entries+exits — see
+  config.get_track_b_guardrail_config())
 - §4.3 Account: max 10% drawdown, 1.5% combined open-risk budget (BTC+ETH)
   (Track B, spec v32: 8%, deliberately undiscounted — see
   config.get_track_b_guardrail_config()), manual kill switch
@@ -70,9 +73,25 @@ def check_daily_loss_limit(account_state, guardrails: GuardrailConfig) -> bool:
     return within_limit
 
 
-def check_trade_count_limit(today_trade_count: int, guardrails: GuardrailConfig) -> bool:
-    """True = an additional trade today is still within the cap."""
-    return today_trade_count < guardrails.max_trades_per_day
+def check_trade_count_limit(today_entry_count: int, guardrails: GuardrailConfig) -> bool:
+    """
+    True = an additional trade today is still within the cap.
+
+    CONTRACT, made explicit (spec v32 clarification pass — the parameter
+    was originally named the more generic `today_trade_count`, which left
+    this ambiguous): `today_entry_count` MUST count new position ENTRIES
+    only, never exits. This matters specifically for Track B's
+    MAX_TRADES_PER_DAY_TRACK_B=8 (config.get_track_b_guardrail_config()),
+    which is documented as "can never legitimately bind" ONLY because
+    entries are structurally capped at one per symbol per day across an
+    8-symbol universe. If exits were also counted, that property is
+    FALSE: all 8 slots could exit AND all 8 refill with new entries on
+    the same shock day (16 events), tripping this cap on an entirely
+    ordinary day rather than only on a genuine duplicate-order/
+    scheduler-bug. Whatever future caller computes this count
+    (execution.py, not built yet) must count entries only.
+    """
+    return today_entry_count < guardrails.max_trades_per_day
 
 
 def check_drawdown_limit(account_state, guardrails: GuardrailConfig) -> bool:
@@ -106,10 +125,11 @@ def check_combined_open_risk_budget(open_positions, new_signal: TradeSignal, gua
     return available_pct if available_pct > 0 else None
 
 
-def evaluate(signal: TradeSignal, account_state, open_positions, today_trade_count: int, guardrails: GuardrailConfig) -> RiskDecision:
+def evaluate(signal: TradeSignal, account_state, open_positions, today_entry_count: int, guardrails: GuardrailConfig) -> RiskDecision:
     """
     Single entry point — every candidate must go through this before
-    execution.py ever sees it.
+    execution.py ever sees it. today_entry_count: see check_trade_count_
+    limit()'s docstring — entries only, never exits.
     """
     raise NotImplementedError("Build session — implement each check above first, then wire together")
 
