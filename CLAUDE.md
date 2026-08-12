@@ -8,6 +8,19 @@ for how to work in this repo, not what to build (that's the spec).
 whenever a real decision is made during a coding session — don't rely on
 conversation history to carry context forward.
 
+**NEW (2026-08-12 session): `RULES.md` now exists at the repo root,
+governing process/communication discipline between claude.ai and Claude
+Code — separate from strategy content, which stays in the spec.** Read
+`RULES.md` at the start of every session, before starting any work, in
+addition to this file. Two rules from it worth restating here since they
+directly affect how every future session reports work: (1) every
+milestone report must include exact commit hashes and exact test
+pass/fail counts — never "done" or "tests pass" without the number; (2)
+no fact (file names, version numbers, commit hashes, function/variable
+names, line numbers) should be stated as a placeholder or approximation —
+if unconfirmed, say so explicitly rather than presenting a guess as
+settled.
+
 ---
 
 ## What this project is
