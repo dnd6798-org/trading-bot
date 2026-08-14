@@ -49,6 +49,7 @@ from src.execution import (
     confirm_entry_fill,
     poll_order_until_terminal,
     submit_stop_order_with_retry,
+    submit_or_resize_stop_order_with_retry,
     submit_entry_and_stop,
     generate_daily_candidates,
     build_open_positions,
@@ -56,6 +57,9 @@ from src.execution import (
     get_today_entry_count,
     compute_stop_price_for_entry_date,
     protect_unprotected_fills,
+    has_resting_protective_stop,
+    encode_client_order_id,
+    decode_client_order_id,
     ATR_MULTIPLIER,
 )
 from src.risk_filter import RiskDecision
@@ -73,7 +77,8 @@ def captured_telegram_messages(monkeypatch):
 class FakeOrder:
     def __init__(self, id="order-1", status=OrderStatus.NEW, filled_qty=0.0, filled_avg_price=None,
                  symbol="SPY", qty=1.0, stop_price=None, order_type=OrderType.MARKET,
-                 submitted_at=None, filled_at=None, market_value=None, avg_entry_price=None):
+                 submitted_at=None, filled_at=None, market_value=None, avg_entry_price=None,
+                 client_order_id=None):
         self.id = id
         self.status = status
         self.filled_qty = filled_qty
@@ -84,6 +89,7 @@ class FakeOrder:
         self.order_type = order_type
         self.submitted_at = submitted_at or datetime(2026, 8, 10, tzinfo=timezone.utc)
         self.filled_at = filled_at
+        self.client_order_id = client_order_id
 
 
 class FakePosition:
@@ -685,3 +691,151 @@ def test_protect_unprotected_fills_alerts_when_stop_price_cannot_be_recomputed(c
     urgent = [m for m in captured_telegram_messages if "URGENT" in m and "UNPROTECTED" in m]
     assert len(urgent) == 1
     assert "SPY" in urgent[0]
+
+
+# --- fill_listener.py milestone (spec v33 §10.5): client_order_id stop-price
+# handoff, has_resting_protective_stop() extraction, submit_or_resize_stop_
+# order_with_retry() -----------------------------------------------------
+
+def test_encode_client_order_id_matches_the_locked_design_example():
+    # Locked design's own worked example: tb-SPY-20260812-45823.
+    assert encode_client_order_id("SPY", "2026-08-12", 458.23) == "tb-SPY-20260812-45823"
+
+
+def test_encode_decode_client_order_id_round_trip_three_letter_symbol():
+    coid = encode_client_order_id("SPY", "2026-08-10", 435.0)
+    decoded = decode_client_order_id(coid)
+    assert decoded == {"symbol": "SPY", "signal_date": "2026-08-10", "stop_price": 435.0}
+
+
+def test_encode_decode_client_order_id_round_trip_longer_symbol():
+    # No current Track B symbol is longer than 3 letters, but the format
+    # must not assume a fixed symbol length.
+    coid = encode_client_order_id("GOOGL", "2026-08-10", 120.5)
+    decoded = decode_client_order_id(coid)
+    assert decoded == {"symbol": "GOOGL", "signal_date": "2026-08-10", "stop_price": 120.5}
+
+
+def test_encode_decode_client_order_id_round_trip_stop_price_without_cents():
+    coid = encode_client_order_id("QQQ", "2026-08-10", 400.0)
+    assert coid == "tb-QQQ-20260810-40000"
+    assert decode_client_order_id(coid)["stop_price"] == 400.0
+
+
+def test_encode_decode_client_order_id_round_trip_stop_price_with_cents():
+    coid = encode_client_order_id("QQQ", "2026-08-10", 399.99)
+    assert coid == "tb-QQQ-20260810-39999"
+    assert decode_client_order_id(coid)["stop_price"] == 399.99
+
+
+def test_decode_client_order_id_returns_none_for_a_non_matching_id():
+    assert decode_client_order_id("some-manual-test-order") is None
+    assert decode_client_order_id("tb-SPY-2026081-45823") is None  # short date
+    assert decode_client_order_id(None) is None
+    assert decode_client_order_id("") is None
+
+
+def test_submit_entry_and_stop_encodes_client_order_id_on_the_entry_order():
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    client = FakeTradingClient()
+    client.submit_order_fn = lambda req: FakeOrder(id="entry-1", status=OrderStatus.NEW, filled_qty=0.0, filled_avg_price=None)
+    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.NEW, filled_qty=0.0, filled_avg_price=None)
+
+    submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(),
+                           sleep_fn=_no_sleep, poll_timeout_seconds=0)
+
+    entry_request = client.submitted_orders[0]
+    expected_stop_price = 450.0 - ATR_MULTIPLIER * 5.0
+    assert entry_request.client_order_id == encode_client_order_id("SPY", "2026-08-10", expected_stop_price)
+
+
+def test_has_resting_protective_stop_true_when_a_stop_order_is_open():
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, stop_price=435.0)]
+    assert has_resting_protective_stop(client, "SPY") is True
+
+
+def test_has_resting_protective_stop_false_when_no_open_orders():
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []
+    assert has_resting_protective_stop(client, "SPY") is False
+
+
+def test_protect_unprotected_fills_and_listener_share_the_same_idempotency_check():
+    # Regression guard: protect_unprotected_fills() must call the SAME
+    # function fill_listener.py's handler calls (has_resting_protective_
+    # stop), not a private reimplementation — a signature-level proof
+    # they can't silently disagree, same category of fix as the v32
+    # MAX_SINGLE_POSITION_NOTIONAL_PCT drift bug.
+    import inspect
+    from src import execution
+    source = inspect.getsource(execution.protect_unprotected_fills)
+    assert "has_resting_protective_stop(" in source
+
+
+def test_submit_or_resize_stop_order_with_retry_submits_when_no_existing_stop():
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []  # no resting stop
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+
+    assert result.id == "stop-1"
+    assert len(client.submitted_orders) == 1
+    assert isinstance(client.submitted_orders[0], StopOrderRequest)
+
+
+def test_submit_or_resize_stop_order_with_retry_is_a_noop_when_qty_already_matches():
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=10.0, stop_price=435.0)]
+
+    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+
+    assert result.id == "stop-1"
+    assert client.submitted_orders == []  # no new order submitted
+    assert client.replace_calls == []  # no replace attempted either — a true no-op
+
+
+def test_submit_or_resize_stop_order_with_retry_replaces_qty_via_patch_when_cumulative_qty_grows():
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
+    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.NEW, qty=10.0, stop_price=435.0)
+
+    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+
+    assert result.id == "stop-1"
+    assert client.submitted_orders == []  # replace-not-cancel: never a fresh submit
+    assert len(client.replace_calls) == 1
+    replaced_order_id, replace_request = client.replace_calls[0]
+    assert replaced_order_id == "stop-1"
+    assert replace_request.qty == 10
+
+
+def test_submit_or_resize_stop_order_with_retry_exhausts_retries_and_alerts_on_replace_failure(captured_telegram_messages):
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
+
+    def replace_order_by_id(order_id, order_data=None):
+        raise RuntimeError("broker rejected replace")
+    client.replace_order_by_id = replace_order_by_id
+
+    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+
+    assert result is None
+    urgent = [m for m in captured_telegram_messages if "URGENT" in m and "UNPROTECTED" in m]
+    assert len(urgent) == 1
+    assert "SPY" in urgent[0]
+
+
+def test_submit_or_resize_stop_order_with_retry_fails_toward_alert_on_fractional_qty():
+    # DISCOVERED THIS MILESTONE: ReplaceOrderRequest.qty is Optional[int]
+    # in the installed alpaca-py version, unlike every order-SUBMISSION
+    # request's qty field — a fractional resize qty must fail safely
+    # toward the URGENT alert path, not silently round or crash the caller.
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
+
+    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.4567, 435.0, sleep_fn=_no_sleep)
+
+    assert result is None
+    assert client.replace_calls == []  # ReplaceOrderRequest(qty=10.4567) raises before any client call is made

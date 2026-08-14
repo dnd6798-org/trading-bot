@@ -1026,6 +1026,104 @@ resolved there with a pre-fill `close_T` proxy) — that remains a
 separate, still-unconfirmed placeholder, per the "Blocked/pending"
 section below.
 
+**UPDATE: the fill-protection listener milestone was EXECUTED.** All 9
+locked design points implemented as specified — `src/fill_listener.py`
+is new and real (`MonitoredTradingStream` + `handle_trade_update()`);
+`src/execution.py` gained `encode_client_order_id()`/
+`decode_client_order_id()`, `has_resting_protective_stop()` (extracted
+out of `protect_unprotected_fills()`, which now calls it — the shared
+check point 6 required), and `submit_or_resize_stop_order_with_retry()`
+(the listener's protection entry point; `submit_stop_order_with_retry()`
+itself is unchanged and still used directly by `submit_entry_and_stop()`).
+254/254 tests passing (29 new: 15 in `tests/test_execution.py`, 14 in
+new `tests/test_fill_listener.py`).
+
+**Point 9's open items — all verified this milestone, not assumed:**
+- `client_order_id` max length: **128 characters**, confirmed empirically
+  against the real paper account (submitted real, never-fillable,
+  immediately-cancelled limit orders with lengths up to 256 — 128
+  accepted, 129 rejected with Alpaca's own `"client_order_id must be no
+  more than 128 characters"`). Resolves the docs' 48-vs-128 disagreement
+  in favor of 128. The encoded format is ~22-30 characters for Track B's
+  real 8-symbol universe either way.
+- `TradeUpdate`/`Order` field names (installed alpaca-py **0.43.5**,
+  confirmed via direct inspection of `alpaca.trading.models`): `TradeUpdate`
+  has `.event` (`TradeEvent` enum or raw str), `.order` (a NESTED `Order`
+  object — not flat fields on `TradeUpdate` itself), `.timestamp`,
+  `.position_qty`, `.price`, `.qty` (this last pair describe the CURRENT
+  execution, not the order's cumulative fill). The nested `Order` has
+  `.symbol`, `.side` (`OrderSide` enum), `.filled_qty` (CUMULATIVE — what
+  the listener uses, per point 5), `.filled_avg_price`,
+  `.client_order_id`, `.status`. `TradeEvent.FILL`/`.PARTIAL_FILL` values
+  are literally `"fill"`/`"partial_fill"` — matches the locked design's
+  own naming exactly.
+- `alpaca.trading.stream.TradingStream` confirmed present at the
+  installed version (0.43.5); `requirements.txt` pins only a floor
+  (`alpaca-py>=0.30.0`, no upper bound) — whether to add an upper/pinned
+  bound given this module's dependence on `TradingStream`'s internal
+  `_start_ws()` override point is flagged, not decided here.
+- Systemd unit naming convention: **none exists** — no `.service` file is
+  checked into this repo for either the daily job or this listener;
+  deployment configuration lives on the droplet itself, out of scope for
+  every deployment-adjacent milestone to date, this one included.
+
+**Two things discovered during implementation, NOT anticipated by the
+locked brief, both flagged in code rather than silently resolved:**
+1. **`ReplaceOrderRequest.qty` is typed `Optional[int]`** in the installed
+   alpaca-py version — unlike every order-SUBMISSION request's `qty`
+   field in the same SDK (`StopOrderRequest`/`MarketOrderRequest`, both
+   `Optional[float]`), confirmed directly against the pydantic model.
+   A fractional partial-fill resize qty (Track B position sizing produces
+   fractional shares) therefore cannot go through the PATCH replace path
+   at all — `submit_or_resize_stop_order_with_retry()` does NOT silently
+   round (would misrepresent the actual protected qty); it fails
+   deterministically and falls through to the same URGENT Telegram alert
+   path as any other resize failure. Safe (fails toward alerting a
+   human), but unresolved — flagged for the same chat-interface
+   design-call as `execution.py`'s other two open gaps.
+2. **A new, narrow race**, distinct from the one this milestone was
+   built to close: `submit_entry_and_stop()`'s own unconditional
+   `submit_stop_order_with_retry()` call and the listener reacting to the
+   SAME fill concurrently could in principle both attempt the FIRST stop
+   submission for one symbol at once (`has_resting_protective_stop()`'s
+   check-then-act pattern reduces but doesn't eliminate this). Not
+   expected to matter in real production use — genuine same-session fills
+   essentially never happen given Track B's post-close-only entry cadence
+   — but not eliminated by this implementation either. Flagged in
+   `execution.py`'s module docstring at the `client_order_id` encoding
+   call site.
+
+**Verification against the real paper account — both required tests,
+both PASS:**
+- **Integration** (`scripts/dry_run_fill_listener.py`, Part 1): a real
+  `MonitoredTradingStream` connected live; a real fill-forcing order was
+  submitted with an encoded stop price; the listener detected the fill
+  over the real WebSocket and submitted a real resting stop — confirmed
+  via a direct `GET` within ~0 seconds of the fill, stop price exactly
+  matching the encoded target.
+- **Restart-safety** (same script, Part 2): a second real fill was
+  forced with the listener intentionally NOT running, confirmed genuinely
+  unprotected (`has_resting_protective_stop()` → `False`), then
+  `protect_unprotected_fills()` (the daily-job fallback) correctly
+  protected it; a SYNTHETIC redelivered `trade_update` for that same
+  already-protected fill was then fed directly into `handle_trade_update()`
+  — no exception, and exactly 1 resting stop order afterward, not 2,
+  confirming the idempotency guarantee against real Alpaca account state.
+  **Methodology note, flagged in the script's own docstring:** Part 2's
+  fallback step needed SYNTHETIC `symbol_data` (not fetched from Alpaca)
+  because `protect_unprotected_fills()` recomputes a stop from the entry
+  date's own historical daily bar, which structurally cannot exist yet
+  for a fill that happened seconds ago in the same test session — a
+  limitation of this DRY-RUN's same-session-fill technique, not of
+  production behavior (real entries fill at next session's open, so by
+  the time the following day's job runs, that day's bar is long
+  published). Account left flat after both parts (verified: 0 open
+  positions, 0 open orders).
+
+**Not yet done, unchanged from before this milestone:** the crypto/Track
+A bracket-order gap; `data_ingestion.py`'s live/streaming fetch; spec
+§3.2 journaling persistence. This milestone did not touch any of those.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
@@ -1039,8 +1137,10 @@ real and tested for Track B** (see above) — the legacy crypto/Track A
 bracket-order-blocked functions (`place_entry_order()`/
 `place_exit_orders()`) remain `NotImplementedError`, unchanged, still
 correctly blocked on the separate crypto OCO-emulation gap ("Hard
-rules"). `position_management.py` and `data_ingestion.py`'s live fetch
-remain untouched stubs.
+rules"). **`src/fill_listener.py` is now real and tested** (see above) —
+`MonitoredTradingStream`/`handle_trade_update()`, verified against the
+real paper account. `position_management.py` and `data_ingestion.py`'s
+live fetch remain untouched stubs.
 
 ### Findings so far (2026-08 session, spans several rounds)
 
@@ -2970,6 +3070,23 @@ full locked architecture. Not yet implemented; implementation is the
 next milestone.** Gap 1 (the entry-qty-before-fill sequencing tension,
 resolved in `execution.py` with a pre-fill `close_T` proxy) is untouched
 by this design session and remains an unconfirmed placeholder.
+
+**UPDATE: gap 2 is now IMPLEMENTED and verified against the real paper
+account** — `src/fill_listener.py`, see "Current status" above for the
+full result (254/254 tests, integration + restart-safety both PASS). A
+same-session fill is now protected within seconds via the listener
+instead of waiting up to ~1 trading day for the daily fallback — the
+fallback (`protect_unprotected_fills()`) is unchanged and still the
+backstop for listener downtime. Two NEW gaps surfaced during this
+implementation (not present in the locked design) remain open, both
+flagged in code: `ReplaceOrderRequest.qty`'s `Optional[int]` typing
+makes a fractional partial-fill resize fail toward alert rather than
+silently succeed, and a narrow race between `submit_entry_and_stop()`'s
+own stop submission and the listener reacting to the same fill
+concurrently (expected to be immaterial in production given Track B's
+post-close-only entry cadence, but not eliminated). Gap 1
+(entry-qty-before-fill) remains untouched and still needs a real
+chat-interface design-call confirmation.
 
 **Crypto strategy family: CLOSED, no further milestones.** Finding 14
 (corrected long-horizon design — 100-day Donchian channel, daily entries,

@@ -178,7 +178,58 @@ protection). submit_stop_order_with_retry() retries with backoff and
 fires an immediate, distinct Telegram alert on total failure — kept
 separate from this module's generic per-symbol error handling, per the
 locked design's explicit instruction not to fold this into a catch-all.
+
+=============================================================================
+FILL-PROTECTION LISTENER milestone (spec v33 §10.5 — CLAUDE.md "Current
+status" has the full locked architecture; src/fill_listener.py is the
+module that implements it). This milestone closes the SECOND flagged gap
+above (the overnight submit-to-fill gap across daily-job invocations,
+which could otherwise leave a position unprotected for up to ~1 trading
+day) with a persistent, event-driven WebSocket listener — this file's
+own contribution to that milestone is threefold, all purely additive,
+no existing behavior changed for any caller that doesn't opt in:
+  1. encode_client_order_id()/decode_client_order_id() — the stop-price
+     handoff (no local position DB exists, same convention as the rest
+     of this module): submit_entry_and_stop() now encodes the pre-
+     computed stop price into every entry order's client_order_id;
+     fill_listener.py decodes it on fill. Format locked as
+     tb-{symbol}-{YYYYMMDD}-{stop_price_cents}.
+  2. has_resting_protective_stop() — extracted out of protect_
+     unprotected_fills()'s own filtering so it and fill_listener.py's
+     handler share the IDENTICAL "is this symbol already protected"
+     check (see its own docstring for the full reasoning).
+  3. submit_or_resize_stop_order_with_retry() — fill_listener.py's entry
+     point for protecting a fill; submit_stop_order_with_retry() itself
+     is UNCHANGED and still used directly by submit_entry_and_stop().
+
+VERIFIED THIS MILESTONE, not assumed:
+  - client_order_id max length for this account's Trading API is 128
+    characters (Alpaca's own docs disagree: 48 vs 128 in different
+    reference pages) — confirmed empirically against the real paper
+    account by submitting real (never-fillable, immediately-cancelled)
+    limit orders with client_order_id lengths up to 256 chars: 128 was
+    accepted, 129 was rejected with HTTP "client_order_id must be no
+    more than 128 characters". The encoded format above is ~22-30 chars
+    for Track B's real 8-symbol universe — nowhere near either candidate
+    limit; this verification matters for future formats, not this one.
+  - ReplaceOrderRequest.qty is Optional[int] in the installed alpaca-py
+    version (0.43.5) — see submit_or_resize_stop_order_with_retry()'s
+    docstring for the consequence (a fractional resize qty cannot go
+    through PATCH replace at all) and why it's left as a documented,
+    fail-toward-alert gap rather than silently rounded.
+
+NEWLY FLAGGED, NOT part of the locked design (discovered wiring this
+milestone, not anticipated by the brief): submit_entry_and_stop()'s own
+unconditional submit_stop_order_with_retry() call and fill_listener.py's
+handler reacting to the SAME fill event concurrently is a real, if
+narrow, check-then-act race that could in principle produce two resting
+stop orders for one symbol — see the comment at the client_order_id
+encoding call site in submit_entry_and_stop() for the full reasoning on
+why this shouldn't matter in real production use (genuine same-session
+fills essentially never happen given Track B's post-close-only entry
+cadence) but isn't eliminated by this implementation.
 """
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -306,6 +357,30 @@ def _find_resting_stop_order(trading_client: TradingClient, symbol: str):
     if not stop_orders:
         return None
     return sorted(stop_orders, key=lambda o: o.submitted_at, reverse=True)[0]
+
+
+def has_resting_protective_stop(trading_client: TradingClient, symbol: str) -> bool:
+    """
+    Shared idempotency check — "does this symbol already have a resting
+    protective stop order" (fill_listener.py milestone, spec v33 §10.5).
+    Extracted out of protect_unprotected_fills()'s own filtering (it used
+    to inline `_find_resting_stop_order(...) is not None`) so that
+    function and fill_listener.py's handle_trade_update() call the
+    IDENTICAL check rather than each reimplementing it — the locked
+    design's explicit reasoning is the same fix pattern as the v32
+    MAX_SINGLE_POSITION_NOTIONAL_PCT drift bug (CLAUDE.md "Current
+      status": two independently-set copies of the same fact silently
+    disagreeing), applied proactively here instead of discovered after
+    the fact.
+
+    Lives in THIS module rather than a new shared module: it is a thin
+    wrapper over _find_resting_stop_order(), which already lives here and
+    is tightly coupled to this module's Alpaca query machinery
+    (GetOrdersRequest, QueryOrderStatus, _is_stop_order) — fill_listener.py
+    imports this function directly instead of a second module needing to
+    duplicate (or re-import piecemeal) that machinery.
+    """
+    return _find_resting_stop_order(trading_client, symbol) is not None
 
 
 def _find_entry_date(trading_client: TradingClient, symbol: str) -> str | None:
@@ -539,6 +614,60 @@ def compute_stop_price_for_entry_date(series, entry_date: str, atr_multiplier: f
     return compute_signal_day_stop_price(series["candles"][idx].close, atr, atr_multiplier)
 
 
+# =============================================================================
+# Track B — client_order_id stop-price handoff (fill_listener.py milestone,
+# spec v33 §10.5 — CLAUDE.md "Current status" is the full locked design).
+# No local position database exists (module docstring convention above), so
+# fill_listener.py's event-driven WebSocket handler has no other way to
+# learn a fill's pre-computed stop price. encode_client_order_id() is
+# called here at entry-submission time (see submit_entry_and_stop());
+# decode_client_order_id() is called by fill_listener.py on every fill
+# event. Both are pure functions, independently unit-testable of any live
+# order submission, per the milestone brief.
+# =============================================================================
+
+CLIENT_ORDER_ID_PREFIX = "tb"
+# Format: tb-{symbol}-{YYYYMMDD}-{stop_price_cents}, e.g. tb-SPY-20260812-45823
+# (locked design's own example). Symbol pattern allows a literal "." for
+# share classes like BRK.B, even though no current Track B universe symbol
+# needs it — cheap to allow, not exercised by the 8-symbol universe today.
+_CLIENT_ORDER_ID_RE = re.compile(r"^tb-([A-Za-z.]+)-(\d{8})-(\d+)$")
+
+
+def encode_client_order_id(symbol: str, signal_date: str, stop_price: float) -> str:
+    """
+    signal_date must be an ISO "YYYY-MM-DD" string — the SAME signal day
+    whose close/ATR compute_signal_day_stop_price() was called with for
+    this stop_price (matches this module's date_index convention, e.g.
+    the `today` value run_daily_execution_job() already uses).
+    stop_price is encoded in CENTS, rounded to the nearest cent — Alpaca
+    stop_price itself is only ever submitted rounded to 2dp (see
+    submit_stop_order()), so no precision is lost by this round-trip.
+    """
+    date_compact = signal_date.replace("-", "")
+    stop_cents = round(stop_price * 100)
+    return f"{CLIENT_ORDER_ID_PREFIX}-{symbol}-{date_compact}-{stop_cents}"
+
+
+def decode_client_order_id(client_order_id: str | None) -> dict | None:
+    """
+    Inverse of encode_client_order_id(). Returns None — never raises —
+    for anything that doesn't match the expected shape (a manually-
+    submitted order, an order from a different client/track, or a
+    missing client_order_id entirely): fill_listener.py's handler must
+    treat a non-matching id as "not a Track B entry order we generated,"
+    not as a parse error to alert on.
+    """
+    if not client_order_id:
+        return None
+    match = _CLIENT_ORDER_ID_RE.match(client_order_id)
+    if not match:
+        return None
+    symbol, date_compact, stop_cents = match.groups()
+    signal_date = f"{date_compact[0:4]}-{date_compact[4:6]}-{date_compact[6:8]}"
+    return {"symbol": symbol, "signal_date": signal_date, "stop_price": int(stop_cents) / 100}
+
+
 def protect_unprotected_fills(trading_client: TradingClient, universe, symbol_data, sleep_fn=time.sleep) -> list[str]:
     """
     Finds any Alpaca position in `universe` that has filled but has NO
@@ -553,8 +682,8 @@ def protect_unprotected_fills(trading_client: TradingClient, universe, symbol_da
     for p in positions:
         if p.symbol not in universe:
             continue
-        if _find_resting_stop_order(trading_client, p.symbol) is not None:
-            continue  # already protected, nothing to do
+        if has_resting_protective_stop(trading_client, p.symbol):
+            continue  # already protected, nothing to do — shared check, see has_resting_protective_stop()
         entry_date = _find_entry_date(trading_client, p.symbol)
         series = symbol_data.get(p.symbol)
         stop_price = compute_stop_price_for_entry_date(series, entry_date) if (entry_date and series) else None
@@ -609,8 +738,16 @@ _GENUINELY_TERMINAL_NO_FILL = {
 _STOP_RETRY_BACKOFF_SECONDS = (5, 15, 30)
 
 
-def submit_entry_market_order(trading_client: TradingClient, symbol: str, qty: float):
-    request = MarketOrderRequest(symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
+def submit_entry_market_order(trading_client: TradingClient, symbol: str, qty: float, client_order_id: str | None = None):
+    """
+    client_order_id defaults to None (Alpaca assigns its own if omitted)
+    so every existing caller/test is unaffected — submit_entry_and_stop()
+    below is the only caller that passes one, per the fill_listener.py
+    milestone's stop-price handoff (encode_client_order_id()).
+    """
+    request = MarketOrderRequest(
+        symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, client_order_id=client_order_id,
+    )
     return trading_client.submit_order(request)
 
 
@@ -705,6 +842,70 @@ def submit_stop_order_with_retry(
     return None
 
 
+def submit_or_resize_stop_order_with_retry(
+    trading_client: TradingClient, symbol: str, qty: float, stop_price: float,
+    backoff_seconds=_STOP_RETRY_BACKOFF_SECONDS, sleep_fn=time.sleep,
+):
+    """
+    fill_listener.py's entry point for protecting a fill (spec v33 §10.5
+    "Handler logic" — partial fills resize the stop to cumulative
+    filled_qty via the existing replace-not-cancel path rather than
+    submitting a new order). Unlike submit_stop_order_with_retry() (used
+    by execution.py's own daily job, where a fresh fill never already has
+    a resting stop), this handles BOTH cases:
+      - no resting stop yet for `symbol` -> delegates to
+        submit_stop_order_with_retry() unchanged (first protection for
+        this fill — covers both a fresh full fill and the FIRST partial
+        of a multi-part fill).
+      - a resting stop already exists -> RESIZES it via Alpaca's PATCH
+        replace (never cancel-then-resubmit, matching this module's
+        existing ratchet-only convention) to the new cumulative qty — the
+        follow-up case when more of a partial fill arrives later.
+    Idempotency: uses the SAME _find_resting_stop_order()/has_resting_
+    protective_stop() check protect_unprotected_fills() uses, so a
+    redelivered/duplicate trade_updates event for a fill already
+    protected at the correct qty is a safe no-op, never a duplicate stop.
+
+    DISCOVERED THIS MILESTONE, confirmed against the installed alpaca-py
+    0.43.5 pydantic models, not assumed: ReplaceOrderRequest.qty is typed
+    Optional[int] — UNLIKE every order-SUBMISSION request's qty field in
+    this same SDK (StopOrderRequest.qty, MarketOrderRequest.qty are both
+    Optional[float]) — so a fractional resize qty raises a pydantic
+    ValidationError before any network call is even attempted. NOT
+    silently rounded here (rounding would misrepresent the actual
+    protected qty by up to a fraction of a share) — the retry loop below
+    fails deterministically on every attempt for a fractional qty and
+    correctly falls through to the same URGENT alert path as any other
+    resize failure, per this module's existing fail-toward-alerting
+    convention. Flagged for the same chat-interface design-call as this
+    module's other two open gaps — not resolved here.
+    """
+    existing = _find_resting_stop_order(trading_client, symbol)
+    if existing is None:
+        return submit_stop_order_with_retry(
+            trading_client, symbol, qty, stop_price, backoff_seconds=backoff_seconds, sleep_fn=sleep_fn,
+        )
+
+    if float(existing.qty) == qty:
+        return existing  # already protected at the correct cumulative qty — redelivered event, safe no-op
+
+    last_error = None
+    for delay in (0,) + tuple(backoff_seconds):
+        if delay:
+            sleep_fn(delay)
+        try:
+            trading_client.replace_order_by_id(existing.id, ReplaceOrderRequest(qty=qty))
+            return trading_client.get_order_by_id(existing.id)
+        except Exception as exc:  # noqa: BLE001 — must never crash the caller, this IS the alerting path
+            last_error = exc
+    telegram_bot.send_message(
+        f"URGENT — UNPROTECTED POSITION: resizing the resting stop for {symbol} to qty {qty} (partial-fill "
+        f"follow-up) failed after {len(backoff_seconds) + 1} attempts (last error: {last_error}). The resting "
+        f"stop may not match the actual filled quantity. Manual intervention required immediately."
+    )
+    return None
+
+
 def replace_stop_order_if_favorable(trading_client: TradingClient, stop_order_id, candidate_stop_price: float, current_stop_price: float) -> bool:
     """
     Ratchet-only replace via Alpaca's order-replace (PATCH), not
@@ -769,7 +970,28 @@ def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrail
     if qty <= 0:
         return TrackBEntryResult(symbol=symbol, submitted=False, filled=False, reason="computed_qty_non_positive")
 
-    entry_order = submit_entry_market_order(trading_client, symbol, qty)
+    # fill_listener.py stop-price handoff (spec v33 §10.5) — encoded
+    # UNCONDITIONALLY, not just for the "pending" branch below, since a
+    # market-hours same-session fill (confirmed synchronously in this
+    # call) is ALSO visible to the listener over the trade_updates
+    # WebSocket. NEWLY FLAGGED, NOT part of the locked design: this
+    # creates a real (if narrow) race between this function's own
+    # unconditional submit_stop_order_with_retry() call below and the
+    # listener's submit_or_resize_stop_order_with_retry() reacting to the
+    # SAME fill concurrently — has_resting_protective_stop()'s check-
+    # then-act pattern reduces the window but is not atomic, so a true
+    # same-instant race could still produce two resting stop orders for
+    # one symbol. Not expected to matter in real production use (real
+    # Track B entries are always submitted post-close, so a genuine
+    # same-session fill essentially never happens — the original
+    # execution.py dry run only saw one because it deliberately forced
+    # an extended-hours fill for testing), but not eliminated by this
+    # implementation either — flagged for the same chat-interface
+    # design-call as this module's other two open gaps.
+    signal_date = candidate["timestamp"][:10]
+    client_order_id = encode_client_order_id(symbol, signal_date, stop_price)
+
+    entry_order = submit_entry_market_order(trading_client, symbol, qty, client_order_id=client_order_id)
     entry_order = poll_order_until_terminal(trading_client, entry_order.id, timeout_seconds=poll_timeout_seconds, sleep_fn=sleep_fn)
     fill = confirm_entry_fill(entry_order)
 
