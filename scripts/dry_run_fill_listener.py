@@ -59,12 +59,51 @@ full trading day, Part 2 hands it synthetic symbol_data containing just
 one candle for today, built from the real fill price — clearly labeled
 synthetic below, not fetched from Alpaca.
 
+PART 3 (top-up + consolidation, added for the second fix-up — spec v33
+§10.5 fix-up commit 95cd7d8, "close the multi-resting-stop gap"): a real
+fill-forcing entry on a THIRD symbol, protected by a REAL first stop
+order (handle_trade_update() called directly, not via a live WebSocket —
+Part 1 already proved the live-WebSocket-delivery path end to end, so
+Part 3 focuses on the TOP-UP/CONSOLIDATION math against real account
+state, not delivery). A genuine broker-side SECOND partial fill can't be
+reliably forced against this paper account for a small, liquid,
+immediately-fillable order (the same reason Part 1/2's orders always
+fill in one shot) — per the milestone brief's explicit fallback, a
+SYNTHETIC second partial-fill trade_update (same client_order_id, a
+higher cumulative filled_qty) is fed directly into handle_trade_update()
+against the REAL resting position instead, exercising the real top-up
+code path (submit_or_resize_stop_order_with_retry()'s "existing stop
+found -> submit an ADDITIVE increment order" branch) with real Alpaca
+API calls. Confirms via a direct GET that exactly TWO real resting stop
+orders now exist, summing to the synthetic cumulative qty. Then calls
+ratchet_position_stop() for real against those two real resting stops,
+with a SYNTHETIC 2-point series (same reasoning as Part 2's synthetic
+symbol_data — today's own daily bar can't exist yet for a same-session
+fill) engineered to (a) trigger a real ratchet improvement and (b) land
+the resulting price safely BELOW the current live quote, so a stop
+order submitted at that price can never be an immediately-triggering
+sell (which a stop price ABOVE the current market would risk). Confirms
+via a direct GET that exactly ONE real resting stop order remains
+afterward, sized to the summed qty, at the new ratcheted price — and
+that this only happened via the "new-before-cancel" sequence (item 1's
+own unit tests already prove the sequencing in isolation; this proves
+the same code path against the real API end to end).
+
+NOTE: the real position only ever holds Part 3's real single-share fill
+— the SECOND "share" in the top-up/consolidation math is entirely
+synthetic (never a real fill), so the resting stop qty (2) intentionally
+exceeds the real position qty (1) for the duration of this test. Safe
+and inert (the stop never triggers during a ~1-minute test window), and
+cleaned up by cancelling every resting stop for the symbol before
+selling the one real share — documented here rather than silently
+glossed over.
+
 Cleans up after itself by default (cancels stops, sells positions) unless
 --no-cleanup is passed.
 
 Usage:
     python scripts/dry_run_fill_listener.py
-    python scripts/dry_run_fill_listener.py --symbol-a SPY --symbol-b QQQ --no-cleanup
+    python scripts/dry_run_fill_listener.py --symbol-a SPY --symbol-b QQQ --symbol-c IWM --no-cleanup
 """
 import argparse
 import asyncio
@@ -72,7 +111,7 @@ import random
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,11 +130,13 @@ from src.data_ingestion import Candle
 from src.execution import (
     _is_stop_order,  # reused for consistent stop-order detection, not reinvented in this script
     ATR_MULTIPLIER,
+    LivePosition,
     confirm_entry_fill,
     encode_client_order_id,
     has_resting_protective_stop,
     poll_order_until_terminal,
     protect_unprotected_fills,
+    ratchet_position_stop,
 )
 from src.fill_listener import MonitoredTradingStream, handle_trade_update
 
@@ -104,10 +145,22 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbol-a", default="SPY", help="symbol for Part 1 (listener live)")
     parser.add_argument("--symbol-b", default="QQQ", help="symbol for Part 2 (restart-safety)")
+    parser.add_argument("--symbol-c", default="IWM", help="symbol for Part 3 (top-up + consolidation)")
     parser.add_argument("--qty", type=float, default=1.0)
     parser.add_argument("--stop-distance", type=float, default=5.0)
     parser.add_argument("--no-cleanup", action="store_true")
     return parser.parse_args()
+
+
+def _cancel_all_resting_stops(client, symbol):
+    """Robust cleanup helper for Part 3, where consolidation may (if something goes wrong) leave more than one resting stop."""
+    orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]))
+    for o in orders:
+        if _is_stop_order(o):
+            try:
+                client.cancel_order_by_id(o.id)
+            except Exception as exc:
+                print(f"   (cleanup) could not cancel stop {o.id} for {symbol}: {exc}")
 
 
 def _submit_fill_forcing_order(client, data_client, symbol, qty, client_order_id):
@@ -117,12 +170,20 @@ def _submit_fill_forcing_order(client, data_client, symbol, qty, client_order_id
         poll_timeout = 120
     else:
         quote = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=[symbol]))[symbol]
-        limit_price = round(quote.ask_price + max(0.50, quote.ask_price * 0.002), 2)
+        # Wider buffer than the original dry-run script's 0.2%/$0.50 —
+        # this session hit a real, transient extended-hours miss (a QQQ
+        # limit order priced off a STALE quote, timestamped from the
+        # PRIOR session's close, sat unfilled) even though the account
+        # clock reported being inside the nominal pre-market window.
+        # Flagged as a live-market-microstructure observation, not a bug
+        # in this script's logic — a wider buffer reduces (does not
+        # eliminate) the chance of a repeat.
+        limit_price = round(quote.ask_price + max(1.00, quote.ask_price * 0.01), 2)
         req = LimitOrderRequest(
             symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
             limit_price=limit_price, extended_hours=True, client_order_id=client_order_id,
         )
-        poll_timeout = 60
+        poll_timeout = 90
     order = client.submit_order(req)
     return order, poll_timeout
 
@@ -314,6 +375,93 @@ def main():
         print(f"   cleaning up {args.symbol_b} ...")
         _cleanup_position(client, data_client, args.symbol_b, stop_order_id=(remaining_stops[0].id if remaining_stops else None))
 
+    # ---------------------------------------------------------------
+    # PART 3: top-up (additive stop) + consolidation, both against REAL
+    # account state — see module docstring's "PART 3" note for the full
+    # methodology and why the second "fill" is synthetic.
+    # ---------------------------------------------------------------
+    print(f"\n--- PART 3: top-up + consolidation, symbol={args.symbol_c} ---")
+    quote_c = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=[args.symbol_c]))[args.symbol_c]
+    stop_price_c = round(quote_c.ask_price - args.stop_distance - random.uniform(0, 0.98), 2)
+    coid_c = encode_client_order_id(args.symbol_c, today_str, stop_price_c)
+    print(f"1. Submitting a real fill-forcing entry for {args.symbol_c}, client_order_id={coid_c} (encodes stop_price={stop_price_c}) ...")
+    entry_order_c, poll_timeout_c = _submit_fill_forcing_order(client, data_client, args.symbol_c, args.qty, coid_c)
+    entry_order_c = poll_order_until_terminal(client, entry_order_c.id, timeout_seconds=poll_timeout_c, poll_interval_seconds=3)
+    fill_c = confirm_entry_fill(entry_order_c)
+    print(f"   fill status={fill_c['status']} filled_qty={fill_c['filled_qty']} filled_avg_price={fill_c['filled_avg_price']}")
+    if not fill_c["filled"]:
+        raise SystemExit(f"FAIL: entry for {args.symbol_c} did not fill ({fill_c['status']}) — cannot validate Part 3.")
+
+    print("2. Protecting the real fill directly via handle_trade_update() (first real stop, stop-1) ...")
+    first_fill_order = SimpleNamespace(
+        symbol=args.symbol_c, side=OrderSide.BUY, filled_qty=fill_c["filled_qty"],
+        filled_avg_price=fill_c["filled_avg_price"], client_order_id=coid_c, status=entry_order_c.status,
+    )
+    first_fill_trade_update = SimpleNamespace(event=TradeEvent.FILL, order=first_fill_order, timestamp=datetime.now(timezone.utc), position_qty=None, price=None, qty=None)
+    handle_trade_update(client, first_fill_trade_update, sleep_fn=time.sleep)
+
+    print("3. Feeding a SYNTHETIC second partial-fill event (cumulative qty +1) — exercises the real TOP-UP path ...")
+    topped_up_qty = fill_c["filled_qty"] + args.qty
+    second_fill_order = SimpleNamespace(
+        symbol=args.symbol_c, side=OrderSide.BUY, filled_qty=topped_up_qty,
+        filled_avg_price=fill_c["filled_avg_price"], client_order_id=coid_c, status=entry_order_c.status,
+    )
+    second_fill_trade_update = SimpleNamespace(event=TradeEvent.PARTIAL_FILL, order=second_fill_order, timestamp=datetime.now(timezone.utc), position_qty=None, price=None, qty=args.qty)
+    topup_result = handle_trade_update(client, second_fill_trade_update, sleep_fn=time.sleep)
+    print(f"   handle_trade_update() (top-up) returned: {topup_result}")
+
+    stops_after_topup = [o for o in client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[args.symbol_c])) if _is_stop_order(o)]
+    topup_qty_sum = sum(float(o.qty) for o in stops_after_topup)
+    print(f"   resting stops for {args.symbol_c} after top-up: {len(stops_after_topup)} (expected 2), summed qty={topup_qty_sum} (expected {topped_up_qty})")
+    part3a_pass = len(stops_after_topup) == 2 and abs(topup_qty_sum - topped_up_qty) < 1e-9 and all(float(o.stop_price) == stop_price_c for o in stops_after_topup)
+
+    print("4. Running ratchet_position_stop() for real against the two real resting stops (CONSOLIDATION) ...")
+    # SYNTHETIC series (today's own daily bar can't exist yet for a
+    # same-session fill — same reasoning as Part 2). Engineered so the
+    # ratchet candidate lands safely BELOW the current live quote (never
+    # an immediately-triggering stop) while still being a clear, visible
+    # improvement over stop_price_c: prior_atr=1.0, ratchet-day close =
+    # fill_price+2 -> candidate = (fill_price+2) - 3*1.0 = fill_price-1.
+    ratchet_day = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    fill_price = fill_c["filled_avg_price"]
+    series = {
+        "symbol": args.symbol_c,
+        "candles": [
+            Candle(args.symbol_c, f"{today_str}T00:00:00", open=fill_price, high=fill_price, low=fill_price, close=fill_price, volume=0),
+            Candle(args.symbol_c, f"{ratchet_day}T00:00:00", open=fill_price, high=fill_price + 2, low=fill_price, close=fill_price + 2, volume=0),
+        ],
+        "atr": [1.0, 1.0],
+        "date_index": {today_str: 0, ratchet_day: 1},
+        "entry_indices": set(),
+    }
+    position_c = LivePosition(
+        symbol=args.symbol_c, qty=fill_c["filled_qty"], entry_price=fill_price, entry_date=today_str,
+        stop_order_id=stops_after_topup[0].id if stops_after_topup else "", stop_price=stop_price_c,
+        risk_amount=0.0, risk_pct=0.0, notional_pct_of_equity=0.0,
+    )
+    expected_consolidated_price = round(fill_price + 2 - 3.0 * 1.0, 2)
+    print(f"   expecting consolidated price ~{expected_consolidated_price} (current quote ~{quote_c.ask_price}, safely below)")
+    consolidated = ratchet_position_stop(client, position_c, series, today=ratchet_day, atr_multiplier=3.0, sleep_fn=time.sleep)
+    print(f"   ratchet_position_stop() returned: {consolidated}")
+
+    stops_after_consolidation = [o for o in client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[args.symbol_c])) if _is_stop_order(o)]
+    print(f"   resting stops for {args.symbol_c} after consolidation: {len(stops_after_consolidation)} (expected exactly 1)")
+    if stops_after_consolidation:
+        consolidated_order = stops_after_consolidation[0]
+        print(f"   consolidated stop: id={consolidated_order.id} qty={consolidated_order.qty} stop_price={consolidated_order.stop_price}")
+        part3b_pass = (
+            consolidated is True and len(stops_after_consolidation) == 1
+            and abs(float(consolidated_order.qty) - topped_up_qty) < 1e-9
+            and float(consolidated_order.stop_price) == expected_consolidated_price
+        )
+    else:
+        part3b_pass = False
+
+    if not args.no_cleanup:
+        print(f"   cleaning up {args.symbol_c} (cancelling ALL resting stops, then selling the one real share) ...")
+        _cancel_all_resting_stops(client, args.symbol_c)
+        _cleanup_position(client, data_client, args.symbol_c, stop_order_id=None)
+
     account_after = client.get_account()
     print(f"\naccount equity after cleanup: ${float(account_after.equity):,.2f}")
 
@@ -321,8 +469,10 @@ def main():
     print(f"Part 1 (listener live, real fill -> real stop within ~15s, correct price): {'PASS' if part1_pass else 'FAIL'}")
     print(f"Part 2a (protect_unprotected_fills() catches a fill the listener missed): {'PASS' if fallback_pass else 'FAIL'}")
     print(f"Part 2b (redelivered event for an already-protected fill is a safe no-op, no double stop): {'PASS' if idempotency_pass else 'FAIL'}")
+    print(f"Part 3a (synthetic second partial fill -> real additive TOP-UP stop, two resting stops summing correctly): {'PASS' if part3a_pass else 'FAIL'}")
+    print(f"Part 3b (ratchet_position_stop() CONSOLIDATES the two real stops into one, correct qty/price): {'PASS' if part3b_pass else 'FAIL'}")
 
-    if not (part1_pass and fallback_pass and idempotency_pass):
+    if not (part1_pass and fallback_pass and idempotency_pass and part3a_pass and part3b_pass):
         raise SystemExit(1)
 
 

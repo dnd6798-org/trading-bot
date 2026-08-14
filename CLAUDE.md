@@ -1191,6 +1191,105 @@ verification (above) was not repeated against this fix-up's code.
    `"elapsed time unknown (no event timestamp)"` rather than fabricating
    a number.
 
+**UPDATE: second fix-up session — multi-stop consolidation implemented,
+live re-verification run, and a CRITICAL, UNRESOLVED problem discovered
+in the process.** 265/265 tests passing (4 net new).
+
+1. **Consolidation implemented as specified.** `build_open_positions()`
+   now uses a new `_find_all_resting_stop_orders()` and takes the WORST
+   (lowest) price across multiple resting stops for its `stop_price`/risk
+   calculation (conservative — never overstates protection).
+   `ratchet_position_stop()` now independently re-queries all resting
+   stops for a symbol; when more than one exists (the top-up model's
+   leftover state), it calls new `_consolidate_resting_stops()` instead
+   of the single-stop PATCH-replace path: submits ONE new stop sized to
+   the SUMMED qty of the old ones at `max(ratchet candidate, worst
+   existing price)`, confirms it's genuinely resting via a fresh API
+   query (`_confirm_order_resting()`), and only THEN cancels the old
+   ones — new-before-cancel, exactly as specified. **Judgment call,
+   flagged:** consolidation is UNCONDITIONAL whenever multiple stops are
+   found, even if the ratchet price itself doesn't improve that cycle —
+   otherwise "never more than one resting stop past the next daily job
+   cycle" would depend on the position continuing to trend favorably
+   every day rather than being a hard guarantee. 4 new unit tests (two-
+   stop consolidation with new-before-cancel call-order proof; old stops
+   left untouched on submission failure; old stops left untouched when
+   the new stop can't be confirmed resting; consolidation still merges
+   even when the ratchet price doesn't improve).
+
+2. **Live re-verification — Parts 1 and 2 both PASS again; Part 3
+   (added this session for the top-up/consolidation path) surfaced a
+   real, load-bearing problem.** `scripts/dry_run_fill_listener.py`
+   extended with a Part 3: a real fill, a real first stop (via
+   `handle_trade_update()` called directly), a SYNTHETIC second
+   partial-fill event to exercise the real TOP-UP path (per the
+   milestone brief's own explicit fallback — a genuine broker-side
+   second partial fill can't be reliably forced on this account for a
+   small, liquid, immediately-fillable order), then a real
+   `ratchet_position_stop()` call against the resulting real resting
+   stops.
+
+   **CRITICAL FINDING, confirmed twice — once inside the script's own
+   run, once in an isolated follow-up experiment specifically to rule
+   out a test-methodology artifact: Alpaca's real held-quantity
+   validation REJECTS the new-before-cancel consolidation submission
+   whenever the existing resting stops already fully cover the real
+   position — exactly the scenario consolidation exists to handle.**
+   Isolated repro: bought 2 real IWM shares, submitted two real resting
+   SELL stops (qty 1 + qty 1, correctly summing to the real 2-share
+   position, both accepted individually) — then submitting a THIRD new
+   SELL stop (qty 2, the consolidated amount) while the first two were
+   still resting was rejected: `"insufficient qty available for order
+   (requested: 2, available: 0)"`, both existing stops listed in
+   `related_orders`. Alpaca will not let a NEW sell order reserve share
+   quantity that OTHER still-open sell orders already hold, even though
+   no shares have actually been sold yet. The single-stop PATCH-replace
+   path is NOT affected (modifying an existing order's own qty in place
+   needs no NEW headroom) — this is specific to the multi-order merge.
+
+   **Also confirmed, informational, NOT implemented:** cancelling all
+   but one old stop FIRST, then PATCH-replacing the survivor's qty+price
+   up to the consolidated values, WAS accepted by the real API in the
+   same follow-up experiment. Not adopted here — it reintroduces a brief
+   real coverage gap for the freed increment (between the cancel and the
+   patch) and `ReplaceOrderRequest.qty`'s `Optional[int]` typing (the
+   exact constraint fix-up #1 replaced the resize path to get away from)
+   resurfaces for any fractional consolidated total.
+
+   **Practical safety, confirmed:** this does NOT silently under-protect
+   a position — `submit_stop_order_with_retry()` inside the consolidation
+   path retries 4 times, fails, and correctly falls through to the
+   existing URGENT alert path; the OLD stops are left resting and
+   untouched throughout (per the fail-toward-alert convention already
+   established for every other stop-submission path in this module).
+   **But consolidation AS DESIGNED will never actually succeed in the
+   scenario it exists for.** Flagged prominently in
+   `_consolidate_resting_stops()`'s own docstring and this file — needs
+   a fresh design-call confirmation on which alternative mechanism to
+   adopt before consolidation should be trusted with live capital. NOT
+   resolved this session, per the standing "flag it, don't guess"
+   convention — the mechanism specified was implemented exactly as
+   asked, tested thoroughly against a fake client (where it passes,
+   since the fake client doesn't model Alpaca's held-quantity
+   validation), and then found to not actually work live.
+
+   Parts 1/2 (unaffected by this finding) both PASS again against
+   current `paper` HEAD: real listener detects a real fill and submits a
+   correctly-priced stop within ~0s (including the routine-success
+   notification firing, confirmed in the live output); a fill submitted
+   with the listener down is correctly picked up by
+   `protect_unprotected_fills()`, and a redelivered event for that
+   already-protected fill is confirmed a safe no-op. One incidental,
+   real-market observation from this run (not a code bug): an
+   extended-hours limit order missed its fill once on a stale quote
+   despite the account clock reporting the pre-market window as open —
+   the script's marketable-limit buffer was widened (0.2%/$0.50 →
+   1%/$1.00) as a mitigation, not a fix for anything in `execution.py`/
+   `fill_listener.py` itself. Account left flat after every part,
+   verified via direct GET (0 positions, 0 open orders) — including
+   after the two manual follow-up isolation experiments run outside the
+   script itself.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
