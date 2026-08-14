@@ -121,6 +121,7 @@ class FakeTradingClient:
         self.submit_order_fn = None
         self.get_order_by_id_fn = None
         self.cancel_order_by_id_fn = None
+        self.replace_order_by_id_fn = None
         self.orders_by_request = None  # optional callable(filter) -> list[FakeOrder]
         self.positions = []
         self.account = FakeAccount(equity=10_000.0, last_equity=10_000.0)
@@ -139,6 +140,8 @@ class FakeTradingClient:
 
     def replace_order_by_id(self, order_id, order_data=None):
         self.replace_calls.append((order_id, order_data))
+        if self.replace_order_by_id_fn is not None:
+            return self.replace_order_by_id_fn(order_id, order_data)
         return FakeOrder(id=order_id, status=OrderStatus.NEW)
 
     def cancel_order_by_id(self, order_id):
@@ -396,6 +399,108 @@ def test_ratchet_position_stop_returns_false_when_no_resting_stop_improves():
     assert client.submitted_orders == []
     assert client.cancel_calls == []
     assert client.replace_calls == []
+
+
+# --- ratchet_position_stop: per-stop error isolation (fix-up item 4) -------
+
+def test_ratchet_position_stop_multi_stop_all_succeed_is_unchanged_from_before_fixup(captured_telegram_messages):
+    # Baseline: when every per-order replace call succeeds (no exception),
+    # behavior/logging must be identical to before this fix-up — both
+    # stops replaced, no Telegram summary sent at all.
+    dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
+    series = _series(dates, closes=[100, 110, 105], atrs=[1.0, 2.0, 50.0])
+    position = LivePosition(
+        symbol="SPY", qty=8.0, entry_price=100.0, entry_date="2026-08-03",
+        stop_order_id="stop-1", stop_price=96.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
+    )
+    client = FakeTradingClient()
+    resting = [
+        FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=97.0),
+        FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=96.0),
+    ]
+    client.orders_by_request = lambda filter: list(resting)
+
+    result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
+
+    # extreme_close=110, prior_atr=atr[1]=2.0 -> candidate = 104, above both 97.0 and 96.0 -> both replaced.
+    assert result is True
+    assert len(client.replace_calls) == 2
+    assert captured_telegram_messages == []  # no summary when nothing failed
+
+
+def test_ratchet_position_stop_multi_stop_partial_failure_still_attempts_and_applies_the_other(captured_telegram_messages):
+    # stop-1's replace raises; stop-2 must still be attempted and actually
+    # replaced — a failure earlier in the loop must not abort the rest.
+    dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
+    series = _series(dates, closes=[100, 110, 105], atrs=[1.0, 2.0, 50.0])
+    position = LivePosition(
+        symbol="SPY", qty=8.0, entry_price=100.0, entry_date="2026-08-03",
+        stop_order_id="stop-1", stop_price=96.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
+    )
+    client = FakeTradingClient()
+    resting = [
+        FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=97.0),
+        FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=96.0),
+    ]
+    client.orders_by_request = lambda filter: list(resting)
+
+    def replace_order_by_id(order_id, order_data):
+        if order_id == "stop-1":
+            raise RuntimeError("cannot replace order in accepted status")
+        return FakeOrder(id=order_id, status=OrderStatus.NEW)
+    client.replace_order_by_id_fn = replace_order_by_id
+
+    # extreme_close=110, prior_atr=atr[1]=2.0 -> candidate = 104, above both 97.0 and 96.0.
+    result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
+
+    # Both orders attempted despite stop-1's failure.
+    assert {order_id for order_id, _ in client.replace_calls} == {"stop-1", "stop-2"}
+    # stop-2's replace actually went through — the PATCH call for it carried the new price.
+    stop_2_calls = [req for order_id, req in client.replace_calls if order_id == "stop-2"]
+    assert len(stop_2_calls) == 1
+    assert stop_2_calls[0].stop_price == 104.0
+    # At least one stop ratcheted -> True, not masked by the other's failure.
+    assert result is True
+
+    # Non-urgent (NOT the existing URGENT/UNPROTECTED alert path) summary sent.
+    assert len(captured_telegram_messages) == 1
+    summary = captured_telegram_messages[0]
+    assert "URGENT" not in summary
+    assert "UNPROTECTED" not in summary
+    assert "SPY" in summary
+    assert "stop-2" in summary and "104.0" in summary  # the successful one, ratcheted to the new price
+    assert "stop-1" in summary and "97.0" in summary and "cannot replace order in accepted status" in summary  # the failed one, still at its old price, with its error
+
+
+def test_ratchet_position_stop_multi_stop_all_fail_reports_zero_successes(captured_telegram_messages):
+    # Both replace calls raise -> no stop actually moves, result is False,
+    # but the same non-urgent summary mechanism still fires (zero
+    # successes reported, not silently swallowed).
+    dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
+    series = _series(dates, closes=[100, 110, 105], atrs=[1.0, 2.0, 50.0])
+    position = LivePosition(
+        symbol="SPY", qty=8.0, entry_price=100.0, entry_date="2026-08-03",
+        stop_order_id="stop-1", stop_price=96.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
+    )
+    client = FakeTradingClient()
+    resting = [
+        FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=97.0),
+        FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=96.0),
+    ]
+    client.orders_by_request = lambda filter: list(resting)
+    client.replace_order_by_id_fn = lambda order_id, order_data: (_ for _ in ()).throw(RuntimeError(f"broker rejected {order_id}"))
+
+    result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
+
+    assert {order_id for order_id, _ in client.replace_calls} == {"stop-1", "stop-2"}  # both still attempted
+    assert result is False  # nothing actually ratcheted
+
+    assert len(captured_telegram_messages) == 1
+    summary = captured_telegram_messages[0]
+    assert "URGENT" not in summary
+    assert "0 of 2" in summary  # zero successes, explicitly reported, not omitted
+    assert "stop-1" in summary and "broker rejected stop-1" in summary
+    assert "stop-2" in summary and "broker rejected stop-2" in summary
 
 
 def test_replace_stop_order_if_favorable_never_calls_replace_when_not_favorable():

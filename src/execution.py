@@ -273,18 +273,23 @@ legitimately carry N independently-ratcheted resting stops for its
 entire holding period, and that is an accepted, permanent state, not a
 leftover to be cleaned up.
 
-*** FLAGGED, NOT RESOLVED (new edge case surfaced by this replacement,
-not present in the single-stop path): a partial-replace-failure mid-loop
-is possible — e.g. one resting stop's PATCH succeeds and a later one for
-the SAME symbol raises. The loop does not catch per-order exceptions and
-does not roll back an earlier successful replace; the exception
-propagates to run_daily_execution_job()'s per-position try/except, whose
-alert text ("existing resting stop unchanged") would then be
-INACCURATE for this position — one stop may have moved, another may not
-have. This is a real, honest possibility, not silently handled or
-assumed safe — flagged for a design call (e.g., should the alert
-distinguish partial success, should a partial failure retry just the
-failed order) rather than guessed at here.
+FIX-UP #4 (per-stop error isolation — closes the gap FIX-UP #3 left
+open): FIX-UP #3's loop did not catch per-order exceptions, so a
+partial-replace-failure mid-loop (one resting stop's PATCH succeeds, a
+later one for the SAME symbol raises) would abort the remaining stops
+and propagate to run_daily_execution_job()'s per-position try/except,
+whose alert text ("existing resting stop unchanged") is INACCURATE for
+a partial success. Fixed: each per-order replace call in ratchet_
+position_stop()'s multi-stop branch is now wrapped in its own try/
+except — every resting stop is always attempted regardless of an
+earlier one's outcome. A partial or total per-stop failure is
+deliberately NOT escalated through the outer per-position try/except
+(build_open_positions()'s worst-price rule already means the symbol is
+exactly as protected as before the attempt, and tomorrow's ratchet pass
+retries automatically) — instead ratchet_position_stop() sends its own
+non-urgent Telegram summary directly (_send_ratchet_failure_summary()),
+naming which order(s) ratcheted and which remain at their old price with
+the error hit, so the failure stays visible without paging a human.
 """
 import re
 import time
@@ -1089,13 +1094,24 @@ def ratchet_position_stop(
     accepted, permanent state now, not a leftover to be collapsed (see
     module docstring FIX-UP #3 for why the collapse attempt was removed).
 
-    *** FLAGGED, NOT RESOLVED: per-order replace calls in the loop below
-    are not individually wrapped — if one resting stop's PATCH succeeds
-    and a later one for the same symbol raises, the exception propagates
-    to the caller (run_daily_execution_job()'s per-position try/except),
-    whose alert text assumes an all-or-nothing failure and would be
-    inaccurate for a partial success. Not silently handled here — see
-    module docstring for the full callout.
+    FIX-UP #4 (per-stop error isolation — closes the gap FIX-UP #3 left
+    open): each resting stop's replace call below is wrapped in its OWN
+    try/except, so one stop's failure no longer aborts the remaining
+    stops for the same symbol — every resting stop is always attempted.
+    Because build_open_positions()'s worst-price rule already means the
+    symbol is exactly as protected after a partial (or total) failure as
+    it was before this ratchet attempt (an unreplaced stop simply keeps
+    its prior, still-valid price), a per-stop failure is deliberately NOT
+    escalated through run_daily_execution_job()'s existing per-position
+    try/except (whose alert text assumes all-or-nothing and would
+    misdescribe a partial success) — instead this function sends its own
+    single, non-urgent Telegram summary (see _send_ratchet_failure_
+    summary()) naming which order(s) ratcheted to the new price and which
+    remain at their old price with the error hit. Not urgent: tomorrow's
+    ratchet pass will retry the stragglers automatically, unprompted. If
+    every stop in the loop succeeds (regardless of whether any candidate
+    was actually favorable enough to replace), no summary is sent and
+    behavior is unchanged from before this fix-up.
     """
     as_of_idx = series["date_index"].get(today)
     if as_of_idx is None:
@@ -1117,11 +1133,46 @@ def ratchet_position_stop(
 
     worst_current_price = min(float(o.stop_price) for o in resting_stops)
     candidate_stop = compute_ratcheted_stop_price(extreme_close, prior_atr, atr_multiplier, worst_current_price)
-    changed = False
+    results = []
     for order in resting_stops:
-        if replace_stop_order_if_favorable(trading_client, order.id, candidate_stop, float(order.stop_price)):
-            changed = True
-    return changed
+        old_price = float(order.stop_price)
+        try:
+            replaced = replace_stop_order_if_favorable(trading_client, order.id, candidate_stop, old_price)
+            results.append({"order_id": order.id, "old_price": old_price, "replaced": replaced, "error": None})
+        except Exception as exc:  # noqa: BLE001 — one stop's replace failure must not block ratcheting the rest of this symbol's resting stops
+            results.append({"order_id": order.id, "old_price": old_price, "replaced": False, "error": str(exc)})
+
+    if any(r["error"] is not None for r in results):
+        _send_ratchet_failure_summary(position.symbol, candidate_stop, results)
+
+    return any(r["replaced"] for r in results)
+
+
+def _send_ratchet_failure_summary(symbol: str, candidate_stop: float, results: list) -> None:
+    """
+    Non-urgent Telegram summary for ratchet_position_stop()'s multi-stop
+    branch (fix-up item 4) when one or more — up to all — per-order
+    replace calls failed. Deliberately NOT the URGENT alert path: see
+    that function's own docstring for why (build_open_positions()'s
+    worst-price rule means the symbol is exactly as protected as before
+    this ratchet attempt, and tomorrow's pass retries automatically).
+    Always sent whenever any failure occurred, including when EVERY stop
+    failed (zero successes) — so a persistent pattern (e.g. every replace
+    for a symbol failing every day) stays visible in whatever this
+    module's only reporting sink (telegram_bot.send_message()) records,
+    even though it never pages a human.
+    """
+    succeeded = [r for r in results if r["error"] is None and r["replaced"]]
+    failed = [r for r in results if r["error"] is not None]
+    succeeded_desc = ", ".join(f"{r['order_id']} ({r['old_price']} -> {candidate_stop})" for r in succeeded) or "none"
+    failed_desc = ", ".join(f"{r['order_id']} (stays at {r['old_price']}, error: {r['error']})" for r in failed) or "none"
+    telegram_bot.send_message(
+        f"execution.py: stop-ratchet for {symbol} — {len(succeeded)} of {len(results)} resting stop(s) ratcheted "
+        f"to {candidate_stop}, {len(failed)} failed. Ratcheted: {succeeded_desc}. NOT ratcheted (unchanged price, "
+        f"error): {failed_desc}. Not urgent — {symbol} is exactly as protected as before this ratchet attempt "
+        f"(build_open_positions()'s worst-price rule), and tomorrow's ratchet pass will retry the stragglers "
+        f"automatically."
+    )
 
 
 def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrails, sleep_fn=time.sleep, poll_timeout_seconds=60) -> TrackBEntryResult:

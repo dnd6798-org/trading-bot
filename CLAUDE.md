@@ -1375,6 +1375,47 @@ guessed at or silently patched here — needs its own design call (e.g.
 should the alert distinguish partial success, should a partial failure
 retry just the failed order) before being trusted with live capital.
 
+**UPDATE (fourth fix-up, same milestone): this exact flagged gap is now
+CLOSED — per-stop error isolation with accurate partial-success
+reporting, per a locked design given separately, not invented here.**
+Each per-order `replace_stop_order_if_favorable()` call inside
+`ratchet_position_stop()`'s multi-stop branch is now wrapped in its own
+try/except (a plain Python loop change, `_consolidate_resting_stops()`-
+style new-before-cancel machinery is NOT reintroduced) — every resting
+stop for the symbol is always attempted regardless of an earlier one's
+outcome, and a per-order result (order id, old price, replaced True/
+False, error or `None`) is collected for all of them. If nothing failed,
+behavior is byte-for-byte unchanged from before this fix-up (no Telegram
+message sent). If one or more failed (up to all): the outer per-position
+try/except's URGENT-alert-shaped path in `run_daily_execution_job()` is
+deliberately NOT reached — the multi-stop branch never raises now, so
+that outer handler's all-or-nothing text can no longer misdescribe a
+partial success. Instead a single, non-urgent summary is sent directly
+from a new `_send_ratchet_failure_summary()`, naming which order(s)
+ratcheted to the new price and which remain at their old price with the
+specific error hit — reasoning: `build_open_positions()`'s worst-price
+rule already means the symbol is exactly as protected after a partial
+failure as it was before the attempt, and tomorrow's ratchet pass
+retries the stragglers automatically, so nothing here needs to page a
+human. The all-fail case uses the identical summary path (reporting "0
+of N" ratcheted rather than being silently swallowed), so a persistent
+per-symbol failure pattern stays visible in whatever channel `telegram_
+bot.send_message()` records, even though it's deliberately never
+URGENT. 3 new tests in `tests/test_execution.py` (all-succeed —
+confirms zero Telegram messages and unchanged behavior; partial-failure
+— confirms BOTH orders are attempted despite the first raising, confirms
+the surviving order's replace call actually carried the new price,
+confirms the summary names the successful order with its new price and
+the failed order with its old price and exact error text; all-fail —
+confirms both orders still attempted, confirms the summary explicitly
+reports "0 of 2", confirms neither error is dropped), plus a new
+`replace_order_by_id_fn` hook added to the test suite's `FakeTradingClient`
+so a test can make a specific order id's replace call raise. Full suite:
+**267/267 passing** (264 + 3). No live re-run performed for this
+fix-up, per instruction — this is error-handling structure around a
+replace primitive whose live behavior was already verified in the prior
+fix-up's re-run, not new order-submission behavior.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
