@@ -1124,6 +1124,73 @@ both PASS:**
 A bracket-order gap; `data_ingestion.py`'s live/streaming fetch; spec
 §3.2 journaling persistence. This milestone did not touch any of those.
 
+**UPDATE: fix-up session, three items, all pre-decided (not open
+questions) — EXECUTED.** 261/261 tests passing (7 net new over the prior
+254: several rewritten, one obsoleted, several added). No re-run of the
+live paper-account integration/restart-safety script this session —
+scope was explicitly the automated suite; the original milestone's live
+verification (above) was not repeated against this fix-up's code.
+
+1. **Fractional-qty partial-fill resize — replaced, not left as a
+   fail-toward-alert gap.** `ReplaceOrderRequest.qty` being `Optional[int]`
+   is a limitation of the SDK's replace/PATCH path specifically — Alpaca's
+   order-submission endpoint supports fractional qty on stop orders
+   directly (confirmed against Alpaca's fractional-trading docs, which
+   cover market/limit/stop/stop-limit). `submit_or_resize_stop_order_
+   with_retry()` no longer attempts a PATCH replace at all for a
+   partial-fill follow-up — it submits a SECOND, ADDITIVE stop order at
+   the same stop price, sized to just the newly-filled increment
+   (cumulative `filled_qty` minus qty already covered by every resting
+   stop for the symbol, via new `_sum_resting_stop_qty()`). Two resting
+   stops at the same price for one symbol is an accepted, safe outcome —
+   confirmed as instructed, not independently re-litigated: if the first
+   fills and closes the position, the second is rejected by the broker as
+   an oversell (no margin/shorting on this account), not silently
+   mis-executed. Return contract changed to `(order, qty_submitted)` —
+   `qty_submitted` is 0.0 for a genuine no-op (redelivered event), which
+   item 3's notification gate depends on. **Flagged, NOT resolved by this
+   fix-up:** `build_open_positions()`/`ratchet_position_stop()` still
+   assume exactly one resting stop per symbol — if a partial fill ever
+   actually produces two, the daily ratchet only ratchets whichever one
+   `_find_resting_stop_order()`'s most-recent-first sort happens to pick,
+   silently leaving the other stop at its original, increasingly-stale
+   price. A genuinely new gap, surfaced by this fix-up, needing its own
+   design call — not guessed at here.
+
+2. **The `submit_entry_and_stop()` race — closed, not just documented.**
+   Its stop-submission step now gates on `has_resting_protective_stop()`
+   — the SAME shared check `protect_unprotected_fills()` and the
+   listener's `submit_or_resize_stop_order_with_retry()` both use — before
+   submitting; if a resting stop already exists (the listener won the
+   race), it uses that instead of submitting a duplicate. All three
+   stop-submission paths in `execution.py` now gate on the identical
+   function. Same honest caveat as every other check-then-act use of this
+   pattern already in this module: this closes the race to the same
+   degree `protect_unprotected_fills()` and the listener already close it
+   for each other (not via a distributed lock) — a true same-instant race
+   remains theoretically possible, just no more so here than anywhere
+   else this pattern is relied on.
+
+3. **Routine-success Telegram notification — did NOT already exist,
+   ADDED this session.** Before this fix-up, `handle_trade_update()` only
+   ever sent a message on FAILURE (the URGENT alert inside
+   `submit_stop_order_with_retry()`) — a successful protect was
+   completely silent, confirmed by reading the code before answering
+   rather than assumed. Now fires a single, non-urgent message whenever
+   a call ACTUALLY submits or tops up a stop (`qty_submitted > 0` — a
+   genuine no-op, e.g. a redelivered event, does NOT re-notify). Message
+   format, confirmed against a live test assertion:
+   `"fill_listener: protected {symbol} — qty {qty_submitted} @ stop
+   {stop_price}, {elapsed:.1f}s after fill event."` — e.g. `"fill_
+   listener: protected SPY — qty 10.0 @ stop 435.0, 2.5s after fill
+   event."` For a top-up, `qty_submitted` is the INCREMENT just protected,
+   not the fill's full cumulative qty (e.g. `"qty 3.0"` for an 8.0-qty
+   partial fill topping up an existing 5.0-qty stop). Elapsed time is
+   computed from `trade_update.timestamp` (the event's own timestamp
+   field) to now; if the event carries no timestamp, the message says
+   `"elapsed time unknown (no event timestamp)"` rather than fabricating
+   a number.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market

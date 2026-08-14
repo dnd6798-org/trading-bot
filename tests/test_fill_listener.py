@@ -19,18 +19,20 @@ per the milestone brief ("an integration test against the paper account"
 / "a restart-safety test"), not meant to run as part of the automated suite.
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from alpaca.trading.enums import OrderSide, OrderStatus, OrderType, TradeEvent
+from alpaca.trading.requests import StopOrderRequest
 from alpaca.trading.stream import TradingStream
 
 from src import telegram_bot
-from src.execution import encode_client_order_id
+from src.execution import ATR_MULTIPLIER, encode_client_order_id, submit_entry_and_stop
 from src.fill_listener import MonitoredTradingStream, handle_trade_update
 
-from tests.test_execution import FakeOrder, FakeTradingClient
+from tests.test_execution import FakeOrder, FakeTradingClient, _approved_decision, _guardrails, _no_sleep
 
 
 @pytest.fixture(autouse=True)
@@ -142,8 +144,8 @@ def _order(symbol="SPY", side=OrderSide.BUY, filled_qty=10.0, client_order_id=No
     )
 
 
-def _trade_update(event=TradeEvent.FILL, order=None):
-    return SimpleNamespace(event=event, order=order or _order(), timestamp=None, position_qty=None, price=None, qty=None)
+def _trade_update(event=TradeEvent.FILL, order=None, timestamp=None):
+    return SimpleNamespace(event=event, order=order or _order(), timestamp=timestamp, position_qty=None, price=None, qty=None)
 
 
 def test_handle_trade_update_ignores_non_fill_events():
@@ -213,7 +215,7 @@ def test_handle_trade_update_ignores_zero_filled_qty():
     assert client.submitted_orders == []
 
 
-# --- handle_trade_update: the real protection path --------------------------
+# --- handle_trade_update: the real protection path (TOP-UP model, fix-up) --
 
 def test_handle_trade_update_protects_a_genuine_buy_fill():
     stop_price = 435.0
@@ -229,11 +231,12 @@ def test_handle_trade_update_protects_a_genuine_buy_fill():
     assert result["symbol"] == "SPY"
     assert result["filled_qty"] == 10.0
     assert result["stop_price"] == stop_price
+    assert result["qty_submitted"] == 10.0
     assert len(client.submitted_orders) == 1
     assert client.submitted_orders[0].stop_price == stop_price
 
 
-def test_handle_trade_update_partial_fill_resizes_an_existing_stop():
+def test_handle_trade_update_partial_fill_tops_up_with_an_additive_stop():
     stop_price = 435.0
     order = _order(filled_qty=8.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
     trade_update = _trade_update(event=TradeEvent.PARTIAL_FILL, order=order)
@@ -241,20 +244,23 @@ def test_handle_trade_update_partial_fill_resizes_an_existing_stop():
     client.orders_by_request = lambda filter: [
         FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=stop_price)
     ]
-    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.NEW, qty=8.0, stop_price=stop_price)
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price)
 
     result = handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
 
     assert result["action"] == "protected"
-    assert client.submitted_orders == []  # resized via PATCH, never resubmitted
-    assert len(client.replace_calls) == 1
-    assert client.replace_calls[0][1].qty == 8
+    assert result["qty_submitted"] == 3.0  # the increment (8.0 - 5.0), not the full 8.0
+    assert client.replace_calls == []  # never a replace
+    assert len(client.submitted_orders) == 1  # exactly one NEW, additive stop order
+    assert client.submitted_orders[0].qty == 3.0
+    assert client.submitted_orders[0].stop_price == stop_price  # same price as stop-1
 
 
 def test_handle_trade_update_redelivered_event_for_an_already_protected_fill_is_a_noop():
     # Idempotency: a redelivered/duplicate trade_updates event for a fill
     # already protected at the correct cumulative qty must not resubmit
-    # or replace anything.
+    # or top up anything, and must NOT fire a routine-success notification
+    # (fix-up item 3 — only a REAL submit/top-up should notify).
     stop_price = 435.0
     order = _order(filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
     trade_update = _trade_update(event=TradeEvent.FILL, order=order)
@@ -266,5 +272,124 @@ def test_handle_trade_update_redelivered_event_for_an_already_protected_fill_is_
     result = handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
 
     assert result["action"] == "protected"
+    assert result["qty_submitted"] == 0.0
     assert client.submitted_orders == []
     assert client.replace_calls == []
+
+
+# --- handle_trade_update: routine-success Telegram notification (fix-up
+# item 3 — visibility this milestone is for; not merely inferred silence) ---
+
+def test_handle_trade_update_fires_a_routine_success_notification_on_a_fresh_protect(captured_telegram_messages):
+    stop_price = 435.0
+    fill_time = datetime.now(timezone.utc) - timedelta(seconds=2.5)
+    order = _order(filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order, timestamp=fill_time)
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
+
+    routine = [m for m in captured_telegram_messages if m.startswith("fill_listener: protected")]
+    assert len(routine) == 1
+    msg = routine[0]
+    assert "SPY" in msg
+    assert "qty 10.0" in msg
+    assert "stop 435.0" in msg
+    assert "s after fill event" in msg
+    assert "URGENT" not in msg  # routine, non-urgent — distinct from the failure alert path
+
+
+def test_handle_trade_update_notification_reports_the_topup_increment_not_the_full_cumulative_qty(captured_telegram_messages):
+    stop_price = 435.0
+    order = _order(filled_qty=8.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
+    trade_update = _trade_update(event=TradeEvent.PARTIAL_FILL, order=order, timestamp=datetime.now(timezone.utc))
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [
+        FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=stop_price)
+    ]
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
+
+    routine = [m for m in captured_telegram_messages if m.startswith("fill_listener: protected")]
+    assert len(routine) == 1
+    assert "qty 3.0" in routine[0]  # the increment, not 8.0
+
+
+def test_handle_trade_update_no_notification_when_the_event_carries_no_timestamp(captured_telegram_messages):
+    # _trade_update()'s default timestamp is None (e.g. a test double, or
+    # an SDK edge case) — must report "unknown", never crash or fabricate
+    # an elapsed value.
+    stop_price = 435.0
+    order = _order(filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order, timestamp=None)
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
+
+    routine = [m for m in captured_telegram_messages if m.startswith("fill_listener: protected")]
+    assert len(routine) == 1
+    assert "elapsed time unknown" in routine[0]
+
+
+def test_handle_trade_update_no_notification_on_a_redelivered_noop_event(captured_telegram_messages):
+    stop_price = 435.0
+    order = _order(filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order, timestamp=datetime.now(timezone.utc))
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [
+        FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=10.0, stop_price=stop_price)
+    ]
+
+    handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
+
+    assert captured_telegram_messages == []
+
+
+# --- cross-path race closure (fix-up item 2): submit_entry_and_stop() vs.
+# the listener reacting to the SAME fill "concurrently" ---------------------
+
+def test_near_simultaneous_fill_and_listener_event_produce_only_one_stop_order():
+    # True thread-level concurrency isn't reproducible in a synchronous
+    # unit test — this simulates the race by running whichever path
+    # "wins" first (the listener, here, via handle_trade_update()), then
+    # running submit_entry_and_stop() against the SAME account state
+    # (a shared, stateful FakeTradingClient) and confirming it detects
+    # the already-resting stop and skips its own submission.
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    expected_stop_price = 450.0 - ATR_MULTIPLIER * 5.0
+    coid = encode_client_order_id("SPY", "2026-08-10", expected_stop_price)
+
+    client = FakeTradingClient()
+    stop_orders_submitted = []
+
+    def submit_order(req):
+        if isinstance(req, StopOrderRequest):
+            stop_order = FakeOrder(id=f"stop-{len(stop_orders_submitted) + 1}", symbol="SPY", status=OrderStatus.NEW,
+                                    order_type=OrderType.STOP, qty=req.qty, stop_price=req.stop_price)
+            stop_orders_submitted.append(stop_order)
+            return stop_order
+        return FakeOrder(id="entry-1", status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+
+    client.submit_order_fn = submit_order
+    client.orders_by_request = lambda filter: list(stop_orders_submitted)  # reflects real, current state
+    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+
+    # "The listener wins the race": it reacts to the fill first.
+    listener_order = _order(filled_qty=10.0, client_order_id=coid)
+    listener_trade_update = _trade_update(event=TradeEvent.FILL, order=listener_order)
+    listener_result = handle_trade_update(client, listener_trade_update, sleep_fn=_no_sleep)
+    assert listener_result["action"] == "protected"
+    assert len(stop_orders_submitted) == 1
+
+    # "submit_entry_and_stop() reacts to the SAME fill moments later" —
+    # must detect the listener already protected it, not double-submit.
+    result = submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    assert result.filled is True
+    assert result.stop_order_submitted is True  # protected — just not by this call
+    assert len(stop_orders_submitted) == 1  # still only one stop order total, no duplicate

@@ -516,6 +516,41 @@ def test_submit_entry_and_stop_no_fill_does_not_submit_a_stop():
     assert len(client.submitted_orders) == 1  # only the entry attempt, never a stop
 
 
+def test_submit_entry_and_stop_skips_stop_submission_when_a_resting_stop_already_exists(captured_telegram_messages):
+    # Fix-up item 2: closes the race between this function's own stop
+    # submission and fill_listener.py's handler reacting to the SAME fill
+    # concurrently — simulates "the listener won the race" by seeding a
+    # resting stop for SPY BEFORE this call ever gets to its own stop step.
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [
+        FakeOrder(id="stop-from-listener", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=10.0, stop_price=435.0)
+    ]
+
+    def submit_order(req):
+        assert not isinstance(req, StopOrderRequest), "must not submit a duplicate stop when one already rests"
+        return FakeOrder(id="entry-1", status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+    client.submit_order_fn = submit_order
+    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+
+    result = submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    assert result.filled is True
+    assert result.stop_order_submitted is True  # protected — just not BY this call
+    assert len(client.submitted_orders) == 1  # only the entry — no duplicate stop
+    assert captured_telegram_messages == []  # not a failure, nothing to alert on
+
+
+def test_submit_entry_and_stop_shares_the_has_resting_protective_stop_check():
+    # Regression guard, same category as the protect_unprotected_fills()
+    # source-inspection guard above: proves submit_entry_and_stop() gates
+    # on the SAME shared function, not a private reimplementation.
+    import inspect
+    from src import execution
+    source = inspect.getsource(execution.submit_entry_and_stop)
+    assert "has_resting_protective_stop(" in source
+
+
 # --- generate_daily_candidates: universe-order tie-break, skip open symbols -
 
 def test_generate_daily_candidates_skips_symbols_already_open():
@@ -773,69 +808,81 @@ def test_protect_unprotected_fills_and_listener_share_the_same_idempotency_check
     assert "has_resting_protective_stop(" in source
 
 
+# --- submit_or_resize_stop_order_with_retry: TOP-UP model (fix-up,
+# replaces the original PATCH-replace-qty design — ReplaceOrderRequest.qty
+# is Optional[int] in the installed SDK, so a fractional resize can't go
+# through PATCH at all; StopOrderRequest.qty IS fractional-capable and
+# Alpaca's fractional-trading docs confirm stop orders are supported
+# directly) --------------------------------------------------------------
+
 def test_submit_or_resize_stop_order_with_retry_submits_when_no_existing_stop():
     client = FakeTradingClient()
     client.orders_by_request = lambda filter: []  # no resting stop
     client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
 
-    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
 
-    assert result.id == "stop-1"
+    assert order.id == "stop-1"
+    assert qty_submitted == 10.0
     assert len(client.submitted_orders) == 1
     assert isinstance(client.submitted_orders[0], StopOrderRequest)
+    assert client.submitted_orders[0].qty == 10.0
 
 
-def test_submit_or_resize_stop_order_with_retry_is_a_noop_when_qty_already_matches():
+def test_submit_or_resize_stop_order_with_retry_is_a_noop_when_qty_already_covered():
     client = FakeTradingClient()
     client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=10.0, stop_price=435.0)]
 
-    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
 
-    assert result.id == "stop-1"
+    assert order.id == "stop-1"
+    assert qty_submitted == 0.0
     assert client.submitted_orders == []  # no new order submitted
-    assert client.replace_calls == []  # no replace attempted either — a true no-op
+    assert client.replace_calls == []  # replace path no longer exists at all
 
 
-def test_submit_or_resize_stop_order_with_retry_replaces_qty_via_patch_when_cumulative_qty_grows():
+def test_submit_or_resize_stop_order_with_retry_tops_up_with_an_additive_stop_for_the_increment_only():
+    client = FakeTradingClient()
+    # 5.0 already resting (a first partial fill); a second partial takes
+    # the cumulative fill to 10.0 -> the increment (5.0) must be submitted
+    # as a NEW, SEPARATE stop order, never a replace of the first.
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+
+    assert order.id == "stop-2"
+    assert qty_submitted == 5.0
+    assert client.replace_calls == []  # never a replace
+    assert len(client.submitted_orders) == 1  # exactly one NEW order — the increment
+    assert client.submitted_orders[0].qty == 5.0
+    assert client.submitted_orders[0].stop_price == 435.0  # SAME stop price as the first (accepted: two resting stops at one price)
+
+
+def test_submit_or_resize_stop_order_with_retry_supports_a_fractional_topup_increment():
+    # This is the direct proof the fix-up actually resolves the original
+    # ReplaceOrderRequest.qty=Optional[int] limitation: a fractional
+    # increment must now succeed, not fail toward alert.
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.25, stop_price=435.0)]
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
+
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 10.7, 435.0, sleep_fn=_no_sleep)
+
+    assert order is not None
+    assert abs(qty_submitted - 5.45) < 1e-9
+    assert abs(client.submitted_orders[0].qty - 5.45) < 1e-9
+
+
+def test_submit_or_resize_stop_order_with_retry_exhausts_retries_and_alerts_on_topup_failure(captured_telegram_messages):
     client = FakeTradingClient()
     client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
-    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.NEW, qty=10.0, stop_price=435.0)
+    client.submit_order_fn = lambda req: (_ for _ in ()).throw(RuntimeError("broker rejected stop order"))
 
-    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
 
-    assert result.id == "stop-1"
-    assert client.submitted_orders == []  # replace-not-cancel: never a fresh submit
-    assert len(client.replace_calls) == 1
-    replaced_order_id, replace_request = client.replace_calls[0]
-    assert replaced_order_id == "stop-1"
-    assert replace_request.qty == 10
-
-
-def test_submit_or_resize_stop_order_with_retry_exhausts_retries_and_alerts_on_replace_failure(captured_telegram_messages):
-    client = FakeTradingClient()
-    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
-
-    def replace_order_by_id(order_id, order_data=None):
-        raise RuntimeError("broker rejected replace")
-    client.replace_order_by_id = replace_order_by_id
-
-    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.0, 435.0, sleep_fn=_no_sleep)
-
-    assert result is None
+    assert order is None
+    assert qty_submitted == 0.0
     urgent = [m for m in captured_telegram_messages if "URGENT" in m and "UNPROTECTED" in m]
     assert len(urgent) == 1
     assert "SPY" in urgent[0]
-
-
-def test_submit_or_resize_stop_order_with_retry_fails_toward_alert_on_fractional_qty():
-    # DISCOVERED THIS MILESTONE: ReplaceOrderRequest.qty is Optional[int]
-    # in the installed alpaca-py version, unlike every order-SUBMISSION
-    # request's qty field — a fractional resize qty must fail safely
-    # toward the URGENT alert path, not silently round or crash the caller.
-    client = FakeTradingClient()
-    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=435.0)]
-
-    result = submit_or_resize_stop_order_with_retry(client, "SPY", 10.4567, 435.0, sleep_fn=_no_sleep)
-
-    assert result is None
-    assert client.replace_calls == []  # ReplaceOrderRequest(qty=10.4567) raises before any client call is made

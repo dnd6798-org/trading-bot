@@ -99,6 +99,7 @@ VERIFIED THIS MILESTONE, not assumed:
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TradeEvent
@@ -192,6 +193,15 @@ def _side_value(side) -> str:
     return side.value if isinstance(side, OrderSide) else str(side)
 
 
+def _seconds_since(timestamp) -> float | None:
+    """None-safe elapsed-time helper for the routine-success notification (FIX-UP, item 3) — returns None (not a
+    fabricated 0.0 or an exception) when `timestamp` itself is None, e.g. a test double that didn't set one."""
+    if timestamp is None:
+        return None
+    ts = timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
 def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=time.sleep) -> dict | None:
     """
     The listener's core handler (locked design's "Handler logic") — a
@@ -223,6 +233,21 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
          partial_fill event should never carry a zero cumulative fill,
          but this function must never call submit_or_resize_stop_order_
          with_retry() with a non-positive qty).
+
+    FIX-UP, item 3 (routine-success visibility — the whole point of this
+    milestone, not left to be inferred from silence): fires a single,
+    non-urgent Telegram message whenever this call ACTUALLY submits or
+    tops up a protective stop — i.e. submit_or_resize_stop_order_with_
+    retry()'s qty_submitted is > 0, NOT merely whenever a resting stop
+    exists afterward (which is also true on a genuine no-op — a
+    redelivered/duplicate event for a fill already fully protected must
+    NOT re-alert). Message includes symbol, the qty just protected THIS
+    call (the top-up increment, if this was a follow-up to an earlier
+    partial fill — not necessarily the fill's full cumulative qty), the
+    stop price, and elapsed time since trade_update.timestamp (the
+    event's own timestamp field, confirmed on the installed alpaca-py
+    TradeUpdate model — module docstring) to "now" — None/unavailable if
+    the event carried no timestamp, rather than a fabricated number.
     """
     if universe is None:
         universe = TRACK_B_UNIVERSE
@@ -248,15 +273,24 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
     if filled_qty <= 0:
         return None
 
-    stop_order = submit_or_resize_stop_order_with_retry(
+    stop_order, qty_submitted = submit_or_resize_stop_order_with_retry(
         trading_client, order.symbol, filled_qty, decoded["stop_price"], sleep_fn=sleep_fn,
     )
+
+    if stop_order is not None and qty_submitted > 0:
+        elapsed = _seconds_since(getattr(trade_update, "timestamp", None))
+        elapsed_str = f"{elapsed:.1f}s after fill event" if elapsed is not None else "elapsed time unknown (no event timestamp)"
+        telegram_bot.send_message(
+            f"fill_listener: protected {order.symbol} — qty {qty_submitted} @ stop {decoded['stop_price']}, {elapsed_str}."
+        )
+
     return {
         "action": "protected" if stop_order is not None else "protection_failed",
         "symbol": order.symbol,
         "event": event,
         "filled_qty": filled_qty,
         "stop_price": decoded["stop_price"],
+        "qty_submitted": qty_submitted,
     }
 
 

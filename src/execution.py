@@ -195,12 +195,14 @@ no existing behavior changed for any caller that doesn't opt in:
      fill_listener.py decodes it on fill. Format locked as
      tb-{symbol}-{YYYYMMDD}-{stop_price_cents}.
   2. has_resting_protective_stop() — extracted out of protect_
-     unprotected_fills()'s own filtering so it and fill_listener.py's
-     handler share the IDENTICAL "is this symbol already protected"
-     check (see its own docstring for the full reasoning).
+     unprotected_fills()'s own filtering so it, fill_listener.py's
+     handler, AND (as of the fix-up below) submit_entry_and_stop() all
+     share the IDENTICAL "is this symbol already protected" check (see
+     its own docstring for the full reasoning).
   3. submit_or_resize_stop_order_with_retry() — fill_listener.py's entry
      point for protecting a fill; submit_stop_order_with_retry() itself
-     is UNCHANGED and still used directly by submit_entry_and_stop().
+     is UNCHANGED and still used directly by submit_entry_and_stop() (and
+     internally by the function above).
 
 VERIFIED THIS MILESTONE, not assumed:
   - client_order_id max length for this account's Trading API is 128
@@ -212,22 +214,29 @@ VERIFIED THIS MILESTONE, not assumed:
     more than 128 characters". The encoded format above is ~22-30 chars
     for Track B's real 8-symbol universe — nowhere near either candidate
     limit; this verification matters for future formats, not this one.
-  - ReplaceOrderRequest.qty is Optional[int] in the installed alpaca-py
-    version (0.43.5) — see submit_or_resize_stop_order_with_retry()'s
-    docstring for the consequence (a fractional resize qty cannot go
-    through PATCH replace at all) and why it's left as a documented,
-    fail-toward-alert gap rather than silently rounded.
 
-NEWLY FLAGGED, NOT part of the locked design (discovered wiring this
-milestone, not anticipated by the brief): submit_entry_and_stop()'s own
-unconditional submit_stop_order_with_retry() call and fill_listener.py's
-handler reacting to the SAME fill event concurrently is a real, if
-narrow, check-then-act race that could in principle produce two resting
-stop orders for one symbol — see the comment at the client_order_id
-encoding call site in submit_entry_and_stop() for the full reasoning on
-why this shouldn't matter in real production use (genuine same-session
-fills essentially never happen given Track B's post-close-only entry
-cadence) but isn't eliminated by this implementation.
+FIX-UP (post-milestone, both items resolved rather than left flagged):
+  1. submit_or_resize_stop_order_with_retry() no longer uses Alpaca's
+     PATCH replace for a partial-fill follow-up (ReplaceOrderRequest.qty
+     is Optional[int] in the installed alpaca-py version, 0.43.5 —
+     confirmed against the pydantic model — unlike every order-
+     SUBMISSION request's qty field in the same SDK, which IS fractional
+     -capable and, per Alpaca's own fractional-trading docs, explicitly
+     supports stop orders). It now submits a SECOND, ADDITIVE stop order
+     sized to just the newly-filled increment instead — see that
+     function's own docstring for the full "TOP-UP MODEL" reasoning,
+     including a flagged, NOT-yet-resolved consequence: build_open_
+     positions()/ratchet_position_stop() still assume exactly one
+     resting stop per symbol, so a real multi-stop scenario would leave
+     one of the two stops un-ratcheted by the daily job.
+  2. submit_entry_and_stop()'s own stop submission now gates on has_
+     resting_protective_stop() before submitting — closing (to the same
+     check-then-act degree as every other use of this pattern in this
+     module, not via a distributed lock) the race between this
+     function's own stop submission and fill_listener.py's handler
+     reacting to the same fill concurrently. See the comment at the
+     client_order_id encoding call site in submit_entry_and_stop() for
+     the full reasoning.
 """
 import re
 import time
@@ -842,68 +851,103 @@ def submit_stop_order_with_retry(
     return None
 
 
+_MIN_TOPUP_QTY = 1e-6  # floating-point tolerance — a redelivered event's increment should compute to ~0, not a real top-up
+
+
+def _sum_resting_stop_qty(trading_client: TradingClient, symbol: str) -> float:
+    """
+    Sums qty across ALL currently resting stop orders for `symbol` — the
+    TOP-UP model (submit_or_resize_stop_order_with_retry(), below) can
+    leave MULTIPLE resting stop orders open for one symbol simultaneously
+    (one per partial-fill increment), unlike every other path in this
+    module, which assumes exactly one resting stop per symbol.
+    has_resting_protective_stop() (a boolean "at least one exists") is
+    unaffected by this and stays correct; anywhere that needs a total
+    protected QUANTITY must use this function instead of _find_resting_
+    stop_order()'s single-order (most-recent-only) return.
+    """
+    orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]))
+    return sum(float(o.qty) for o in orders if _is_stop_order(o))
+
+
 def submit_or_resize_stop_order_with_retry(
     trading_client: TradingClient, symbol: str, qty: float, stop_price: float,
     backoff_seconds=_STOP_RETRY_BACKOFF_SECONDS, sleep_fn=time.sleep,
 ):
     """
     fill_listener.py's entry point for protecting a fill (spec v33 §10.5
-    "Handler logic" — partial fills resize the stop to cumulative
-    filled_qty via the existing replace-not-cancel path rather than
-    submitting a new order). Unlike submit_stop_order_with_retry() (used
-    by execution.py's own daily job, where a fresh fill never already has
-    a resting stop), this handles BOTH cases:
-      - no resting stop yet for `symbol` -> delegates to
-        submit_stop_order_with_retry() unchanged (first protection for
-        this fill — covers both a fresh full fill and the FIRST partial
-        of a multi-part fill).
-      - a resting stop already exists -> RESIZES it via Alpaca's PATCH
-        replace (never cancel-then-resubmit, matching this module's
-        existing ratchet-only convention) to the new cumulative qty — the
-        follow-up case when more of a partial fill arrives later.
-    Idempotency: uses the SAME _find_resting_stop_order()/has_resting_
-    protective_stop() check protect_unprotected_fills() uses, so a
-    redelivered/duplicate trade_updates event for a fill already
-    protected at the correct qty is a safe no-op, never a duplicate stop.
+    "Handler logic", TOP-UP variant — see the "FIX-UP" note below for why
+    this replaced an earlier PATCH-replace-based design). Returns
+    (order, qty_submitted):
+      - `order` is the resulting/most-recent resting stop Order for this
+        symbol, or None if a real top-up submission failed after
+        exhausting retries (same "None means unprotected, don't treat it
+        as success" contract submit_stop_order_with_retry() already has).
+      - `qty_submitted` is the ACTUAL increment just submitted THIS call
+        — 0.0 for a genuine no-op (a redelivered/duplicate event whose
+        cumulative filled_qty is already fully covered by existing
+        resting stop(s)). fill_listener.py's routine-success Telegram
+        notification uses this to decide whether to fire at all, since
+        `order` alone is also truthy on a no-op.
 
-    DISCOVERED THIS MILESTONE, confirmed against the installed alpaca-py
-    0.43.5 pydantic models, not assumed: ReplaceOrderRequest.qty is typed
-    Optional[int] — UNLIKE every order-SUBMISSION request's qty field in
-    this same SDK (StopOrderRequest.qty, MarketOrderRequest.qty are both
-    Optional[float]) — so a fractional resize qty raises a pydantic
-    ValidationError before any network call is even attempted. NOT
-    silently rounded here (rounding would misrepresent the actual
-    protected qty by up to a fraction of a share) — the retry loop below
-    fails deterministically on every attempt for a fractional qty and
-    correctly falls through to the same URGENT alert path as any other
-    resize failure, per this module's existing fail-toward-alerting
-    convention. Flagged for the same chat-interface design-call as this
-    module's other two open gaps — not resolved here.
+    TOP-UP MODEL (FIX-UP, replacing this function's original PATCH-
+    replace-qty design): ReplaceOrderRequest.qty is typed Optional[int]
+    in the installed alpaca-py version (0.43.5, confirmed against the
+    pydantic model) — unlike every order-SUBMISSION request's qty field
+    in the same SDK (StopOrderRequest.qty, MarketOrderRequest.qty, both
+    Optional[float]), which IS fractional-capable and, per Alpaca's own
+    fractional-trading documentation, explicitly supports stop orders
+    directly (not just market orders). So a partial-fill follow-up now
+    submits a SECOND, ADDITIVE stop order at the same stop price, sized
+    to just the newly-filled INCREMENT (cumulative filled_qty minus qty
+    already covered by every resting stop for this symbol) — never a
+    replace, never a cancel-then-resubmit. Two resting stops at the same
+    price for one symbol is an accepted, safe outcome (per instruction):
+    if the first fills and closes the position, the second is rejected
+    by the broker as an oversell (this account has no margin/shorting),
+    not silently mis-executed.
+
+    Idempotency: sums qty across ALL resting stop orders for `symbol`
+    (_sum_resting_stop_qty(), not _find_resting_stop_order()'s single-
+    order return, since multiple can now coexist) — a redelivered/
+    duplicate event whose cumulative filled_qty is already fully covered
+    computes a non-positive increment and is a safe no-op. The initial
+    existence check is has_resting_protective_stop() — the SAME shared
+    check protect_unprotected_fills() and submit_entry_and_stop() (the
+    fill_listener.py fix-up's item 2) both gate on, so all three
+    stop-submission paths in this module agree on "is this symbol
+    already protected at all," not three separate reimplementations.
+
+    KNOWN, FLAGGED CONSEQUENCE of allowing multiple resting stops per
+    symbol, NOT resolved by this fix-up: build_open_positions() and
+    ratchet_position_stop() (both this module) still assume exactly ONE
+    resting stop per symbol — build_open_positions() calls _find_
+    resting_stop_order(), which returns only the MOST RECENTLY submitted
+    one when several exist. If a partial fill ever actually produces two
+    resting stops, the daily ratchet will only ratchet whichever one
+    build_open_positions() happened to pick, silently leaving the other
+    at its original, increasingly-stale price. This is a real,
+    previously-unconsidered gap surfaced by this fix-up, not fixed here
+    — flagged for a fresh design call on whether build_open_positions()/
+    ratchet_position_stop() need to sum/ratchet multiple resting stops,
+    same "flag it, don't guess" convention as this module's other open
+    gaps (module docstring).
     """
-    existing = _find_resting_stop_order(trading_client, symbol)
-    if existing is None:
-        return submit_stop_order_with_retry(
+    if not has_resting_protective_stop(trading_client, symbol):
+        order = submit_stop_order_with_retry(
             trading_client, symbol, qty, stop_price, backoff_seconds=backoff_seconds, sleep_fn=sleep_fn,
         )
+        return order, (qty if order is not None else 0.0)
 
-    if float(existing.qty) == qty:
-        return existing  # already protected at the correct cumulative qty — redelivered event, safe no-op
+    total_protected = _sum_resting_stop_qty(trading_client, symbol)
+    increment = qty - total_protected
+    if increment <= _MIN_TOPUP_QTY:
+        return _find_resting_stop_order(trading_client, symbol), 0.0
 
-    last_error = None
-    for delay in (0,) + tuple(backoff_seconds):
-        if delay:
-            sleep_fn(delay)
-        try:
-            trading_client.replace_order_by_id(existing.id, ReplaceOrderRequest(qty=qty))
-            return trading_client.get_order_by_id(existing.id)
-        except Exception as exc:  # noqa: BLE001 — must never crash the caller, this IS the alerting path
-            last_error = exc
-    telegram_bot.send_message(
-        f"URGENT — UNPROTECTED POSITION: resizing the resting stop for {symbol} to qty {qty} (partial-fill "
-        f"follow-up) failed after {len(backoff_seconds) + 1} attempts (last error: {last_error}). The resting "
-        f"stop may not match the actual filled quantity. Manual intervention required immediately."
+    order = submit_stop_order_with_retry(
+        trading_client, symbol, increment, stop_price, backoff_seconds=backoff_seconds, sleep_fn=sleep_fn,
     )
-    return None
+    return order, (increment if order is not None else 0.0)
 
 
 def replace_stop_order_if_favorable(trading_client: TradingClient, stop_order_id, candidate_stop_price: float, current_stop_price: float) -> bool:
@@ -974,20 +1018,24 @@ def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrail
     # UNCONDITIONALLY, not just for the "pending" branch below, since a
     # market-hours same-session fill (confirmed synchronously in this
     # call) is ALSO visible to the listener over the trade_updates
-    # WebSocket. NEWLY FLAGGED, NOT part of the locked design: this
-    # creates a real (if narrow) race between this function's own
-    # unconditional submit_stop_order_with_retry() call below and the
-    # listener's submit_or_resize_stop_order_with_retry() reacting to the
-    # SAME fill concurrently — has_resting_protective_stop()'s check-
-    # then-act pattern reduces the window but is not atomic, so a true
-    # same-instant race could still produce two resting stop orders for
-    # one symbol. Not expected to matter in real production use (real
-    # Track B entries are always submitted post-close, so a genuine
-    # same-session fill essentially never happens — the original
+    # WebSocket. FIX-UP (closes the race originally flagged here, not
+    # just documents it): the stop submission below now gates on
+    # has_resting_protective_stop(), the SAME shared check protect_
+    # unprotected_fills() and fill_listener.py's handler already use —
+    # if the listener (or a redelivered/near-simultaneous event) already
+    # protected this exact fill via the SAME client_order_id-encoded
+    # stop_price by the time this function gets there, this call detects
+    # the existing resting stop and does NOT submit a duplicate. Same
+    # caveat as every other check-then-act use of this pattern in this
+    # module (protect_unprotected_fills() vs. the listener): this closes
+    # the race to the SAME degree those two already close it for each
+    # other, not via a distributed lock — a true same-instant race is
+    # still theoretically possible, just no more so here than anywhere
+    # else this pattern is already relied on. Real Track B entries are
+    # always submitted post-close, so a genuine same-session fill
+    # essentially never happens in production regardless (the original
     # execution.py dry run only saw one because it deliberately forced
-    # an extended-hours fill for testing), but not eliminated by this
-    # implementation either — flagged for the same chat-interface
-    # design-call as this module's other two open gaps.
+    # an extended-hours fill for testing).
     signal_date = candidate["timestamp"][:10]
     client_order_id = encode_client_order_id(symbol, signal_date, stop_price)
 
@@ -1009,7 +1057,15 @@ def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrail
         return TrackBEntryResult(symbol=symbol, submitted=True, filled=False, reason=fill["status"])
 
     realized = compute_realized_risk(fill["filled_avg_price"], stop_price, fill["filled_qty"], equity)
-    stop_order = submit_stop_order_with_retry(trading_client, symbol, fill["filled_qty"], stop_price, sleep_fn=sleep_fn)
+    if has_resting_protective_stop(trading_client, symbol):
+        # Already protected — by the listener, or a prior invocation —
+        # before this call got here. Use the existing resting stop rather
+        # than submitting a duplicate (see the comment at the client_
+        # order_id encoding call site above for the full race-closure
+        # reasoning).
+        stop_order = _find_resting_stop_order(trading_client, symbol)
+    else:
+        stop_order = submit_stop_order_with_retry(trading_client, symbol, fill["filled_qty"], stop_price, sleep_fn=sleep_fn)
 
     return TrackBEntryResult(
         symbol=symbol,
