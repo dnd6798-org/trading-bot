@@ -291,11 +291,14 @@ non-urgent Telegram summary directly (_send_ratchet_failure_summary()),
 naming which order(s) ratcheted and which remain at their old price with
 the error hit, so the failure stays visible without paging a human.
 """
+import logging
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+
+import requests
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderStatus, OrderType, QueryOrderStatus, TimeInForce
@@ -309,9 +312,11 @@ from alpaca.trading.requests import (
 
 from . import halt_state
 from . import telegram_bot
-from .config import get_alpaca_config, get_track_b_guardrail_config
+from .config import get_alpaca_config, get_heartbeat_config, get_track_b_guardrail_config
 from .risk_filter import RiskDecision, evaluate
 from .signal_generation import SignalDirection, TradeSignal
+
+log = logging.getLogger(__name__)
 
 # Track B's own already-locked signal/universe machinery — reused
 # directly, not reimplemented (see module docstring).
@@ -1365,3 +1370,58 @@ def run_daily_execution_job(trading_client: TradingClient = None, universe=None,
             live_open_positions.append(SimpleNamespace(symbol=candidate["symbol"], risk_pct=result.realized_risk_pct or 0.0))
 
     return run_log
+
+
+def send_daily_heartbeat(run_log: dict, heartbeat_url: str = None, requests_module=requests) -> bool:
+    """
+    Dead-man's-switch ping (spec v34 §10.6, systemd-units milestone) —
+    fired once at the end of a run_daily_execution_job() call that
+    completed with no per-step errors recorded in run_log["errors"].
+    UptimeRobot alerts if this ping doesn't arrive within its configured
+    window (~26h) — this catches the daily job/timer not running at all
+    (crash before returning, disabled timer, host down), a failure mode
+    none of this module's existing Telegram alerts cover, since those all
+    fire FROM INSIDE a run that's already happening. A halted run
+    (halt_state.py) still counts as healthy for this purpose — halting is
+    an intentional, already-alerted state (see check_daily_loss_limit()/
+    check_drawdown_limit(), risk_filter.py), not a job malfunction; the
+    heartbeat's only job is proving the process itself is still alive and
+    completing runs.
+
+    Best-effort only, deliberately: a failed ping is logged and returns
+    False, never raised — a monitoring-side hiccup (network blip,
+    UptimeRobot outage) must never be mistaken for, or cause, a daily job
+    failure.
+    """
+    if heartbeat_url is None:
+        heartbeat_url = get_heartbeat_config().daily_job_url
+    if not heartbeat_url:
+        log.warning("send_daily_heartbeat: UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL not set — skipping heartbeat ping.")
+        return False
+    if run_log.get("errors"):
+        return False
+    try:
+        requests_module.get(heartbeat_url, timeout=10)
+        return True
+    except Exception as exc:  # noqa: BLE001 — a monitoring ping failure must never fail the job
+        log.warning(f"send_daily_heartbeat: ping failed ({exc}) — job itself still succeeded.")
+        return False
+
+
+if __name__ == "__main__":
+    # systemd ExecStart target for trading-bot-daily.service (spec v34
+    # §10.6). Halt-state-on-boot is already handled inside
+    # run_daily_execution_job() itself (gates new entries only, per its
+    # own docstring's "Order of operations" — the ratchet step
+    # deliberately still runs while halted) — no separate check needed
+    # here. An unhandled exception escaping run_daily_execution_job()
+    # itself (e.g. missing required config) is intentionally left
+    # unswallowed: it propagates, prints a traceback, and exits non-zero,
+    # which is the correct, visible "this oneshot run failed" signal for
+    # systemd/journalctl, distinct from and complementary to the
+    # per-step Telegram alerts already inside the job for known error
+    # paths.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    run_log = run_daily_execution_job()
+    log.info("run_daily_execution_job() result: %s", run_log)
+    send_daily_heartbeat(run_log)

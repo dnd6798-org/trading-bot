@@ -51,6 +51,11 @@ class StrategyConfig:
     atr_multiplier: float | None  # None until locked via backtest (playbook v6 §7)
 
 
+@dataclass(frozen=True)
+class HeartbeatConfig:
+    daily_job_url: str | None
+
+
 TRADING_ENV = _get("TRADING_ENV", default="paper")
 IS_PAPER = TRADING_ENV.lower() == "paper"
 
@@ -170,6 +175,30 @@ def get_track_b_guardrail_config() -> GuardrailConfig:
         max_trades_per_day=int(_get("MAX_TRADES_PER_DAY_TRACK_B", required=False, default="8")),
         max_combined_open_risk_pct=float(_get("MAX_TOTAL_OPEN_RISK_PCT_TRACK_B", required=False, default="8.0")),
         max_drawdown_pct=base.max_drawdown_pct,
+    )
+
+
+def get_heartbeat_config() -> HeartbeatConfig:
+    """
+    Dead-man's-switch heartbeat URL (spec v34 §10.6) — pinged by
+    execution.py's __main__ once at the end of every daily job run that
+    completes with no per-step errors; UptimeRobot alerts if a ping
+    doesn't arrive within its configured window.
+
+    Read with required=False, even though .env.example documents
+    UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL as a value that must actually be
+    filled in for the heartbeat to function — a deliberate, flagged
+    deviation from treating it as required=True here: coupling a
+    monitoring add-on to a hard crash of the entire daily job (which
+    still needs to protect/ratchet real open positions regardless of
+    whether monitoring is configured) would contradict the fail-toward-
+    alert-never-toward-crash convention execution.py already uses
+    everywhere else. A missing/blank URL means the ping is silently
+    skipped and logged, not a job failure — see execution.py's
+    send_daily_heartbeat().
+    """
+    return HeartbeatConfig(
+        daily_job_url=_get("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", required=False, default=None)
     )
 
 

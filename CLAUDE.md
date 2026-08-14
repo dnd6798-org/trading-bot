@@ -1416,6 +1416,261 @@ fix-up, per instruction — this is error-handling structure around a
 replace primitive whose live behavior was already verified in the prior
 fix-up's re-run, not new order-submission behavior.
 
+**NEW MILESTONE, DESIGN LOCKED, NOT YET IMPLEMENTED: systemd units for
+the daily job + the fill-protection listener (spec v34 §10.6).** Locked
+in the claude.ai chat interface this session — no code or `.service`
+file written yet, this update only records the decision to start, per
+this file's own "update whenever a real decision is made" rule. Three
+unit files needed:
+  - `trading-bot-daily.service` (oneshot) — the systemd target for
+    `run_daily_execution_job()` (`src/execution.py`).
+  - `trading-bot-daily.timer` — the daily post-close schedule trigger
+    for the above.
+  - `trading-bot-listener.service` (`Restart=always`) — the systemd
+    target for `run_listener()` (`src/fill_listener.py`), matching that
+    module's already-locked "own standalone systemd service" design
+    (spec v33 §10.5, "Current status" above).
+Full unit file contents (`ExecStart`, `User`, `WorkingDirectory`,
+`EnvironmentFile`, restart/backoff settings, etc.) are in spec v34
+§10.6 (project knowledge, not this repo) and this session's chat
+record — **not reproduced in this file**, per this repo's standing
+convention that spec content is the source of truth for *what to
+build* and `CLAUDE.md` records *what was decided and when*. The next
+session implementing this milestone must read `RULES.md` first (this
+session's own instruction, restated here so it survives into the next
+session's context), then pull the exact file contents from spec v34
+§10.6 before writing anything — not reconstruct them from memory or
+from this summary.
+
+**Pre-implementation verification checklist (per this session's
+instruction: "verify against real source, do not assume; report any
+deviation from the brief rather than silently resolving it") — three of
+five items are droplet-only facts this Windows-local Claude Code session
+has no way to check, flagged as such rather than guessed; two are local
+repo facts checked directly this session:**
+
+1. **Actual current deployment path and venv location on the droplet —
+   NOT VERIFIABLE from this session/environment.** This repo has never
+   recorded either fact — the existing "Systemd unit naming convention"
+   note (fill-listener milestone, "Current status" above) already states
+   plainly that "no `.service` file is checked into this repo...
+   deployment configuration lives on the droplet itself, out of scope
+   for every deployment-adjacent milestone to date." Confirmed still true
+   by a fresh repo-wide search this session (no `/opt/`, `/home/`, or
+   venv-path reference tied to the droplet anywhere in tracked files).
+   **Must be obtained directly from the droplet (e.g. `pwd`, `which
+   python`, the venv's actual location) before any unit file's
+   `WorkingDirectory`/`ExecStart`/`EnvironmentFile` paths are written —
+   do not assume a path by convention.**
+2. **Whether `src/execution.py` and `src/fill_listener.py` have working
+   `__main__` entrypoints — CHECKED THIS SESSION, and they DIFFER, a
+   real finding, not a formality.** `src/fill_listener.py` has one
+   (`if __name__ == "__main__": run_listener()`, line 337) — confirmed
+   it builds a real `TradingClient`/`MonitoredTradingStream` and blocks
+   forever via `stream.run()`, matching what `trading-bot-listener.service`
+   needs to `ExecStart` directly. **`src/execution.py` has NO `__main__`
+   block at all** — `run_daily_execution_job()` is fully implemented and
+   tested (see above) but nothing in this repo invokes it as a process
+   entrypoint; the only thing that calls it is the one-off
+   `scripts/dry_run_execution_track_b.py`, which is explicitly a manual
+   dry-run script, not a production entrypoint. **This is a real,
+   concrete gap: `trading-bot-daily.service`'s `ExecStart` target does
+   not exist yet and must be added (a small, real code change — e.g. a
+   `__main__` block calling `run_daily_execution_job()` and persisting
+   its returned log dict, the still-open spec §3.2 journaling item noted
+   elsewhere in this file) before that unit file can point at anything
+   real.**
+3. **Whether halt-state-on-boot is checked in both entrypoints today —
+   CHECKED THIS SESSION: it is checked in ONE of the two, and
+   deliberately NOT in the other, by existing documented design, not an
+   oversight.** `run_daily_execution_job()` DOES call `halt_state.
+   load_halt_state()` — but only after the daily ratchet loop runs, and
+   only to gate NEW ENTRIES for that run (the ratchet itself runs
+   regardless of halt state, since it only ever tightens protection,
+   never opens new risk — already documented in that function's own
+   docstring). `run_listener()` (`src/fill_listener.py`) does NOT check
+   `halt_state.py` at all, anywhere — confirmed by grep, and this is
+   itself already explicitly documented in that module's own docstring:
+   "gating stop protection on halt state would be wrong given the
+   existing fail-safe principle that open positions stay protected
+   independent of bot uptime/halt status." **Neither of these is a gap
+   to fix** — both match this repo's standing "Never auto-resume trading
+   after a crash/restart" hard rule's actual intent (gate NEW risk on
+   halt, never gate EXISTING protection on it) — but the raw checklist
+   question's honest answer is "checked in one, intentionally not the
+   other," not a plain yes, and is restated here so the next session
+   doesn't need to re-derive it.
+4. **Real path of the `.env` file currently used for manual runs — NOT
+   VERIFIABLE from this session/environment.** Every script in this repo
+   (`src/config.py`'s `get_alpaca_config()` and everything built on it)
+   loads `.env` via the working directory at invocation time, not a
+   hardcoded path — so the real answer depends entirely on wherever
+   manual runs on the droplet are actually invoked FROM, which is
+   droplet-only information this session cannot see. **Must be confirmed
+   directly on the droplet before `EnvironmentFile=` is set in either
+   `.service` file** — do not assume it matches this repo's local
+   `.env`/`.env.example` layout.
+5. **systemd version on the droplet (`systemctl --version`) — NOT
+   VERIFIABLE from this session/environment.** Must be run directly on
+   the droplet before the unit files are finalized, since some directives
+   (e.g. certain `Restart=`/backoff options `trading-bot-listener.
+   service` needs for `Restart=always`) are version-gated in systemd and
+   a mismatch would only surface at deploy time, not from anything
+   checkable in this repo.
+
+**Net: items 2 and 3 are answered and recorded above (with one real,
+concrete follow-up gap surfaced — `execution.py` needs a `__main__`
+entrypoint before this milestone can complete); items 1, 4, and 5 remain
+open and must be checked directly on the droplet, not assumed, before
+any unit file is finalized — flagged per this session's own instruction
+rather than silently resolved or guessed at.**
+
+**UPDATE (next session): the systemd-units milestone was EXECUTED —
+`execution.py`'s missing `__main__` entrypoint is now built, all three
+unit files exist as real, committed files, and a new dead-man's-switch
+heartbeat was added. 275/275 tests passing (267 + 8 new: 2 in
+`tests/test_config.py`, 6 in `tests/test_execution.py`). Droplet-only
+items (1, 4, 5 above) remain unverifiable from this session — no SSH
+access to any droplet exists from this Windows-local environment, no
+droplet host/path was ever recorded anywhere in this repo (confirmed
+again by a fresh search), and none was provided this session either.
+Per this session's own explicit authorization ("your call, just be
+explicit about which you chose and why"), `/opt/trading-bot` (venv at
+`/opt/trading-bot/venv`, `.env` at `/opt/trading-bot/.env`) was adopted
+as a CHOSEN CONVENTION, not a confirmed fact — flagged in-line in every
+unit file's own header comment and in `deploy/systemd/README.md`, not
+just here, so the caveat travels with the artifact.
+
+1. **`src/execution.py` gained a real `__main__` block** — the
+   `ExecStart` target `trading-bot-daily.service` needed and didn't have
+   (per item 2's finding above). Calls `run_daily_execution_job()`,
+   logs the returned run_log dict via `logging` (INFO level,
+   `logging.basicConfig` configured so it lands in journald under
+   `StandardOutput=journal`), then calls the new `send_daily_heartbeat()`.
+   Deliberately does NOT add its own halt-state check — item 3 above
+   already established `run_daily_execution_job()` checks
+   `halt_state.load_halt_state()` internally (gates new entries only,
+   ratchet still runs while halted), so a second check at the `__main__`
+   level would be redundant, not a fix for a real gap. Full spec §3.2
+   journaling (persisting the run_log dict somewhere durable, beyond
+   journald's own retention) is explicitly NOT built here — out of scope
+   for this milestone, flagged in the `__main__` block's own comment,
+   same standing gap as before.
+
+2. **New dead-man's-switch heartbeat (Step 3 of this milestone's
+   brief).** `send_daily_heartbeat()` (`src/execution.py`) pings a new
+   `UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` (via `get_heartbeat_config()`,
+   new in `src/config.py`) once at the end of a `run_daily_execution_job()`
+   call, ONLY when `run_log["errors"]` is empty — a halted-but-error-free
+   run still counts as a healthy ping (halting is an intentional,
+   already-alerted state, not a job malfunction; this heartbeat's only
+   job is proving the daily process itself is still alive and completing
+   runs, a failure mode none of the existing in-job Telegram alerts can
+   catch since those only fire from inside a run that's already
+   happening). Best-effort: a failed ping (network blip, UptimeRobot
+   outage) is logged and returns `False`, never raised — must never be
+   mistaken for, or cause, a real job failure. New direct dependency
+   `requests>=2.31.0` added to `requirements.txt` (previously only
+   present transitively, confirmed 2.34.2 already installed in this
+   repo's venv). New required-to-fill-in var
+   `UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` documented in `.env.example`.
+
+   **Real, flagged deviation from the milestone brief, not silently
+   resolved:** the brief's Step 3 describes this as "a *second*
+   UptimeRobot heartbeat ping (separate monitor from the listener's
+   *existing* liveness heartbeat)" — but a fresh repo-wide search this
+   session (`grep -rni "uptimerobot\|heartbeat"`) found **no existing
+   heartbeat/UptimeRobot mechanism anywhere in this repo**, in
+   `src/fill_listener.py` or otherwise — every prior hit was the
+   unrelated word "uptime" inside "independent of bot uptime" prose.
+   The brief's premise that a listener-side liveness heartbeat already
+   exists does not match the actual repo state. Per RULES.md's "Claude
+   Code... does not make undocumented architecture or strategy decisions
+   on its own" — a listener-side liveness heartbeat (ping interval,
+   mechanism for a process that blocks forever in `TradingStream.run()`,
+   env var naming) is itself a real, underspecified design question, not
+   implementable from this brief's detail level. **Only the daily job's
+   success-only heartbeat, the one piece this brief actually specified in
+   full, was built.** The listener liveness heartbeat remains a real,
+   open gap — needs its own claude.ai design pass before a future
+   session builds it, not invented here.
+
+   **Second flagged deviation:** `get_heartbeat_config()`
+   (`src/config.py`) reads the URL with `required=False` even though
+   `.env.example` documents it as a value that must be filled in for the
+   heartbeat to actually function — a missing/blank URL logs a warning
+   and skips the ping rather than crashing the entire daily job. Coupling
+   a monitoring add-on to a hard crash of the job that still needs to
+   protect/ratchet real open positions regardless of whether monitoring
+   is configured would contradict this module's own established
+   fail-toward-alert-never-toward-crash convention (see e.g.
+   `submit_stop_order_with_retry()`'s URGENT-alert-on-exhaustion pattern,
+   never a raised exception). Confirmed locally: running the real
+   entrypoint with no URL configured produced exactly this — a logged
+   warning, `send_daily_heartbeat()` returned `False`, exit code 0.
+
+3. **Three unit files, new, committed: `deploy/systemd/trading-bot-
+   daily.service`, `trading-bot-daily.timer`, `trading-bot-listener.
+   service`** (plus `deploy/systemd/README.md` — install steps, the
+   `tradingbot` system-user creation commands from Step 4, and the exact
+   droplet-only verification commands for Step 5, none of which this
+   session could run). Content matches the milestone brief's template
+   exactly except for the header comments added to each file flagging
+   the `/opt/trading-bot` path assumption and the systemd->=239
+   requirement for `OnCalendar=`'s per-line timezone syntax (neither
+   confirmed against a real droplet this session). `trading-bot-listener.
+   service` additionally documents, in its own header, that its
+   `WorkingDirectory=` must stay identical to `trading-bot-daily.
+   service`'s: `halt_state.py`'s `HALT_STATE_PATH` defaults to a CWD-
+   relative `halt_state.json`, so the two services silently seeing
+   different halt-state files if their working directories ever diverged
+   would be a real, dangerous gap — flagged, not just assumed fine.
+
+4. **Step 4 (create the `tradingbot` system user, `chown` the deploy
+   path) — NOT executed, droplet-only.** Exact commands (`useradd
+   --system --no-create-home --shell /usr/sbin/nologin tradingbot`,
+   `chown -R tradingbot:tradingbot /opt/trading-bot`) are documented in
+   `deploy/systemd/README.md` for the droplet session to run directly —
+   this Windows-local session has no way to execute them for real.
+
+5. **Step 5 verification — partially done, partially droplet-only,
+   reported exactly, not glossed over:**
+   - **Local substitute for "manually trigger the daily timer once...
+     confirm it runs to completion and exits 0" — DONE, against the
+     real paper account** (no systemd on Windows to literally run
+     `systemctl start`, so `python -m src.execution` was run directly
+     instead, the same invocation the unit file's `ExecStart` uses).
+     Real output: `run_daily_execution_job()` returned
+     `{'date': '2026-08-14', 'protected': [], 'ratcheted': [],
+     'entries_submitted': [], 'entries_skipped': [], 'errors': [],
+     'halted': False}` — no open positions to ratchet, no qualifying
+     entry signal fired today, zero errors — then the heartbeat step
+     logged its "URL not set, skipping" warning exactly as designed.
+     **Exit code: 0.**
+   - **Local substitute for the listener's startup path** — `python -m
+     src.fill_listener` run for 8 seconds (`timeout 8 ...`) against the
+     real paper account's `trade_updates` WebSocket: no crash, no
+     traceback, process was still blocking (as `run_listener()`'s
+     `stream.run()` is designed to do) when the timeout killed it;
+     confirmed no orphaned process remained afterward. This proves the
+     entrypoint constructs its `TradingClient`/`MonitoredTradingStream`
+     and subscribes without error — it does NOT prove or substitute for
+     systemd's `Restart=always` behavior, which needs real systemd.
+   - **Restart-safety test through systemd itself, manual daily-timer
+     trigger through `systemctl`, and reboot-survival + post-reboot
+     halt-state check — NOT performed, droplet-only, exact commands
+     left in `deploy/systemd/README.md` for the droplet session.** This
+     session has no SSH access or credentials for any droplet — these
+     four checks remain genuinely unverified until run there.
+
+**Explicit open items carried into the next droplet-side session, not
+resolved here:** the three droplet-only facts from this milestone's
+kickoff (real deployment path, real `.env` location, real systemd
+version) plus this update's own two new open items (a design pass for
+the listener's liveness heartbeat; the four droplet-only Step 5 checks)
+— five items total, all requiring direct droplet access this Windows-
+local session never had.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market

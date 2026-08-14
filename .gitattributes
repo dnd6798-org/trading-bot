@@ -1,0 +1,4 @@
+# systemd is picky about stray CR bytes in unit files (can fail to parse
+# or misbehave silently) — force LF on these regardless of platform/
+# core.autocrlf, since they're deployed straight to a Linux droplet.
+deploy/systemd/* text eol=lf

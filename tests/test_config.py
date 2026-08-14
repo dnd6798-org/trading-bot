@@ -6,7 +6,7 @@ This is the one piece of this scaffold that's actually meant to run today,
 not a stub for a future session.
 """
 import pytest
-from src.config import get_alpaca_config, get_telegram_config, get_guardrail_config
+from src.config import get_alpaca_config, get_telegram_config, get_guardrail_config, get_heartbeat_config
 
 
 def test_alpaca_config_loads():
@@ -31,3 +31,13 @@ def test_guardrails_match_spec():
     assert g.max_trades_per_day == 6
     assert g.max_combined_open_risk_pct == 1.5
     assert g.max_drawdown_pct == 10.0
+
+
+def test_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
+    monkeypatch.delenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", raising=False)
+    assert get_heartbeat_config().daily_job_url is None
+
+
+def test_heartbeat_config_reads_url_when_set(monkeypatch):
+    monkeypatch.setenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/abc123")
+    assert get_heartbeat_config().daily_job_url == "https://uptimerobot.example/heartbeat/abc123"

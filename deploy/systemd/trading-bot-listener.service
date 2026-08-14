@@ -1,0 +1,36 @@
+# spec v34 §10.6 — Track B fill-protection listener (long-running,
+# event-driven WebSocket listener, src/fill_listener.py).
+#
+# PATH ASSUMPTION, NOT A VERIFIED FACT — see trading-bot-daily.service's
+# header comment; the same /opt/trading-bot assumption and pre-enable
+# verification step applies here.
+#
+# WorkingDirectory MUST match trading-bot-daily.service's exactly:
+# halt_state.py resolves halt_state.json relative to the process CWD
+# (HALT_STATE_PATH env var, default "halt_state.json") — if the two
+# services ever ran from different working directories they would see
+# two different halt-state files instead of one shared one. This
+# listener itself never reads halt_state.py (deliberate, locked design —
+# see fill_listener.py's module docstring), but the daily job does, so
+# consistency here still matters for the system as a whole.
+[Unit]
+Description=Trading bot - fill-protection listener (long-running)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/trading-bot
+EnvironmentFile=/opt/trading-bot/.env
+ExecStart=/opt/trading-bot/venv/bin/python -m src.fill_listener
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

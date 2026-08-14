@@ -1,0 +1,19 @@
+# spec v34 §10.6 — daily post-close trigger for trading-bot-daily.service.
+#
+# Requires systemd >= 239 for the per-line OnCalendar= timezone suffix
+# used below (`... America/New_York`) — NOT VERIFIED against the real
+# droplet's systemd version from this session (no droplet access; run
+# `systemctl --version` on the droplet before enabling this unit — see
+# CLAUDE.md "Current status", systemd-units milestone). On an older
+# systemd, set the system clock's timezone to America/New_York instead
+# and drop the trailing timezone suffix from OnCalendar=.
+[Unit]
+Description=Run trading-bot-daily.service every weekday post-close
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:00:00 America/New_York
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,26 @@
+# spec v34 §10.6 — Track B daily execution job (oneshot).
+#
+# PATH ASSUMPTION, NOT A VERIFIED FACT: WorkingDirectory/ExecStart/
+# EnvironmentFile below assume the repo is deployed to /opt/trading-bot
+# with its venv at /opt/trading-bot/venv, chosen because no deployment
+# path was ever recorded anywhere in this repo and this Windows-local
+# Claude Code session has no way to check the real droplet path (see
+# CLAUDE.md "Current status", systemd-units milestone). Before enabling
+# this unit on the droplet, confirm the real path (`pwd` in the actual
+# deployment directory, `which python` inside the actual venv) and edit
+# the three absolute paths below if they differ.
+[Unit]
+Description=Trading bot - daily execution job (Track B, one-shot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/trading-bot
+EnvironmentFile=/opt/trading-bot/.env
+ExecStart=/opt/trading-bot/venv/bin/python -m src.execution
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

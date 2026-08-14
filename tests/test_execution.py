@@ -27,6 +27,7 @@ end-to-end paper-account dry run placing at least one real entry + stop
 pair"), not meant to run as part of the automated suite.
 """
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -60,6 +61,7 @@ from src.execution import (
     has_resting_protective_stop,
     encode_client_order_id,
     decode_client_order_id,
+    send_daily_heartbeat,
     ATR_MULTIPLIER,
 )
 from src.risk_filter import RiskDecision
@@ -1104,3 +1106,73 @@ def test_submit_or_resize_stop_order_with_retry_exhausts_retries_and_alerts_on_t
     urgent = [m for m in captured_telegram_messages if "URGENT" in m and "UNPROTECTED" in m]
     assert len(urgent) == 1
     assert "SPY" in urgent[0]
+
+
+# --- send_daily_heartbeat (systemd-units milestone, spec v34 §10.6) ---
+
+class FakeRequestsModule:
+    def __init__(self, raise_exc=None):
+        self.raise_exc = raise_exc
+        self.get_calls = []
+
+    def get(self, url, timeout=None):
+        self.get_calls.append((url, timeout))
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return SimpleNamespace(status_code=200)
+
+
+def test_send_daily_heartbeat_pings_when_run_log_has_no_errors():
+    fake_requests = FakeRequestsModule()
+
+    result = send_daily_heartbeat({"errors": []}, heartbeat_url="https://uptimerobot.example/hb", requests_module=fake_requests)
+
+    assert result is True
+    assert fake_requests.get_calls == [("https://uptimerobot.example/hb", 10)]
+
+
+def test_send_daily_heartbeat_does_not_ping_when_run_log_has_errors():
+    fake_requests = FakeRequestsModule()
+
+    result = send_daily_heartbeat({"errors": [{"step": "ratchet", "error": "boom"}]}, heartbeat_url="https://uptimerobot.example/hb", requests_module=fake_requests)
+
+    assert result is False
+    assert fake_requests.get_calls == []
+
+
+def test_send_daily_heartbeat_treats_a_halted_but_error_free_run_as_success():
+    fake_requests = FakeRequestsModule()
+
+    result = send_daily_heartbeat({"errors": [], "halted": True, "halt_reason": "daily_loss_limit"}, heartbeat_url="https://uptimerobot.example/hb", requests_module=fake_requests)
+
+    assert result is True
+    assert len(fake_requests.get_calls) == 1
+
+
+def test_send_daily_heartbeat_skips_without_raising_when_no_url_configured(monkeypatch):
+    monkeypatch.delenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", raising=False)
+    fake_requests = FakeRequestsModule()
+
+    result = send_daily_heartbeat({"errors": []}, requests_module=fake_requests)
+
+    assert result is False
+    assert fake_requests.get_calls == []
+
+
+def test_send_daily_heartbeat_falls_back_to_env_when_no_url_arg_given(monkeypatch):
+    monkeypatch.setenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", "https://uptimerobot.example/from-env")
+    fake_requests = FakeRequestsModule()
+
+    result = send_daily_heartbeat({"errors": []}, requests_module=fake_requests)
+
+    assert result is True
+    assert fake_requests.get_calls == [("https://uptimerobot.example/from-env", 10)]
+
+
+def test_send_daily_heartbeat_swallows_a_network_failure_and_returns_false():
+    fake_requests = FakeRequestsModule(raise_exc=RuntimeError("connection refused"))
+
+    result = send_daily_heartbeat({"errors": []}, heartbeat_url="https://uptimerobot.example/hb", requests_module=fake_requests)
+
+    assert result is False
+    assert len(fake_requests.get_calls) == 1
