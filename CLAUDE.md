@@ -1273,6 +1273,19 @@ in the process.** 265/265 tests passing (4 net new).
    since the fake client doesn't model Alpaca's held-quantity
    validation), and then found to not actually work live.
 
+**UPDATE (next session, in progress): the new-before-cancel consolidation
+mechanism above is being REPLACED, not patched.** Locked conclusion
+carried forward from the finding above: no reordering of submit/cancel
+around the SAME two primitives (a new separate order vs. Alpaca's
+held-qty check) avoids this without reintroducing either a real coverage
+gap or the `ReplaceOrderRequest.qty` fractional-typing constraint — so
+`_consolidate_resting_stops()`'s actual mechanism is being swapped for a
+different one this session, per a locked design given in a separate
+message, not invented here. Until that lands, treat the CRITICAL finding
+above as still the live, accurate status of `ratchet_position_stop()`'s
+multi-stop path — `_consolidate_resting_stops()` in the current `paper`
+HEAD (commit `9136c28`) does not actually work against a real account.
+
    Parts 1/2 (unaffected by this finding) both PASS again against
    current `paper` HEAD: real listener detects a real fill and submits a
    correctly-priced stop within ~0s (including the routine-success
