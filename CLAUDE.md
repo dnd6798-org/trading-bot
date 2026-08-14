@@ -948,13 +948,83 @@ tests (`tests/test_risk_filter.py`, `check_drawdown_limit()`/
    PENDING outside market hours) — paper account left flat, +$0.13 net
    P&L from the round trip, no residual test position.
 
-**Not yet done:** the third, separate near-open scheduled invocation
-flagged in gap 2 above (`position_management.py`, still untouched);
-`data_ingestion.py`'s live/streaming fetch (`fetch_latest_candle()`,
-`validate_data()`); spec §3.2 journaling/audit-log persistence of
-`run_daily_execution_job()`'s returned log dict; and the crypto/Track A
-bracket-order gap (`place_entry_order()`/`place_exit_orders()`, still
-`NotImplementedError`, unrelated to Track B and explicitly untouched).
+**Not yet done:** the fill-protection gap (see the UPDATE immediately
+below — design is now LOCKED as an event-driven listener, superseding
+the "third scheduled invocation" idea originally flagged in gap 2, but
+still not implemented in this repo); `data_ingestion.py`'s
+live/streaming fetch (`fetch_latest_candle()`, `validate_data()`); spec
+§3.2 journaling/audit-log persistence of `run_daily_execution_job()`'s
+returned log dict; and the crypto/Track A bracket-order gap
+(`place_entry_order()`/`place_exit_orders()`, still `NotImplementedError`,
+unrelated to Track B and explicitly untouched).
+
+**UPDATE (2026-08-12 session, claude.ai chat-side design session only —
+no code written this session): the fill-protection gap's design is now
+LOCKED, ready for implementation, which is the next milestone.** Closes
+the gap flagged above: a position filling between two daily
+`run_daily_execution_job()` invocations could sit unprotected for up to
+~1 trading day. Replaces the "third, separate near-open scheduled
+invocation" idea originally flagged with a persistent, event-driven
+listener on Alpaca's `trade_updates` WebSocket stream instead — locked
+architecture:
+
+1. New module `fill_listener.py`, running as its own standalone systemd
+   service, separate from the daily job's service — holds both a
+   `TradingStream` (event receipt) and a `TradingClient` (order actions,
+   reused from `execution.py`).
+2. Standardizes on alpaca-py's `alpaca.trading.stream.TradingStream`
+   (confirmed already a dependency via `execution.py`'s
+   `TrailingStopOrderRequest` usage).
+3. Connection lifecycle: subclasses `TradingStream` as
+   `MonitoredTradingStream`, overriding `_start_ws()` to add exponential
+   backoff (`2^failures`, capped at 300s) before each reconnect attempt,
+   plus Telegram alerting — URGENT at 5 consecutive failures,
+   informational on recovery after hitting that threshold. Rationale:
+   alpaca-py's built-in reconnect loop has no backoff (0.01s sleep
+   between attempts, confirmed from source) and would otherwise
+   spin-retry forever on both network failures and bad credentials.
+4. Stop-price handoff: no local position DB, per the standing
+   "position/state source of truth: Alpaca directly" design principle.
+   The daily job's entry submission (`run_daily_execution_job()`,
+   `execution.py`) must be updated to pass a `client_order_id` encoding
+   symbol + signal date + the pre-computed stop price in cents, format
+   `tb-{symbol}-{YYYYMMDD}-{stop_price_cents}`, e.g.
+   `tb-SPY-20260812-45823`. The listener parses this on fill — no other
+   state needed.
+5. Handler logic: acts only on event in `{fill, partial_fill}`,
+   `side == buy`, symbol in the 8-ETF Track B universe. Partial fills
+   resize the stop to cumulative `filled_qty` via the existing
+   replace-not-cancel ratchet mechanism; the final fill event finalizes
+   it. Sell fills (exits) are logged only, no action taken.
+6. Idempotency: extract a shared `has_resting_protective_stop(symbol)`
+   helper out of `protect_unprotected_fills()` (currently implicit in
+   its "unprotected" filtering) so both the listener and the daily
+   fallback pass call the identical check — same fix pattern as the v32
+   notional-cap drift bug ("Current status" above), applied proactively
+   here instead of discovered after the fact.
+7. `protect_unprotected_fills()` is unchanged in role: fallback for
+   listener downtime, not replaced. Timing analysis: in normal operation
+   the listener and the daily fallback never actually race, since fills
+   happen at next-session open and the fallback runs hours later
+   post-close the following day — the only real exposure window is the
+   listener being down at the moment of a fill.
+8. The listener ignores bot halt state entirely — it only reacts to
+   fills that already happened and passed guardrails before submission;
+   gating stop protection on halt state would be wrong given the
+   existing fail-safe principle that open positions stay protected
+   independent of bot uptime.
+9. Open items flagged for verification DURING implementation, not
+   assumed: exact `client_order_id` length limit for this account's
+   Trading API (Alpaca's own docs disagree: 48 vs 128 chars), exact
+   `TradeUpdate`/`Order` field names in the installed alpaca-py version,
+   existing systemd unit naming convention, installed alpaca-py version
+   pin.
+
+This design session did NOT touch the other open gap from the
+`execution.py` milestone (the entry-qty-before-fill sequencing tension,
+resolved there with a pre-fill `close_T` proxy) — that remains a
+separate, still-unconfirmed placeholder, per the "Blocked/pending"
+section below.
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
@@ -2891,6 +2961,15 @@ detail in "Current status") —
 Both need a real chat-interface design-call confirmation before this
 module should be trusted with live capital — do not treat either as
 settled without a fresh, explicit instruction.
+
+**UPDATE (2026-08-12 session): gap 2 (bridging the overnight
+submit-to-fill gap across daily-job invocations) now has a LOCKED design
+— a `fill_listener.py` event-driven WebSocket listener, superseding the
+"third scheduled invocation" idea — see "Current status" above for the
+full locked architecture. Not yet implemented; implementation is the
+next milestone.** Gap 1 (the entry-qty-before-fill sequencing tension,
+resolved in `execution.py` with a pre-fill `close_T` proxy) is untouched
+by this design session and remains an unconfirmed placeholder.
 
 **Crypto strategy family: CLOSED, no further milestones.** Finding 14
 (corrected long-horizon design — 100-day Donchian channel, daily entries,
