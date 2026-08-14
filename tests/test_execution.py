@@ -300,13 +300,17 @@ def test_ratchet_position_stop_does_not_replace_when_prior_atr_unavailable():
     assert client.replace_calls == []
 
 
-# --- ratchet_position_stop: multi-stop CONSOLIDATION (fix-up item 1) -------
+# --- ratchet_position_stop: multi-stop INDEPENDENT RATCHETING (fix-up item 3,
+# replaces the removed new-before-cancel consolidation mechanism — see
+# module docstring FIX-UP #2/#3 for why: Alpaca's real held-quantity
+# validation rejects a new order that duplicates qty already held by
+# other still-open resting stops for the same symbol) -----------------------
 
-def test_ratchet_position_stop_consolidates_multiple_resting_stops_new_before_cancel():
-    # Two resting stops (5.0 + 3.0 qty, the top-up model's leftover
-    # state) -> the ratchet must merge them into exactly ONE new stop
-    # sized to 8.0, and must NOT cancel the old two until the new one is
-    # CONFIRMED resting via a fresh query — not merely "submit didn't raise".
+def test_ratchet_position_stop_replaces_each_resting_stop_independently_when_multiple_exist():
+    # Two resting stops (the top-up model's leftover state) both sit
+    # below the new candidate price -> EACH gets its own independent
+    # PATCH replace call to the SAME target price. No new order is ever
+    # submitted and nothing is ever cancelled.
     dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
     series = _series(dates, closes=[100, 110, 105], atrs=[1.0, 2.0, 50.0])
     position = LivePosition(
@@ -314,7 +318,6 @@ def test_ratchet_position_stop_consolidates_multiple_resting_stops_new_before_ca
         stop_order_id="stop-1", stop_price=96.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
     )
     client = FakeTradingClient()
-    call_order = []
     resting = [
         FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=97.0,
                   submitted_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
@@ -323,92 +326,55 @@ def test_ratchet_position_stop_consolidates_multiple_resting_stops_new_before_ca
     ]
     client.orders_by_request = lambda filter: list(resting)
 
-    def submit_order(req):
-        call_order.append("submit")
-        assert isinstance(req, StopOrderRequest)
-        assert req.qty == 8.0  # 5.0 + 3.0, the SUMMED qty of the two old stops
-        return FakeOrder(id="stop-new", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
-    client.submit_order_fn = submit_order
-
-    def get_order_by_id(order_id):
-        call_order.append("confirm")
-        assert order_id == "stop-new"
-        return FakeOrder(id=order_id, status=OrderStatus.NEW)  # confirmed resting, non-terminal
-    client.get_order_by_id_fn = get_order_by_id
-
-    def cancel_order_by_id(order_id):
-        call_order.append(f"cancel:{order_id}")
-    client.cancel_order_by_id_fn = cancel_order_by_id
-
     result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
 
     # extreme_close=110 (max close 08-03..08-05), prior_atr=atr[1]=2.0 -> candidate = 110-6=104.
-    # worst_current_price = min(97.0, 96.0) = 96.0 -> consolidated price = max(104, 96) = 104.
+    # worst_current_price = min(97.0, 96.0) = 96.0 -> target = max(104, 96) = 104, above BOTH existing stops.
     assert result is True
-    assert len(client.submitted_orders) == 1  # exactly ONE new consolidated stop
-    assert client.submitted_orders[0].qty == 8.0
-    assert client.submitted_orders[0].stop_price == 104.0
-    assert set(client.cancel_calls) == {"stop-1", "stop-2"}
-    assert len(client.cancel_calls) == 2  # BOTH old stops cancelled, no leftovers
-    # NEW-BEFORE-CANCEL: submit and confirm must both precede every cancel.
-    assert call_order.index("submit") < call_order.index("confirm")
-    cancel_indices = [i for i, c in enumerate(call_order) if c.startswith("cancel:")]
-    assert all(i > call_order.index("confirm") for i in cancel_indices)
+    assert client.submitted_orders == []  # no new order ever submitted
+    assert client.cancel_calls == []  # nothing ever cancelled
+    assert len(client.replace_calls) == 2  # one independent PATCH per resting stop
+    replaced_ids = {order_id for order_id, _ in client.replace_calls}
+    assert replaced_ids == {"stop-1", "stop-2"}
+    for _, replace_request in client.replace_calls:
+        assert replace_request.stop_price == 104.0
+        assert getattr(replace_request, "qty", None) is None  # qty is never touched by this path
 
 
-def test_ratchet_position_stop_consolidation_leaves_old_stops_untouched_if_new_submission_fails(captured_telegram_messages):
+def test_ratchet_position_stop_only_replaces_stops_the_new_price_actually_improves():
+    # Stop-1 sits below the new target (gets replaced); stop-2 is already
+    # ABOVE the new target (must be left alone, ratchet-only per-order,
+    # same rule replace_stop_order_if_favorable() already applies to a
+    # single stop — proves the multi-stop path isn't unconditional).
     dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
     series = _series(dates, closes=[100, 110, 105], atrs=[1.0, 2.0, 50.0])
     position = LivePosition(
         symbol="SPY", qty=8.0, entry_price=100.0, entry_date="2026-08-03",
-        stop_order_id="stop-1", stop_price=96.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
+        stop_order_id="stop-1", stop_price=97.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
     )
     client = FakeTradingClient()
     resting = [
         FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=97.0),
-        FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=96.0),
+        FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=105.0),
     ]
     client.orders_by_request = lambda filter: list(resting)
-    client.submit_order_fn = lambda req: (_ for _ in ()).throw(RuntimeError("broker rejected stop order"))
 
     result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
 
-    assert result is False
-    assert client.cancel_calls == []  # old stops left completely untouched — never drop protection
-    urgent = [m for m in captured_telegram_messages if "URGENT" in m and "UNPROTECTED" in m]
-    assert len(urgent) == 1  # submit_stop_order_with_retry()'s own existing alert
+    # worst_current_price = min(97.0, 105.0) = 97.0 -> candidate = 110-6=104 -> target = max(104, 97) = 104.
+    # 104 > 97 (stop-1 replaced); 104 <= 105 (stop-2 left untouched).
+    assert result is True
+    assert client.submitted_orders == []
+    assert client.cancel_calls == []
+    assert len(client.replace_calls) == 1
+    replaced_id, replace_request = client.replace_calls[0]
+    assert replaced_id == "stop-1"
+    assert replace_request.stop_price == 104.0
 
 
-def test_ratchet_position_stop_consolidation_leaves_old_stops_untouched_if_new_stop_cannot_be_confirmed(captured_telegram_messages):
-    dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
-    series = _series(dates, closes=[100, 110, 105], atrs=[1.0, 2.0, 50.0])
-    position = LivePosition(
-        symbol="SPY", qty=8.0, entry_price=100.0, entry_date="2026-08-03",
-        stop_order_id="stop-1", stop_price=96.0, risk_amount=32.0, risk_pct=0.32, notional_pct_of_equity=1.0,
-    )
-    client = FakeTradingClient()
-    resting = [
-        FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.0, stop_price=97.0),
-        FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=96.0),
-    ]
-    client.orders_by_request = lambda filter: list(resting)
-    client.submit_order_fn = lambda req: FakeOrder(id="stop-new", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
-    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.REJECTED)  # cannot confirm resting
-
-    result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
-
-    assert result is False
-    assert client.cancel_calls == []  # old stops left completely untouched
-    urgent = [m for m in captured_telegram_messages if "URGENT" in m and "consolidation" in m]
-    assert len(urgent) == 1
-
-
-def test_ratchet_position_stop_consolidates_even_when_the_ratchet_price_does_not_improve():
-    # Judgment call, flagged in _consolidate_resting_stops()'s docstring:
-    # consolidation is UNCONDITIONAL whenever multiple stops are found,
-    # even if the ratchet candidate isn't more favorable than the current
-    # worst price this cycle — otherwise "never more than one resting
-    # stop past the next daily job cycle" wouldn't be a hard guarantee.
+def test_ratchet_position_stop_returns_false_when_no_resting_stop_improves():
+    # Every resting stop already sits at/above the new candidate ->
+    # nothing gets replaced and the function reports no change.
     dates = ["2026-08-03", "2026-08-04", "2026-08-05"]
     series = _series(dates, closes=[100, 101, 100.5], atrs=[1.0, 50.0, 1.0])  # huge prior_atr -> candidate far below current
     position = LivePosition(
@@ -421,17 +387,15 @@ def test_ratchet_position_stop_consolidates_even_when_the_ratchet_price_does_not
         FakeOrder(id="stop-2", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=3.0, stop_price=96.0),
     ]
     client.orders_by_request = lambda filter: list(resting)
-    client.submit_order_fn = lambda req: FakeOrder(id="stop-new", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
-    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.NEW)
 
     result = ratchet_position_stop(client, position, series, today="2026-08-05", atr_multiplier=3.0, sleep_fn=_no_sleep)
 
     # extreme_close=101, prior_atr=atr[1]=50.0 -> candidate = 101-150 = -49, far below worst_current_price(96.0)
-    # -> consolidated price stays 96.0 (ratchet-only, never worse) but the MERGE into one order still happens.
-    assert result is True
-    assert client.submitted_orders[0].stop_price == 96.0
-    assert client.submitted_orders[0].qty == 8.0
-    assert set(client.cancel_calls) == {"stop-1", "stop-2"}
+    # -> target stays 96.0 (ratchet-only, never worse) — neither existing stop (97.0, 96.0) is improved on.
+    assert result is False
+    assert client.submitted_orders == []
+    assert client.cancel_calls == []
+    assert client.replace_calls == []
 
 
 def test_replace_stop_order_if_favorable_never_calls_replace_when_not_favorable():

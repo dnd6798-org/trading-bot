@@ -237,30 +237,54 @@ FIX-UP #1, commit 95cd7d8 (both items resolved rather than left flagged):
      client_order_id encoding call site in submit_entry_and_stop() for
      the full reasoning.
 
-FIX-UP #2 (multi-stop consolidation — implemented, but see the CRITICAL
-note below, NOT fully resolved): build_open_positions() now uses
-_find_all_resting_stop_orders() and takes the WORST (lowest) price
-across multiple resting stops for its conservative stop_price/risk
-calculation. ratchet_position_stop() now independently re-queries all
-resting stops for a position and, when more than one exists, calls
-_consolidate_resting_stops() instead of the single-stop PATCH-replace
-path — see that function's own docstring for the full "new-before-
-cancel" mechanics (submit new, confirm resting, only then cancel old)
-and the UNCONDITIONAL-consolidation judgment call.
+FIX-UP #2 (multi-stop consolidation — REMOVED, see FIX-UP #3): the
+original attempt merged multiple resting stops into one via a
+new-before-cancel PATCH sequence (_consolidate_resting_stops(),
+submit a new combined-qty order, confirm it resting, only then cancel
+the olds). Live re-verification against the real paper account found
+this REJECTED by Alpaca's own held-quantity validation in exactly the
+scenario it exists for: when the existing resting stops already fully
+cover the real position's share count, a NEW sell order requesting that
+same qty is rejected outright — "insufficient qty available for order"
+— because Alpaca will not let a new order reserve share quantity other
+still-open sell orders already hold, even though no shares have
+actually been sold yet. No ordering trick around submit-vs-cancel
+avoids this without either reintroducing a real coverage gap
+(cancel-then-patch) or ReplaceOrderRequest.qty's Optional[int] typing
+(the exact constraint FIX-UP #1 built the top-up model to avoid) —
+so the mechanism itself was replaced, not patched. See FIX-UP #3.
 
-*** CRITICAL, confirmed by this fix-up's REQUIRED live paper-account
-re-verification, NOT resolved: the new-before-cancel consolidation
-mechanism is REJECTED by Alpaca's real API in exactly the scenario it
-exists for (old resting stops already fully covering the real position)
-— "insufficient qty available for order" — confirmed directly against
-the real account, isolated from any test-script artifact. The single-
-stop PATCH-replace path (unaffected) and the top-up mechanism itself
-(unaffected, when its total correctly never exceeds the real position
-size) both still work correctly live. See _consolidate_resting_stops()'s
-own docstring for the full finding, including a confirmed-but-NOT-
-implemented alternative (cancel-down-to-one-then-PATCH) and its own
-trade-offs. This needs a fresh design-call confirmation before
-consolidation should be trusted with live capital — not resolved here.
+FIX-UP #3 (independent per-stop ratcheting — replaces FIX-UP #2's
+consolidation entirely): when ratchet_position_stop() finds multiple
+resting stops for a symbol, it no longer merges them. Instead it
+computes one target ratchet price (off the worst/lowest of the existing
+stops' prices, same conservative basis consolidation used) and applies
+it to EACH resting stop independently via its own
+ReplaceOrderRequest(stop_price=...) — the same single-stop PATCH-replace
+mechanism already used and already confirmed working live, just called
+once per order instead of once per position. No new order is ever
+submitted for this path and nothing is ever cancelled — qty is untouched
+on every call, so this has no dependency on ReplaceOrderRequest.qty at
+all. build_open_positions()'s existing worst-price rule (see
+_find_all_resting_stop_orders()) already keeps risk/state reporting
+correct with any number of resting stops per symbol, so there is no
+remaining requirement to collapse them into one — a symbol may now
+legitimately carry N independently-ratcheted resting stops for its
+entire holding period, and that is an accepted, permanent state, not a
+leftover to be cleaned up.
+
+*** FLAGGED, NOT RESOLVED (new edge case surfaced by this replacement,
+not present in the single-stop path): a partial-replace-failure mid-loop
+is possible — e.g. one resting stop's PATCH succeeds and a later one for
+the SAME symbol raises. The loop does not catch per-order exceptions and
+does not roll back an earlier successful replace; the exception
+propagates to run_daily_execution_job()'s per-position try/except, whose
+alert text ("existing resting stop unchanged") would then be
+INACCURATE for this position — one stop may have moved, another may not
+have. This is a real, honest possibility, not silently handled or
+assumed safe — flagged for a design call (e.g., should the alert
+distinguish partial success, should a partial failure retry just the
+failed order) rather than guessed at here.
 """
 import re
 import time
@@ -397,8 +421,8 @@ def _find_all_resting_stop_orders(trading_client: TradingClient, symbol: str) ->
     Returns ALL currently resting stop orders for `symbol`, sorted by
     submitted_at ascending — unlike _find_resting_stop_order() (which
     returns only the single most-recently-submitted one), this exists
-    for the multi-stop consolidation path (ratchet_position_stop(),
-    fix-up item 1) and build_open_positions()'s conservative stop_price/
+    for the multi-stop independent-ratchet path (ratchet_position_stop(),
+    fix-up item 3) and build_open_positions()'s conservative stop_price/
     risk calculation below, both of which need full awareness of every
     resting stop for a symbol — the top-up model
     (submit_or_resize_stop_order_with_retry()) can leave more than one
@@ -461,8 +485,9 @@ def build_open_positions(trading_client: TradingClient, universe=None) -> list[L
     function's job is state reporting, not alerting.
 
     MULTI-STOP AWARENESS (fix-up, item 1): the top-up model can leave
-    MORE THAN ONE resting stop for a symbol until the next daily ratchet
-    consolidates them (ratchet_position_stop()). Uses
+    MORE THAN ONE resting stop for a symbol, each ratcheted independently
+    going forward (ratchet_position_stop(), fix-up item 3) rather than
+    ever merged into one. Uses
     _find_all_resting_stop_orders() (not the single-order _find_resting_
     stop_order()) and, when several exist, takes the WORST (lowest, for a
     long) of their prices as this position's `stop_price` — the
@@ -471,9 +496,9 @@ def build_open_positions(trading_client: TradingClient, universe=None) -> list[L
     and must never overstate how well-protected the position actually is.
     `stop_order_id` stays informational only (the most-recently-submitted
     of the resting stops) — ratchet_position_stop() re-queries all
-    resting stops independently for its own consolidation decision rather
-    than trusting this single id, so nothing downstream relies on it
-    representing the WHOLE resting-stop state in the multi-stop case.
+    resting stops independently for its own per-stop ratchet decisions
+    rather than trusting this single id, so nothing downstream relies on
+    it representing the WHOLE resting-stop state in the multi-stop case.
     """
     if universe is None:
         universe = TRACK_B_UNIVERSE
@@ -1033,155 +1058,44 @@ def replace_stop_order_if_favorable(trading_client: TradingClient, stop_order_id
     return True
 
 
-def _confirm_order_resting(trading_client: TradingClient, order_id) -> bool:
-    """
-    Confirms a just-submitted order is genuinely resting (not a
-    genuinely-terminal no-fill status, and not already filled) via a
-    FRESH API query — the "new-before-cancel" safety check the stop-
-    consolidation path (fix-up item 1) uses: the old stops being
-    replaced must not be cancelled until the new consolidated stop is
-    CONFIRMED resting, not merely "submission didn't raise an exception".
-    """
-    order = trading_client.get_order_by_id(order_id)
-    return order.status not in _GENUINELY_TERMINAL_NO_FILL and order.status != OrderStatus.FILLED
-
-
-def _consolidate_resting_stops(
-    trading_client: TradingClient, symbol: str, resting_stops: list,
-    extreme_close: float, prior_atr: float, atr_multiplier: float, sleep_fn=time.sleep,
-) -> bool:
-    """
-    Merges MULTIPLE resting stop orders for one symbol (the top-up
-    model's leftover state, fix-up item 1) into a SINGLE consolidated
-    stop — called by ratchet_position_stop() whenever more than one
-    resting stop is found for a position. See that function's own
-    docstring for the full "CONSOLIDATION" reasoning, including the
-    judgment call that consolidation is UNCONDITIONAL (happens whenever
-    multiple stops are found, regardless of whether the ratchet price
-    itself improves this cycle) — this is what makes "a symbol should
-    never carry more than one resting stop past the next daily job
-    cycle" a hard guarantee rather than one contingent on the position
-    continuing to trend favorably every single day.
-
-    Mechanics:
-      1. new stop qty = SUM of the existing resting stops' qty (never
-         assumed to equal the live position's own qty, in case they've
-         ever diverged — sized to exactly what's being replaced).
-      2. new stop price = max(ratchet candidate, the WORST/lowest of the
-         existing stops' prices) — ratchet-only, same as the single-stop
-         path: the consolidated price never moves backward.
-      3. NEW-BEFORE-CANCEL: the new stop is submitted (via submit_stop_
-         order_with_retry() — retry+alert on submission failure is
-         reused unchanged) and its resting status is CONFIRMED via a
-         fresh query (_confirm_order_resting()) BEFORE any old stop is
-         cancelled. If submission fails outright, or the new stop can't
-         be confirmed resting, the OLD stops are left completely
-         untouched — protection never drops during a failed
-         consolidation attempt, matching this module's existing
-         replace-not-cancel safety principle (applied here across
-         multiple source orders, where a single PATCH can't express the
-         merge).
-      4. Only once resting is confirmed are the old stops cancelled. A
-         cancel failure on an individual old stop is alerted but does
-         NOT undo the new stop or fail the whole consolidation — the
-         position is already protected by the new consolidated stop at
-         that point, so a leftover old stop is a minor cleanup issue
-         (and, being at or below the new stop's price with less-or-equal
-         total qty than the live position, not itself a source of
-         over-selling risk), not an unprotected-window issue.
-    Returns True if consolidation succeeded (new stop confirmed resting,
-    old ones cancelled — though see point 4, an individual cancel
-    failure doesn't flip this back to False), False if the new stop
-    couldn't be submitted or confirmed (old stops left resting, alerted).
-
-    *** CRITICAL, DISCOVERED THIS FIX-UP'S LIVE RE-VERIFICATION, NOT YET
-    RESOLVED — READ BEFORE TRUSTING THIS FUNCTION WITH LIVE CAPITAL ***
-    Confirmed directly against the real paper account, isolated from any
-    test-script artifact: when the existing resting stops ALREADY fully
-    cover the real position's held share count (exactly the situation
-    this function exists to handle), Alpaca's own held-quantity
-    validation REJECTS the new consolidated order's submission outright
-    — "insufficient qty available for order (requested: 2, available:
-    0)", both existing stops listed in `related_orders`. This is a cash/
-    non-margin-account constraint on step 3 (new-before-cancel) above:
-    Alpaca will not let a NEW sell order reserve share quantity that
-    OTHER STILL-OPEN sell orders already have held, even though the
-    shares themselves haven't been sold yet. The single-stop PATCH-
-    replace path (replace_stop_order_if_favorable()) is NOT affected —
-    modifying an existing order's own qty in place does not need NEW
-    headroom the way a separate new order does — so this is specific to
-    the multi-order merge case.
-
-    Practical effect: submit_stop_order_with_retry() inside this function
-    will retry 4 times and then fail (correctly falling through to the
-    URGENT alert path, so this does NOT silently under-protect a
-    position — the old stops stay resting, protection is not lost) —
-    but consolidation as designed here will NEVER actually succeed in
-    the exact scenario it's meant for. Also confirmed (informational,
-    not implemented here): cancelling all but one old stop FIRST, then
-    PATCH-replacing the survivor's qty+price up to the consolidated
-    values, WAS accepted by the real API in the same experiment — but
-    that reintroduces two problems this design was explicitly trying to
-    avoid: a brief real coverage gap for the freed increment (between the
-    cancel and the patch), and ReplaceOrderRequest.qty's Optional[int]
-    typing (the same constraint fix-up item 1 replaced the qty-resize
-    path to get away from) resurfacing for any fractional consolidated
-    total. NOT implemented as a silent replacement here — this needs a
-    fresh design-call confirmation (same "flag it, don't guess"
-    convention as this module's other open gaps), not a unilateral
-    rewrite of the mechanism the user explicitly specified.
-    """
-    worst_current_price = min(float(o.stop_price) for o in resting_stops)
-    candidate = compute_ratcheted_stop_price(extreme_close, prior_atr, atr_multiplier, worst_current_price)
-    consolidated_price = max(candidate, worst_current_price)
-    total_qty = sum(float(o.qty) for o in resting_stops)
-
-    new_order = submit_stop_order_with_retry(trading_client, symbol, total_qty, consolidated_price, sleep_fn=sleep_fn)
-    if new_order is None:
-        # submit_stop_order_with_retry() already fired its own URGENT
-        # alert on total submission failure — old stops are left
-        # resting, untouched.
-        return False
-
-    if not _confirm_order_resting(trading_client, new_order.id):
-        telegram_bot.send_message(
-            f"URGENT — stop consolidation for {symbol}: a new stop order ({new_order.id}) was submitted but its "
-            f"resting status could not be confirmed. The OLD resting stops were left in place, untouched, as a "
-            f"precaution — {symbol} may now have an EXTRA, unintended resting stop. Manual review required."
-        )
-        return False
-
-    for old in resting_stops:
-        try:
-            trading_client.cancel_order_by_id(old.id)
-        except Exception as exc:  # noqa: BLE001 — the position is already protected by the confirmed new stop; a failed cleanup cancel is not an unprotected-window issue
-            telegram_bot.send_message(
-                f"fill_listener/execution.py: consolidated stop for {symbol} is confirmed resting, but cancelling "
-                f"old stop {old.id} failed ({exc}). The new consolidated stop is real and correctly sized — "
-                f"{symbol} may simply have an extra, harmless resting stop; not urgent, but worth manual cleanup."
-            )
-    return True
-
-
 def ratchet_position_stop(
     trading_client: TradingClient, position: LivePosition, series, today: str,
     atr_multiplier=ATR_MULTIPLIER, sleep_fn=time.sleep,
 ) -> bool:
     """
     Daily ratchet for one open position — recomputes extreme_close and
-    the candidate new stop, then either replaces the single resting stop
-    (the common case, unchanged) or CONSOLIDATES multiple resting stops
-    into one (fix-up item 1 — see _consolidate_resting_stops()) if the
-    top-up model left more than one for this symbol. Returns True if
-    either action actually changed the resting stop state.
+    the candidate new stop, then replaces EVERY resting stop for this
+    symbol independently (fix-up item 3 — replaces the removed
+    consolidation mechanism, see module docstring). Returns True if at
+    least one resting stop's price actually changed.
 
     Independently re-queries ALL resting stops for position.symbol
     (_find_all_resting_stop_orders()) rather than trusting position.
-    stop_order_id/stop_price alone for the multi-vs-single decision —
-    build_open_positions() already computes those conservatively (the
-    worst/lowest price) for reporting/risk purposes, but the ACTUAL
-    consolidation decision needs the full, current list of resting
-    orders, not just a derived summary.
+    stop_order_id/stop_price alone — build_open_positions() already
+    computes those conservatively (the worst/lowest price) for
+    reporting/risk purposes, but the ACTUAL ratchet needs the full,
+    current list of resting orders, not just a derived summary.
+
+    MULTI-STOP CASE (the top-up model's leftover state — more than one
+    resting stop for this symbol): a single target price is computed off
+    the WORST/lowest of the existing stops' prices (same conservative
+    basis the removed consolidation mechanism used), then applied to
+    EACH resting stop independently via replace_stop_order_if_favorable()
+    — the same single-stop PATCH-replace primitive already used and
+    already confirmed working live, just invoked once per order. No new
+    order is submitted, nothing is cancelled, qty is never touched on any
+    of these calls — a symbol may legitimately carry N independently-
+    ratcheted resting stops for its entire holding period; that is an
+    accepted, permanent state now, not a leftover to be collapsed (see
+    module docstring FIX-UP #3 for why the collapse attempt was removed).
+
+    *** FLAGGED, NOT RESOLVED: per-order replace calls in the loop below
+    are not individually wrapped — if one resting stop's PATCH succeeds
+    and a later one for the same symbol raises, the exception propagates
+    to the caller (run_daily_execution_job()'s per-position try/except),
+    whose alert text assumes an all-or-nothing failure and would be
+    inaccurate for a partial success. Not silently handled here — see
+    module docstring for the full callout.
     """
     as_of_idx = series["date_index"].get(today)
     if as_of_idx is None:
@@ -1201,9 +1115,13 @@ def ratchet_position_stop(
         candidate_stop = compute_ratcheted_stop_price(extreme_close, prior_atr, atr_multiplier, position.stop_price)
         return replace_stop_order_if_favorable(trading_client, position.stop_order_id, candidate_stop, position.stop_price)
 
-    return _consolidate_resting_stops(
-        trading_client, position.symbol, resting_stops, extreme_close, prior_atr, atr_multiplier, sleep_fn=sleep_fn,
-    )
+    worst_current_price = min(float(o.stop_price) for o in resting_stops)
+    candidate_stop = compute_ratcheted_stop_price(extreme_close, prior_atr, atr_multiplier, worst_current_price)
+    changed = False
+    for order in resting_stops:
+        if replace_stop_order_if_favorable(trading_client, order.id, candidate_stop, float(order.stop_price)):
+            changed = True
+    return changed
 
 
 def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrails, sleep_fn=time.sleep, poll_timeout_seconds=60) -> TrackBEntryResult:

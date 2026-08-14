@@ -1303,6 +1303,78 @@ HEAD (commit `9136c28`) does not actually work against a real account.
    after the two manual follow-up isolation experiments run outside the
    script itself.
 
+**UPDATE (same session): the new-before-cancel consolidation mechanism has
+been REMOVED and REPLACED with independent per-stop ratcheting — CLOSES
+the multi-stop gap, per a locked design given separately, not invented
+here.** `_consolidate_resting_stops()` and its `_confirm_order_resting()`
+helper are deleted outright, not patched. `ratchet_position_stop()`'s
+multi-stop branch (more than one resting stop found for a symbol — the
+top-up model's leftover state) now computes ONE target price (off the
+worst/lowest of the existing stops, same conservative basis consolidation
+used) and applies it to EACH resting stop independently via its own
+`ReplaceOrderRequest(stop_price=...)` — the same single-stop PATCH-replace
+primitive already used and already confirmed working live, just invoked
+once per order. No new order is ever submitted, nothing is ever
+cancelled, and `qty` is never included in any of these replace calls —
+confirmed by grep that `ReplaceOrderRequest.qty` has zero remaining
+call sites in the ratchet path, so the `Optional[int]`-typing constraint
+that motivated the original top-up-model fix-up is structurally
+irrelevant here too. `build_open_positions()`'s existing worst-price rule
+already keeps risk/state reporting correct with any number of resting
+stops per symbol, so a symbol may now legitimately carry N
+independently-ratcheted resting stops for its entire holding period —
+an accepted, permanent state, not a leftover to be collapsed.
+
+Tests: the 4 consolidation-specific tests (new-before-cancel call order,
+summed-qty submission, submission-failure/confirmation-failure alerting,
+unconditional-merge) were replaced with 3 new tests asserting the actual
+new contract — each resting stop gets its own independent replace call;
+the new price is applied to every stop that's actually improved by it
+(a stop already above the new candidate is correctly left untouched,
+proving the per-stop check isn't unconditional); no new order is ever
+submitted and nothing is ever cancelled; qty is never present on any
+replace call. Full suite: **264/264 passing** (265 - 4 removed + 3
+added).
+
+**Live re-verification — a REAL, NEW issue was found and fixed before
+Part 3 could pass, not just a rerun of the prior round's script.** The
+first live attempt this session hit a rejection on the TOP-UP call
+itself (`"insufficient qty available for order (requested: 1, available:
+0)"`), not just on the now-removed consolidation step — root-caused to a
+pre-existing bug in `scripts/dry_run_fill_listener.py`'s own Part 3
+methodology, not in `execution.py`: it only ever bought a REAL 1-share
+position, then fed `handle_trade_update()` two synthetic events claiming
+a cumulative qty of 2 — i.e. it was always asking Alpaca to rest sell
+orders totalling more shares than the account actually held, which
+happened to be tolerated once in the PRIOR round and was rejected
+outright this time, confirming that tolerance was never a reliable API
+guarantee. Fixed by buying the REAL full 2x qty up front so both
+synthetic events' claimed cumulative totals are genuinely backed by real
+shares at submission time (only the "one atomic fill reported as two
+separate notification events" simplification remains synthetic, not the
+share count). After that fix, Part 3 PASSED live end to end: a real
+2-share IWM position, protected by two real independently-submitted
+resting stops (qty 1 + qty 1, same price) via the real top-up path, then
+`ratchet_position_stop()` correctly found both, independently PATCH-
+replaced BOTH to the new ratcheted price, with neither merged nor
+cancelled and both quantities unchanged (1 + 1, not resized). Parts 1/2
+(unaffected by this milestone) both PASS again unchanged. Account
+confirmed left flat after the full run (0 positions, 0 open orders,
+verified via direct GET).
+
+**Flagged, NOT resolved by this milestone (a real edge case, not
+silently handled, per instruction):** the multi-stop replace loop in
+`ratchet_position_stop()` does not wrap each per-order `replace_stop_
+order_if_favorable()` call individually — if one resting stop's PATCH
+succeeds and a LATER one for the same symbol then raises, the exception
+propagates to `run_daily_execution_job()`'s per-position try/except,
+whose alert text ("existing resting stop unchanged") would be
+inaccurate for a partial success (one stop moved, another didn't). Not
+observed in this session's live run (both replaces succeeded), and not
+guessed at or silently patched here — needs its own design call (e.g.
+should the alert distinguish partial success, should a partial failure
+retry just the failed order) before being trusted with live capital.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
