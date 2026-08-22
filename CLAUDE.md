@@ -1671,6 +1671,76 @@ the listener's liveness heartbeat; the four droplet-only Step 5 checks)
 — five items total, all requiring direct droplet access this Windows-
 local session never had.
 
+**UPDATE (claude.ai chat, same day, design only — no code written this
+session): the listener liveness heartbeat's design is now LOCKED,
+closing the open gap flagged immediately above** ("The listener liveness
+heartbeat remains a real, open gap — needs its own claude.ai design pass
+before a future session builds it, not invented here"). This is a
+decision-record update only, per RULES.md §4's two-message handoff — the
+implementation itself is a separate, not-yet-sent milestone brief.
+
+**What this closes:** until now, nothing external could detect the
+fill-protection listener process itself being down (as opposed to a
+data/API failure the listener's own error handling already logs/alerts
+for) — the daily job's heartbeat (systemd-units milestone, above) only
+proves the DAILY process is alive, not the listener.
+
+**Locked design:**
+- A new periodic `asyncio` task, `heartbeat_loop()`, runs CONCURRENTLY
+  with `MonitoredTradingStream._run_forever()` via `asyncio.gather()` —
+  not as a separate thread/process, and not bolted onto the existing
+  reconnect loop.
+- Pings every 5 minutes.
+- Gated on the stream's existing consecutive-failure counter (the same
+  counter `MonitoredTradingStream`'s backoff/URGENT-alert-at-5-failures
+  logic already tracks, spec v33 §10.5/"Current status" above) staying
+  BELOW its 5-failure alert threshold — i.e. the heartbeat pings only
+  while the connection itself is healthy by the listener's own existing
+  definition of healthy, not on a bare "the process is still running"
+  basis that could ping straight through a real outage.
+- New env var `UPTIMEROBOT_LISTENER_HEARTBEAT_URL`, `required=False` —
+  same fail-safe pattern already implemented for
+  `UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` (`get_heartbeat_config()`,
+  `src/config.py`, systemd-units milestone above): a missing/blank URL
+  skips the ping and logs a warning, never crashes the listener.
+- UptimeRobot alert window: **15 minutes** (3 missed 5-minute pings,
+  narrower than the daily job's ~26h window since this is a
+  continuously-running process where a missed heartbeat is meaningful
+  within minutes, not a once-daily job).
+
+**Verified against actual installed source during design, not assumed —
+this changes the listener's entrypoint shape, not just adds a task
+alongside it:** `TradingStream.run()` (installed alpaca-py 0.43.5,
+`alpaca/trading/stream.py`, already cited in `fill_listener.py`'s own
+module docstring for the backoff-timing finding) wraps
+`_run_forever()` in `asyncio.run()`, which owns and closes its own event
+loop — `asyncio.run()` cannot be nested inside another coroutine's
+`asyncio.gather()`. **Consequence: `run_listener()`'s entrypoint must
+call `_run_forever()` directly inside its own `async def main()`,
+gathered together with the new `heartbeat_loop()`, NOT call
+`stream.run()`** (which is what `run_listener()` currently does — see
+"Current status" above, fill-protection listener milestone). This is a
+structural change to the entrypoint, not an additive one — flagged here
+so the next session doesn't try to bolt `heartbeat_loop()` onto the
+existing `stream.run()` call and silently fail to share the loop.
+
+**Not yet implemented — this update is the design record only.** The
+next session building this must: replace `run_listener()`'s
+`stream.run()` call with an `async def main()` that
+`asyncio.gather()`s `_run_forever()` and the new `heartbeat_loop()`;
+add `heartbeat_loop()` and wire it to the existing consecutive-failure
+counter; add `get_heartbeat_config()`'s `listener_url` field (or a
+sibling function) for `UPTIMEROBOT_LISTENER_HEARTBEAT_URL`; document the
+new var in `.env.example`; update `deploy/systemd/trading-bot-
+listener.service`'s `README.md` if the entrypoint's async behavior
+changes anything about how systemd should supervise it (not expected to,
+since `Type=simple`/`ExecStart` stay the same either way, but confirm
+rather than assume); and add tests proving the heartbeat only fires
+below the 5-failure threshold and never on top of a stream that's
+already down. This closes one of the two open items from the
+systemd-units milestone's "Explicit open items" list above — the other
+four droplet-only Step 5 checks are untouched by this update.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
