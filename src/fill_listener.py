@@ -95,18 +95,43 @@ VERIFIED THIS MILESTONE, not assumed:
     on TradingStream's internal _start_ws() override point is a
     dependency-management decision flagged for the chat interface, not
     made unilaterally here.
+
+LISTENER LIVENESS HEARTBEAT (locked design session, 2026-08-22 — see
+CLAUDE.md "Current status"): the gaps above are all about a still-RUNNING
+process reacting to fills or reconnect failures. Nothing previously
+detected the process itself being DOWN (crashed outright, crash-looped
+past systemd's StartLimitBurst=5, or the whole droplet down) — the
+existing URGENT reconnect-failure alert (MonitoredTradingStream._start_ws()
+above) can only fire from inside a process that is still alive and
+attempting to reconnect. heartbeat_loop() below closes this the same way
+execution.py's send_daily_heartbeat() closes the equivalent gap for the
+daily job: a periodic external ping, so an UptimeRobot-side "no ping
+received" is the actual dead-man's-switch signal, not anything computed
+inside this process.
+
+Structural consequence, verified against the installed alpaca-py source
+before implementing (venv/Lib/site-packages/alpaca/trading/stream.py):
+TradingStream.run() wraps _run_forever() in asyncio.run(), which owns and
+closes its own event loop end-to-end — asyncio.run() cannot be nested
+inside another coroutine's asyncio.gather(). run_listener() below
+therefore no longer calls stream.run() directly; it drives
+stream._run_forever() itself, gathered together with heartbeat_loop(), both
+inside one asyncio.run(main()) call at the entrypoint. No other
+TradingStream behavior changes — subscribe_trade_updates() is still called
+synchronously before the event loop starts, exactly as before.
 """
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone
 
+import requests
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TradeEvent
 from alpaca.trading.stream import TradingStream
 
 from . import telegram_bot
-from .config import get_alpaca_config
+from .config import get_alpaca_config, get_listener_heartbeat_config
 from .execution import (
     TRACK_B_UNIVERSE,
     decode_client_order_id,
@@ -117,6 +142,7 @@ log = logging.getLogger(__name__)
 
 _ALERT_THRESHOLD = 5
 _MAX_BACKOFF_SECONDS = 300
+_HEARTBEAT_INTERVAL_SECONDS = 300  # 5 minutes (listener-heartbeat design session)
 _TRACKED_EVENT_VALUES = {TradeEvent.FILL.value, TradeEvent.PARTIAL_FILL.value}
 
 
@@ -294,6 +320,70 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
     }
 
 
+def send_listener_heartbeat(heartbeat_url: str = None, requests_module=requests) -> bool:
+    """
+    Dead-man's-switch ping for the listener process itself — mirrors
+    execution.py's send_daily_heartbeat() pattern exactly. Fired
+    periodically by heartbeat_loop() while the stream's connection is
+    healthy. Best-effort only, deliberately: a failed ping is logged and
+    returns False, never raised — a monitoring-side hiccup (network blip,
+    UptimeRobot outage) must never crash the listener or interrupt fill
+    handling.
+    """
+    if heartbeat_url is None:
+        heartbeat_url = get_listener_heartbeat_config().listener_url
+    if not heartbeat_url:
+        log.warning("send_listener_heartbeat: UPTIMEROBOT_LISTENER_HEARTBEAT_URL not set — skipping heartbeat ping.")
+        return False
+    try:
+        requests_module.get(heartbeat_url, timeout=10)
+        return True
+    except Exception as exc:  # noqa: BLE001 — a monitoring ping failure must never affect the listener
+        log.warning(f"send_listener_heartbeat: ping failed ({exc}) — listener itself still running.")
+        return False
+
+
+def _heartbeat_tick(stream: "MonitoredTradingStream", send_fn=send_listener_heartbeat) -> bool:
+    """
+    One heartbeat evaluation, factored out of heartbeat_loop() so tests
+    can exercise it directly without driving an infinite async loop.
+    Pings via send_fn() only while stream._consecutive_failures is below
+    stream._alert_threshold (both already-existing MonitoredTradingStream
+    attributes, per the locked design) — i.e. only while the connection is
+    healthy by MonitoredTradingStream's own existing definition, never on
+    a bare "the process hasn't crashed yet" basis that could ping straight
+    through a real, already-alerted outage. Returns True if a ping was
+    attempted, False if skipped.
+    """
+    if stream._consecutive_failures < stream._alert_threshold:
+        send_fn()
+        return True
+    log.info(
+        "fill_listener: heartbeat skipped — %s consecutive connection failures (>= alert threshold %s), "
+        "connection unhealthy.",
+        stream._consecutive_failures, stream._alert_threshold,
+    )
+    return False
+
+
+async def heartbeat_loop(
+    stream: "MonitoredTradingStream",
+    interval_seconds: int = _HEARTBEAT_INTERVAL_SECONDS,
+    sleep_fn=asyncio.sleep,
+    send_fn=send_listener_heartbeat,
+) -> None:
+    """
+    Runs concurrently with stream._run_forever() via asyncio.gather() in
+    run_listener()'s main() — pings the listener liveness heartbeat every
+    interval_seconds by delegating to _heartbeat_tick(). Loops forever
+    for the life of the process; tests exercise _heartbeat_tick() directly
+    rather than driving this loop to completion.
+    """
+    while True:
+        await sleep_fn(interval_seconds)
+        _heartbeat_tick(stream, send_fn=send_fn)
+
+
 def _build_trading_client() -> TradingClient:
     cfg = get_alpaca_config()
     return TradingClient(api_key=cfg.api_key, secret_key=cfg.secret_key, paper=cfg.paper)
@@ -311,8 +401,16 @@ def run_listener(trading_client: TradingClient = None, universe=None, sleep_fn=t
     architecture point; see module docstring for why no unit file is
     checked into this repo). Builds a real TradingClient (for order
     actions) and a MonitoredTradingStream (for the trade_updates
-    WebSocket), registers the async handler wrapper, and blocks forever
-    via TradingStream.run().
+    WebSocket), registers the async handler wrapper, and blocks forever.
+
+    Structural note (module docstring, "LISTENER LIVENESS HEARTBEAT"):
+    this no longer calls TradingStream.run() — that method wraps
+    _run_forever() in its own asyncio.run(), which cannot be nested inside
+    another coroutine's asyncio.gather(). Instead this drives
+    stream._run_forever() directly, gathered together with
+    heartbeat_loop(), inside one asyncio.run(main()) call. The
+    KeyboardInterrupt handling TradingStream.run() used to provide is
+    reproduced here directly, for parity.
     """
     if trading_client is None:
         trading_client = _build_trading_client()
@@ -331,7 +429,14 @@ def run_listener(trading_client: TradingClient = None, universe=None, sleep_fn=t
             )
 
     stream.subscribe_trade_updates(_handler)
-    stream.run()
+
+    async def main():
+        await asyncio.gather(stream._run_forever(), heartbeat_loop(stream))
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("fill_listener: keyboard interrupt, shutting down.")
 
 
 if __name__ == "__main__":

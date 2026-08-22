@@ -1741,6 +1741,79 @@ already down. This closes one of the two open items from the
 systemd-units milestone's "Explicit open items" list above — the other
 four droplet-only Step 5 checks are untouched by this update.
 
+**UPDATE: the listener liveness heartbeat milestone is now IMPLEMENTED,
+matching the locked design above exactly — full suite 286/286 passing
+(275 + 11 new: 2 in `tests/test_config.py`, 9 in
+`tests/test_fill_listener.py`).**
+
+1. **Entrypoint restructured as the locked design required, verified
+   before writing any new code, not assumed:** `run_listener()`
+   (`src/fill_listener.py`) previously called `stream.subscribe_trade_
+   updates(_handler)` followed by `stream.run()` — confirmed directly
+   from the file before this milestone touched it, matching the locked
+   design's premise exactly (it did NOT already drive `_run_forever()`
+   inside its own `async def main()`). Now builds `async def main():
+   await asyncio.gather(stream._run_forever(), heartbeat_loop(stream))`
+   and calls `asyncio.run(main())`, wrapped in `try/except
+   KeyboardInterrupt` for parity with the old `.run()` behavior (which
+   caught it internally). `subscribe_trade_updates()` is still called
+   synchronously before the event loop starts, unchanged.
+2. **`heartbeat_loop(stream, interval_seconds=300, sleep_fn=asyncio.
+   sleep, send_fn=send_listener_heartbeat)`** loops forever, sleeping 5
+   minutes between ticks, delegating each tick to a new `_heartbeat_tick()`
+   helper — factored out specifically so tests can exercise the gating
+   logic directly without driving an infinite async loop to completion.
+   `_heartbeat_tick()` pings via `send_fn()` only while `stream.
+   _consecutive_failures < stream._alert_threshold` (both pre-existing
+   `MonitoredTradingStream` attributes — no new counter introduced),
+   else logs at info level and skips, exactly matching the locked
+   design's "pings only while the connection itself is healthy by the
+   listener's own existing definition of healthy" requirement.
+3. **`send_listener_heartbeat()`** (`src/fill_listener.py`) and
+   **`get_listener_heartbeat_config()`** (`src/config.py`) mirror
+   `send_daily_heartbeat()`/`get_heartbeat_config()` exactly, per the
+   locked design: reads `UPTIMEROBOT_LISTENER_HEARTBEAT_URL`,
+   `required=False`; a missing/blank URL logs a warning and returns
+   `False` rather than raising; the ping call itself is wrapped in its
+   own `try/except` so a monitoring-side failure is logged and returns
+   `False`, never propagates. `HeartbeatConfig` gained a new
+   `listener_url: str | None = None` field alongside the existing
+   `daily_job_url` — additive, backward-compatible.
+4. **`UPTIMEROBOT_LISTENER_HEARTBEAT_URL` documented in `.env.example`**,
+   same placeholder-value convention as `UPTIMEROBOT_DAILY_JOB_
+   HEARTBEAT_URL`, with the comment describing its ~15-minute
+   UptimeRobot alert-window recommendation on its own line above the
+   `KEY=value` line — confirmed NOT to repeat the trailing-inline-comment
+   parsing bug the systemd-units milestone's `EnvironmentFile=` handling
+   had to avoid.
+5. **`deploy/systemd/trading-bot-listener.service` needed no change** —
+   confirmed, not assumed: its `ExecStart=... python -m src.fill_
+   listener` still resolves to `run_listener()` via the module's
+   unchanged `if __name__ == "__main__":` block; `Type=simple` and
+   `Restart=always` are unaffected by the entrypoint's internal
+   asyncio restructuring.
+
+**Tests** (11 new): heartbeat fires when the failure count is below
+threshold, skipped at/above threshold (both via `_heartbeat_tick()`
+directly), `send_listener_heartbeat()` no-ops with a logged warning when
+the URL is unset (never raises), pings the configured URL, falls back to
+the env var when no URL arg is given, swallows a ping-call exception and
+returns `False`; a `_heartbeat_tick()` test confirming a caller-supplied
+`send_fn` exception is `send_listener_heartbeat()`'s own responsibility
+to swallow, not a second safety net inside `_heartbeat_tick()` itself;
+`heartbeat_loop()` pinging once per interval via injected `sleep_fn`/
+`send_fn` (loop driven to completion via a `sleep_fn` that raises
+`asyncio.CancelledError` after 3 ticks, since it would otherwise run
+forever) and skipping the ping entirely while the injected stream is
+unhealthy; plus 2 `get_listener_heartbeat_config()` tests
+(`tests/test_config.py`) mirroring the existing `get_heartbeat_config()`
+coverage pattern. This closes the second (and final) open item from the
+systemd-units milestone's "Explicit open items" list — the four
+droplet-only Step 5 checks (restart-safety through real systemd, manual
+timer trigger, reboot-survival, post-reboot halt-state check) remain
+genuinely unverified until run there, unchanged from before this
+milestone.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market

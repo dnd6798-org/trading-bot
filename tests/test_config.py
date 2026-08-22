@@ -6,7 +6,13 @@ This is the one piece of this scaffold that's actually meant to run today,
 not a stub for a future session.
 """
 import pytest
-from src.config import get_alpaca_config, get_telegram_config, get_guardrail_config, get_heartbeat_config
+from src.config import (
+    get_alpaca_config,
+    get_telegram_config,
+    get_guardrail_config,
+    get_heartbeat_config,
+    get_listener_heartbeat_config,
+)
 
 
 def test_alpaca_config_loads():
@@ -41,3 +47,13 @@ def test_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
 def test_heartbeat_config_reads_url_when_set(monkeypatch):
     monkeypatch.setenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/abc123")
     assert get_heartbeat_config().daily_job_url == "https://uptimerobot.example/heartbeat/abc123"
+
+
+def test_listener_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
+    monkeypatch.delenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", raising=False)
+    assert get_listener_heartbeat_config().listener_url is None
+
+
+def test_listener_heartbeat_config_reads_url_when_set(monkeypatch):
+    monkeypatch.setenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/listener-xyz")
+    assert get_listener_heartbeat_config().listener_url == "https://uptimerobot.example/heartbeat/listener-xyz"

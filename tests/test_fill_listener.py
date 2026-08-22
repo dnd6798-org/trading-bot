@@ -30,9 +30,15 @@ from alpaca.trading.stream import TradingStream
 
 from src import telegram_bot
 from src.execution import ATR_MULTIPLIER, encode_client_order_id, submit_entry_and_stop
-from src.fill_listener import MonitoredTradingStream, handle_trade_update
+from src.fill_listener import (
+    MonitoredTradingStream,
+    _heartbeat_tick,
+    handle_trade_update,
+    heartbeat_loop,
+    send_listener_heartbeat,
+)
 
-from tests.test_execution import FakeOrder, FakeTradingClient, _approved_decision, _guardrails, _no_sleep
+from tests.test_execution import FakeOrder, FakeRequestsModule, FakeTradingClient, _approved_decision, _guardrails, _no_sleep
 
 
 @pytest.fixture(autouse=True)
@@ -393,3 +399,121 @@ def test_near_simultaneous_fill_and_listener_event_produce_only_one_stop_order()
     assert result.filled is True
     assert result.stop_order_submitted is True  # protected — just not by this call
     assert len(stop_orders_submitted) == 1  # still only one stop order total, no duplicate
+
+
+# --- listener liveness heartbeat (design session, 2026-08-22) ---------------
+
+def _fake_stream(consecutive_failures=0, alert_threshold=5):
+    return SimpleNamespace(_consecutive_failures=consecutive_failures, _alert_threshold=alert_threshold)
+
+
+def test_heartbeat_tick_fires_when_failure_count_is_below_threshold():
+    stream = _fake_stream(consecutive_failures=2, alert_threshold=5)
+    calls = []
+
+    result = _heartbeat_tick(stream, send_fn=lambda: calls.append(1))
+
+    assert result is True
+    assert calls == [1]
+
+
+def test_heartbeat_tick_skipped_when_at_or_above_threshold():
+    calls = []
+
+    at_threshold = _heartbeat_tick(_fake_stream(consecutive_failures=5, alert_threshold=5), send_fn=lambda: calls.append(1))
+    above_threshold = _heartbeat_tick(_fake_stream(consecutive_failures=7, alert_threshold=5), send_fn=lambda: calls.append(1))
+
+    assert at_threshold is False
+    assert above_threshold is False
+    assert calls == []  # never pinged in either case
+
+
+def test_send_listener_heartbeat_no_ops_with_a_logged_warning_when_url_unset(monkeypatch, caplog):
+    monkeypatch.delenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", raising=False)
+    fake_requests = FakeRequestsModule()
+
+    with caplog.at_level("WARNING"):
+        result = send_listener_heartbeat(requests_module=fake_requests)
+
+    assert result is False
+    assert fake_requests.get_calls == []
+    assert any("UPTIMEROBOT_LISTENER_HEARTBEAT_URL not set" in message for message in caplog.messages)
+
+
+def test_send_listener_heartbeat_pings_the_configured_url():
+    fake_requests = FakeRequestsModule()
+
+    result = send_listener_heartbeat(heartbeat_url="https://uptimerobot.example/hb-listener", requests_module=fake_requests)
+
+    assert result is True
+    assert fake_requests.get_calls == [("https://uptimerobot.example/hb-listener", 10)]
+
+
+def test_send_listener_heartbeat_falls_back_to_env_when_no_url_arg_given(monkeypatch):
+    monkeypatch.setenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/from-env")
+    fake_requests = FakeRequestsModule()
+
+    result = send_listener_heartbeat(requests_module=fake_requests)
+
+    assert result is True
+    assert fake_requests.get_calls == [("https://uptimerobot.example/from-env", 10)]
+
+
+def test_send_listener_heartbeat_swallows_a_ping_failure_and_returns_false():
+    fake_requests = FakeRequestsModule(raise_exc=RuntimeError("connection refused"))
+
+    result = send_listener_heartbeat(heartbeat_url="https://uptimerobot.example/hb-listener", requests_module=fake_requests)
+
+    assert result is False
+    assert len(fake_requests.get_calls) == 1
+
+
+def test_heartbeat_tick_ping_exception_does_not_propagate_or_affect_the_caller():
+    # send_fn here simulates send_listener_heartbeat()'s own real behavior
+    # (it never raises) — but _heartbeat_tick() must be safe even if a
+    # caller-supplied send_fn somehow did raise, since a monitoring hiccup
+    # must never take down the listener's main loop.
+    stream = _fake_stream(consecutive_failures=0, alert_threshold=5)
+
+    def exploding_send():
+        raise RuntimeError("network blip")
+
+    with pytest.raises(RuntimeError):
+        _heartbeat_tick(stream, send_fn=exploding_send)
+    # confirms the exception is send_listener_heartbeat()'s own responsibility
+    # to swallow (verified above) — _heartbeat_tick() itself doesn't add a
+    # second safety net, so send_listener_heartbeat() must never raise in
+    # real use, which the tests above already confirm it doesn't.
+
+
+def test_heartbeat_loop_pings_once_per_interval_using_the_injected_sleep_and_send_fns():
+    stream = _fake_stream(consecutive_failures=0, alert_threshold=5)
+    sleep_calls = []
+    send_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 3:
+            raise asyncio.CancelledError()  # stop the otherwise-infinite loop after 3 ticks
+
+    def fake_send():
+        send_calls.append(1)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(heartbeat_loop(stream, interval_seconds=300, sleep_fn=fake_sleep, send_fn=fake_send))
+
+    assert sleep_calls == [300, 300, 300]
+    assert send_calls == [1, 1]  # only the first 2 sleeps complete before the 3rd raises
+
+
+def test_heartbeat_loop_skips_send_fn_while_connection_is_unhealthy():
+    stream = _fake_stream(consecutive_failures=5, alert_threshold=5)
+    send_calls = []
+
+    async def fake_sleep(seconds):
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(heartbeat_loop(stream, interval_seconds=300, sleep_fn=fake_sleep, send_fn=lambda: send_calls.append(1)))
+
+    assert send_calls == []

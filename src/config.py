@@ -54,6 +54,7 @@ class StrategyConfig:
 @dataclass(frozen=True)
 class HeartbeatConfig:
     daily_job_url: str | None
+    listener_url: str | None = None
 
 
 TRADING_ENV = _get("TRADING_ENV", default="paper")
@@ -199,6 +200,35 @@ def get_heartbeat_config() -> HeartbeatConfig:
     """
     return HeartbeatConfig(
         daily_job_url=_get("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", required=False, default=None)
+    )
+
+
+def get_listener_heartbeat_config() -> HeartbeatConfig:
+    """
+    Fill-listener liveness heartbeat URL (listener-heartbeat design
+    session, 2026-08-22 — see CLAUDE.md "Current status") — pinged every
+    5 minutes by fill_listener.py's heartbeat_loop() while
+    MonitoredTradingStream's own consecutive-failure counter stays below
+    its existing 5-failure alert threshold. UptimeRobot alerts if no ping
+    arrives within its configured window (~15 minutes — 3 missed pings,
+    narrower than the daily job's ~26h window since this is a
+    continuously-running process where a missed heartbeat is meaningful
+    within minutes, not a once-daily job). This closes a gap none of the
+    existing mechanisms cover: MonitoredTradingStream's own URGENT alert
+    only fires from INSIDE a still-running process attempting to
+    reconnect — it cannot fire if the process has died outright,
+    crash-looped past systemd's StartLimitBurst, or the whole droplet is
+    down.
+
+    Same required=False / fail-toward-warning convention as
+    get_heartbeat_config(), for the same reason: a missing/blank URL must
+    never crash the listener — losing fill protection because monitoring
+    wasn't configured would be far worse than losing the monitoring
+    signal itself. See fill_listener.py's send_listener_heartbeat().
+    """
+    return HeartbeatConfig(
+        daily_job_url=None,
+        listener_url=_get("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", required=False, default=None),
     )
 
 
