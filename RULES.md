@@ -11,6 +11,8 @@
 
 Claude Code should read this file (`RULES.md`) at the start of every session, before starting any work, in addition to `CLAUDE.md`.
 
+**File access is asymmetric.** `trading-bot-spec-vNN.md` and `session-playbook-vNN.md` live only in the claude.ai project — Claude Code has no access to them. Claude Code's only persistent in-repo records are `CLAUDE.md` and this file. Every Claude Code message must therefore be fully self-contained — all decisions and requirements inlined, never left for Claude Code to look up. A "spec vNN §X" mention in a Claude Code message is a provenance citation for `CLAUDE.md`'s history, never a pointer Claude Code is expected to fetch or open.
+
 ---
 
 ## 2. No vagueness, ever
@@ -36,6 +38,7 @@ If Claude is uncertain, the fix is more research, not deferring the decision to 
   1. **CLAUDE.md-update message** — sent first, summarizing the session's decisions. Wait for Claude Code to confirm this is done before sending message 2.
   2. **Milestone/task brief** — sent second, only after CLAUDE.md confirmation.
 - When Claude Code reports a milestone back, the user pastes that report into claude.ai. Claude.ai's job is to validate it — check it against what was actually briefed, not just accept a summary at face value. If anything doesn't match the brief (wrong content, unexplained claims, mismatched commit history), stop and ask for direct verification (e.g., `git log`) before treating it as accepted.
+- **Droplet-side verification must be reported back the same session.** Claude Code has no droplet access of its own — any check performed directly against the droplet (e.g. manual SSH, guided live by claude.ai) is invisible to Claude Code until it's explicitly reported. Report the exact result (what was checked, what happened, pass/fail) back to Claude Code the same session it happens, so CLAUDE.md never drifts from what's actually true. A milestone with a droplet-verification component is not closed, on either surface, until Claude Code has recorded that confirmation itself. (Added 2026-08-22, after the four systemd-units Step 5 checks ran and passed live on the droplet but sat unreported to Claude Code for a full session afterward.)
 
 ## 5. Proactive clarity
 

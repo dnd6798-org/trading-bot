@@ -1523,7 +1523,10 @@ concrete follow-up gap surfaced — `execution.py` needs a `__main__`
 entrypoint before this milestone can complete); items 1, 4, and 5 remain
 open and must be checked directly on the droplet, not assumed, before
 any unit file is finalized — flagged per this session's own instruction
-rather than silently resolved or guessed at.**
+rather than silently resolved or guessed at.** [RESOLVED — see the
+"UPDATE (droplet-side verification..." block later in this milestone's
+record: all three confirmed correct against the real droplet, matching
+the convention this repo had adopted.]
 
 **UPDATE (next session): the systemd-units milestone was EXECUTED —
 `execution.py`'s missing `__main__` entrypoint is now built, all three
@@ -1669,7 +1672,8 @@ kickoff (real deployment path, real `.env` location, real systemd
 version) plus this update's own two new open items (a design pass for
 the listener's liveness heartbeat; the four droplet-only Step 5 checks)
 — five items total, all requiring direct droplet access this Windows-
-local session never had.
+local session never had. [ALL FIVE NOW RESOLVED — see the "UPDATE
+(droplet-side verification..." block later in this milestone's record.]
 
 **UPDATE (claude.ai chat, same day, design only — no code written this
 session): the listener liveness heartbeat's design is now LOCKED,
@@ -1746,6 +1750,17 @@ matching the locked design above exactly — committed as `4374ce7` on
 `paper`, full suite 286/286 passing (275 + 11 new: 2 in
 `tests/test_config.py`, 9 in `tests/test_fill_listener.py`).**
 
+**CORRECTION, flagged not silently fixed (commit messages are immutable,
+so this can't be corrected at the source): `4374ce7`'s own commit
+message cites "spec v33/v34" for this design — that citation has no
+textual basis in this repo (the design-lock section above, added by
+`7faf995`, cites no spec version at all) and was Claude Code's own
+unsupported inference, stitched from the two neighboring sections'
+citations (spec v33 §10.5 = the original fill-listener; spec v34 §10.6 =
+the systemd units) rather than from anything sourced. Per the user,
+this design was actually locked under **spec v36** (project knowledge,
+not this repo). Recorded here as the correction of record.
+
 1. **Entrypoint restructured as the locked design required, verified
    before writing any new code, not assumed:** `run_listener()`
    (`src/fill_listener.py`) previously called `stream.subscribe_trade_
@@ -1807,12 +1822,60 @@ to swallow, not a second safety net inside `_heartbeat_tick()` itself;
 forever) and skipping the ping entirely while the injected stream is
 unhealthy; plus 2 `get_listener_heartbeat_config()` tests
 (`tests/test_config.py`) mirroring the existing `get_heartbeat_config()`
-coverage pattern. This closes the second (and final) open item from the
-systemd-units milestone's "Explicit open items" list — the four
-droplet-only Step 5 checks (restart-safety through real systemd, manual
-timer trigger, reboot-survival, post-reboot halt-state check) remain
-genuinely unverified until run there, unchanged from before this
-milestone.
+coverage pattern. This closes the second of the two open items from the
+systemd-units milestone's "Explicit open items" list at the time this
+paragraph was first written. **CORRECTION (see UPDATE immediately below):
+the claim that the four droplet-only Step 5 checks "remain genuinely
+unverified" was stale the moment it was written — they had, in fact,
+already been run and passed live on the droplet on or immediately before
+2026-08-21, before paper soak began. That result was never reported back
+into this repo until the next session (see below), so this paragraph
+stated an inaccurate "still open" status for a full session — the exact
+gap RULES.md §4 now has a new bullet about (added the same session this
+correction was made).**
+
+**UPDATE (droplet-side verification, performed directly against the real
+droplet on/immediately before 2026-08-21, guided by claude.ai, reported
+back to Claude Code and recorded here on 2026-08-22 — this closes the
+systemd-units milestone (spec v34 §10.6) FULLY; nothing droplet-side
+remains open from it.**
+
+**Droplet facts (confirms the `/opt/trading-bot` convention this repo
+adopted without droplet access — see the "systemd-units milestone"
+section above — was correct, not just a working assumption):**
+DigitalOcean, region `nyc1`, Ubuntu 24.04.4 LTS, systemd 255, Python
+3.12.3. Repo at `/opt/trading-bot`, venv at `/opt/trading-bot/venv`,
+`.env` at `/opt/trading-bot/.env`, both owned by the `tradingbot` system
+user. This also answers items 1, 4, and 5 of the "Pre-implementation
+verification checklist" above (deployment path/venv location, `.env`
+location, systemd version) — all three were flagged there as
+NOT-VERIFIABLE-from-this-session; all three are now confirmed, and the
+adopted convention matched reality exactly.
+
+**All four Step 5 checks — PASS, all four, run live:**
+1. **Manual daily-job trigger** — `systemctl start trading-bot-daily.
+   service` ran to completion; a real Alpaca paper API call succeeded;
+   `run_log` returned `{'errors': [], 'halted': False, ...}`.
+2. **Restart-safety** — `kill -9` on the listener's live PID; systemd
+   restarted it with a new PID within `RestartSec=10` (journal:
+   `Failed with result 'signal'` → `Scheduled restart job` →
+   `active (running)`).
+3. **Reboot survival** — a real reboot; both `trading-bot-listener.
+   service` and `trading-bot-daily.timer` came back `active`/`enabled`
+   on their own with new PIDs, no manual intervention.
+4. **Halt-state-on-boot** — `halt_state.set_halt()` called manually to
+   simulate a pre-crash halt; confirmed persisted in `halt_state.json`
+   and respected by `run_daily_execution_job()` across the real reboot
+   (`run_log` showed `'halted': True`, entries skipped, ratchet step
+   still executed — matching this repo's own documented "gate NEW risk
+   on halt, never gate EXISTING protection on it" design intent, item 3
+   of the pre-implementation checklist above).
+
+**Net: all five items from the systemd-units milestone's "Explicit open
+items" list (three droplet-only facts + the four Step 5 checks, the
+listener-heartbeat design pass having already closed separately, above)
+are now RESOLVED. The systemd-units milestone (spec v34 §10.6) is
+CLOSED — no droplet-side work remains open from it.**
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
