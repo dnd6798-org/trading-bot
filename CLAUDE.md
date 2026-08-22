@@ -1742,9 +1742,9 @@ systemd-units milestone's "Explicit open items" list above — the other
 four droplet-only Step 5 checks are untouched by this update.
 
 **UPDATE: the listener liveness heartbeat milestone is now IMPLEMENTED,
-matching the locked design above exactly — full suite 286/286 passing
-(275 + 11 new: 2 in `tests/test_config.py`, 9 in
-`tests/test_fill_listener.py`).**
+matching the locked design above exactly — committed as `4374ce7` on
+`paper`, full suite 286/286 passing (275 + 11 new: 2 in
+`tests/test_config.py`, 9 in `tests/test_fill_listener.py`).**
 
 1. **Entrypoint restructured as the locked design required, verified
    before writing any new code, not assumed:** `run_listener()`
