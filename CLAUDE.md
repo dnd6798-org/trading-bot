@@ -1877,6 +1877,33 @@ listener-heartbeat design pass having already closed separately, above)
 are now RESOLVED. The systemd-units milestone (spec v34 §10.6) is
 CLOSED — no droplet-side work remains open from it.**
 
+**NEW DECISION, LOCKED (spec v38 §10.8, claude.ai chat session — no code
+written yet, this update only records the decision per this file's own
+"update whenever a real decision is made" rule): the heartbeat-monitoring
+provider is changing from UptimeRobot to Healthchecks.io (free Hobbyist
+plan).** Rationale: UptimeRobot's heartbeat-monitor feature requires a
+paid Solo-tier subscription (~$10-11/mo) — confirmed against their live
+pricing page — whereas Healthchecks.io's Hobbyist plan is free ($0/mo,
+20 checks available, this project needs 2: the daily job and the
+listener), has native Telegram integration, and is purpose-built for the
+dead-man's-switch pattern already implemented here.
+
+**This does NOT change the heartbeat mechanism already implemented and
+committed in `4374ce7`/`2dd168e`** — the 5-minute interval
+(`heartbeat_loop()`), the gating condition (`stream._consecutive_failures
+< stream._alert_threshold`), the `required=False` fail-safe read
+(`get_heartbeat_config()`/`get_listener_heartbeat_config()`), and the
+failure-isolation `try/except` around each ping call are all unchanged.
+**Only the service the ping URLs point to changes, plus the env var
+naming** (`UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL`/
+`UPTIMEROBOT_LISTENER_HEARTBEAT_URL` will need renaming to something
+provider-neutral, e.g. a `HEALTHCHECKS_*` prefix — exact names to be
+specified in the follow-up milestone brief, not decided here). **Not yet
+implemented — a follow-up milestone brief renaming the env vars (and
+updating `.env.example`/`src/config.py`/`src/execution.py`/
+`src/fill_listener.py` accordingly) is coming next; no code, test, or
+`.env.example` change has been made for this decision yet.**
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
