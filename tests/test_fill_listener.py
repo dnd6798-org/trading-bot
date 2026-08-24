@@ -429,7 +429,7 @@ def test_heartbeat_tick_skipped_when_at_or_above_threshold():
 
 
 def test_send_listener_heartbeat_no_ops_with_a_logged_warning_when_url_unset(monkeypatch, caplog):
-    monkeypatch.delenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", raising=False)
+    monkeypatch.delenv("HEALTHCHECKS_LISTENER_HEARTBEAT_URL", raising=False)
     fake_requests = FakeRequestsModule()
 
     with caplog.at_level("WARNING"):
@@ -437,7 +437,7 @@ def test_send_listener_heartbeat_no_ops_with_a_logged_warning_when_url_unset(mon
 
     assert result is False
     assert fake_requests.get_calls == []
-    assert any("UPTIMEROBOT_LISTENER_HEARTBEAT_URL not set" in message for message in caplog.messages)
+    assert any("HEALTHCHECKS_LISTENER_HEARTBEAT_URL not set" in message for message in caplog.messages)
 
 
 def test_send_listener_heartbeat_pings_the_configured_url():
@@ -450,7 +450,7 @@ def test_send_listener_heartbeat_pings_the_configured_url():
 
 
 def test_send_listener_heartbeat_falls_back_to_env_when_no_url_arg_given(monkeypatch):
-    monkeypatch.setenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/from-env")
+    monkeypatch.setenv("HEALTHCHECKS_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/from-env")
     fake_requests = FakeRequestsModule()
 
     result = send_listener_heartbeat(requests_module=fake_requests)

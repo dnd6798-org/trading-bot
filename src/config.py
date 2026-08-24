@@ -183,11 +183,11 @@ def get_heartbeat_config() -> HeartbeatConfig:
     """
     Dead-man's-switch heartbeat URL (spec v34 §10.6) — pinged by
     execution.py's __main__ once at the end of every daily job run that
-    completes with no per-step errors; UptimeRobot alerts if a ping
+    completes with no per-step errors; Healthchecks.io alerts if a ping
     doesn't arrive within its configured window.
 
     Read with required=False, even though .env.example documents
-    UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL as a value that must actually be
+    HEALTHCHECKS_DAILY_HEARTBEAT_URL as a value that must actually be
     filled in for the heartbeat to function — a deliberate, flagged
     deviation from treating it as required=True here: coupling a
     monitoring add-on to a hard crash of the entire daily job (which
@@ -197,9 +197,14 @@ def get_heartbeat_config() -> HeartbeatConfig:
     everywhere else. A missing/blank URL means the ping is silently
     skipped and logged, not a job failure — see execution.py's
     send_daily_heartbeat().
+
+    Provider note (spec v38 §10.8): this env var was renamed from
+    UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL when the heartbeat-monitoring
+    provider switched from UptimeRobot to Healthchecks.io — rename only,
+    the read pattern (required=False, fail-toward-warning) is unchanged.
     """
     return HeartbeatConfig(
-        daily_job_url=_get("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", required=False, default=None)
+        daily_job_url=_get("HEALTHCHECKS_DAILY_HEARTBEAT_URL", required=False, default=None)
     )
 
 
@@ -209,9 +214,9 @@ def get_listener_heartbeat_config() -> HeartbeatConfig:
     session, 2026-08-22 — see CLAUDE.md "Current status") — pinged every
     5 minutes by fill_listener.py's heartbeat_loop() while
     MonitoredTradingStream's own consecutive-failure counter stays below
-    its existing 5-failure alert threshold. UptimeRobot alerts if no ping
-    arrives within its configured window (~15 minutes — 3 missed pings,
-    narrower than the daily job's ~26h window since this is a
+    its existing 5-failure alert threshold. Healthchecks.io alerts if no
+    ping arrives within its configured window (~15 minutes — 3 missed
+    pings, narrower than the daily job's ~26h window since this is a
     continuously-running process where a missed heartbeat is meaningful
     within minutes, not a once-daily job). This closes a gap none of the
     existing mechanisms cover: MonitoredTradingStream's own URGENT alert
@@ -225,10 +230,15 @@ def get_listener_heartbeat_config() -> HeartbeatConfig:
     never crash the listener — losing fill protection because monitoring
     wasn't configured would be far worse than losing the monitoring
     signal itself. See fill_listener.py's send_listener_heartbeat().
+
+    Provider note (spec v38 §10.8): this env var was renamed from
+    UPTIMEROBOT_LISTENER_HEARTBEAT_URL when the heartbeat-monitoring
+    provider switched from UptimeRobot to Healthchecks.io — rename only,
+    the read pattern (required=False, fail-toward-warning) is unchanged.
     """
     return HeartbeatConfig(
         daily_job_url=None,
-        listener_url=_get("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", required=False, default=None),
+        listener_url=_get("HEALTHCHECKS_LISTENER_HEARTBEAT_URL", required=False, default=None),
     )
 
 

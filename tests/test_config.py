@@ -40,20 +40,20 @@ def test_guardrails_match_spec():
 
 
 def test_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
-    monkeypatch.delenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", raising=False)
+    monkeypatch.delenv("HEALTHCHECKS_DAILY_HEARTBEAT_URL", raising=False)
     assert get_heartbeat_config().daily_job_url is None
 
 
 def test_heartbeat_config_reads_url_when_set(monkeypatch):
-    monkeypatch.setenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/abc123")
+    monkeypatch.setenv("HEALTHCHECKS_DAILY_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/abc123")
     assert get_heartbeat_config().daily_job_url == "https://uptimerobot.example/heartbeat/abc123"
 
 
 def test_listener_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
-    monkeypatch.delenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", raising=False)
+    monkeypatch.delenv("HEALTHCHECKS_LISTENER_HEARTBEAT_URL", raising=False)
     assert get_listener_heartbeat_config().listener_url is None
 
 
 def test_listener_heartbeat_config_reads_url_when_set(monkeypatch):
-    monkeypatch.setenv("UPTIMEROBOT_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/listener-xyz")
+    monkeypatch.setenv("HEALTHCHECKS_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/listener-xyz")
     assert get_listener_heartbeat_config().listener_url == "https://uptimerobot.example/heartbeat/listener-xyz"

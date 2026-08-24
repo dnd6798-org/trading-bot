@@ -1904,6 +1904,57 @@ updating `.env.example`/`src/config.py`/`src/execution.py`/
 `src/fill_listener.py` accordingly) is coming next; no code, test, or
 `.env.example` change has been made for this decision yet.**
 
+**UPDATE: the env var rename milestone was EXECUTED.** Verification
+checkpoint run first, per instruction: confirmed the exact pre-rename
+names (`UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` in `.env.example`/
+`get_heartbeat_config()`, `UPTIMEROBOT_LISTENER_HEARTBEAT_URL` in
+`.env.example`/`get_listener_heartbeat_config()`), the exact field names
+on `HeartbeatConfig` (`daily_job_url`, `listener_url` — unchanged, only
+the env var strings they're read from changed), and the exact
+ping-sending functions (`send_daily_heartbeat()`, `src/execution.py`;
+`send_listener_heartbeat()`, `src/fill_listener.py`) — all matched the
+brief exactly, no mismatch found.
+
+Renamed: `UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` ->
+`HEALTHCHECKS_DAILY_HEARTBEAT_URL`, `UPTIMEROBOT_LISTENER_HEARTBEAT_URL`
+-> `HEALTHCHECKS_LISTENER_HEARTBEAT_URL`, in `.env.example`,
+`src/config.py` (both `_get(...)` calls), the two `log.warning(...)`
+messages that embedded the old var name literally (`send_daily_
+heartbeat()`/`send_listener_heartbeat()`), and every test referencing
+the old names (`tests/test_config.py`, `tests/test_execution.py`,
+`tests/test_fill_listener.py` — env var keys and the one log-message
+substring assertion that had to track the renamed warning text; test
+fixture URL values like `"https://uptimerobot.example/..."` were left
+untouched as arbitrary opaque strings, not "env var names," per the
+brief's explicit "do not change test behavior/assertions beyond the
+name swap" scope). Also updated, as a consistency fix within the same
+edit (not scope creep — leaving stale "UptimeRobot" prose directly next
+to a newly-renamed `HEALTHCHECKS_*` var would itself be exactly the kind
+of stale-fact drift RULES.md warns against): the "UptimeRobot" mentions
+in `.env.example`'s comment prose, `get_heartbeat_config()`/
+`get_listener_heartbeat_config()`'s docstrings, `send_daily_heartbeat()`/
+`send_listener_heartbeat()`'s docstrings, and one mention in
+`fill_listener.py`'s module docstring — each now reads "Healthchecks.io"
+for the current mechanism, with a "Provider note (spec v38 §10.8)"
+sentence added alongside stating the rename explicitly rather than
+silently overwriting the history of what it used to be. Confirmed no
+other file (including the real, gitignored local `.env`) referenced
+either the old or new var names — the local `.env` was never filled in
+with a real heartbeat URL, so nothing there could have drifted.
+
+Behavior is byte-for-byte unchanged: the `required=False` fail-safe
+read, the missing-URL warning-and-no-op path, the ping call's
+`try/except` isolation, the 5-minute `heartbeat_loop()` interval, and
+the `_heartbeat_tick()` gating logic (`stream._consecutive_failures <
+stream._alert_threshold`) were not touched — this was a rename only,
+confirmed by the unchanged 286/286 pass count (no test assertion on
+behavior needed to change, only the literal strings each test
+monkeypatches/asserts against).
+
+Out of scope, per instruction, and not done: creating the actual
+Healthchecks.io account, checks, or Telegram integration — that remains
+a separate manual/claude.ai-side task.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market

@@ -105,9 +105,11 @@ existing URGENT reconnect-failure alert (MonitoredTradingStream._start_ws()
 above) can only fire from inside a process that is still alive and
 attempting to reconnect. heartbeat_loop() below closes this the same way
 execution.py's send_daily_heartbeat() closes the equivalent gap for the
-daily job: a periodic external ping, so an UptimeRobot-side "no ping
+daily job: a periodic external ping, so a Healthchecks.io-side "no ping
 received" is the actual dead-man's-switch signal, not anything computed
-inside this process.
+inside this process. (Provider note, spec v38 §10.8: originally
+UptimeRobot, renamed to Healthchecks.io — see send_listener_heartbeat()
+and get_listener_heartbeat_config() below/in src/config.py.)
 
 Structural consequence, verified against the installed alpaca-py source
 before implementing (venv/Lib/site-packages/alpaca/trading/stream.py):
@@ -327,13 +329,19 @@ def send_listener_heartbeat(heartbeat_url: str = None, requests_module=requests)
     periodically by heartbeat_loop() while the stream's connection is
     healthy. Best-effort only, deliberately: a failed ping is logged and
     returns False, never raised — a monitoring-side hiccup (network blip,
-    UptimeRobot outage) must never crash the listener or interrupt fill
-    handling.
+    Healthchecks.io outage) must never crash the listener or interrupt
+    fill handling.
+
+    Provider note (spec v38 §10.8): pings
+    HEALTHCHECKS_LISTENER_HEARTBEAT_URL (renamed from
+    UPTIMEROBOT_LISTENER_HEARTBEAT_URL when the heartbeat-monitoring
+    provider switched from UptimeRobot to Healthchecks.io) — rename only,
+    this function's behavior is unchanged.
     """
     if heartbeat_url is None:
         heartbeat_url = get_listener_heartbeat_config().listener_url
     if not heartbeat_url:
-        log.warning("send_listener_heartbeat: UPTIMEROBOT_LISTENER_HEARTBEAT_URL not set — skipping heartbeat ping.")
+        log.warning("send_listener_heartbeat: HEALTHCHECKS_LISTENER_HEARTBEAT_URL not set — skipping heartbeat ping.")
         return False
     try:
         requests_module.get(heartbeat_url, timeout=10)

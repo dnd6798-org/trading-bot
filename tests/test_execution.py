@@ -1150,7 +1150,7 @@ def test_send_daily_heartbeat_treats_a_halted_but_error_free_run_as_success():
 
 
 def test_send_daily_heartbeat_skips_without_raising_when_no_url_configured(monkeypatch):
-    monkeypatch.delenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", raising=False)
+    monkeypatch.delenv("HEALTHCHECKS_DAILY_HEARTBEAT_URL", raising=False)
     fake_requests = FakeRequestsModule()
 
     result = send_daily_heartbeat({"errors": []}, requests_module=fake_requests)
@@ -1160,7 +1160,7 @@ def test_send_daily_heartbeat_skips_without_raising_when_no_url_configured(monke
 
 
 def test_send_daily_heartbeat_falls_back_to_env_when_no_url_arg_given(monkeypatch):
-    monkeypatch.setenv("UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL", "https://uptimerobot.example/from-env")
+    monkeypatch.setenv("HEALTHCHECKS_DAILY_HEARTBEAT_URL", "https://uptimerobot.example/from-env")
     fake_requests = FakeRequestsModule()
 
     result = send_daily_heartbeat({"errors": []}, requests_module=fake_requests)

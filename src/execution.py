@@ -1377,26 +1377,31 @@ def send_daily_heartbeat(run_log: dict, heartbeat_url: str = None, requests_modu
     Dead-man's-switch ping (spec v34 §10.6, systemd-units milestone) —
     fired once at the end of a run_daily_execution_job() call that
     completed with no per-step errors recorded in run_log["errors"].
-    UptimeRobot alerts if this ping doesn't arrive within its configured
-    window (~26h) — this catches the daily job/timer not running at all
-    (crash before returning, disabled timer, host down), a failure mode
-    none of this module's existing Telegram alerts cover, since those all
-    fire FROM INSIDE a run that's already happening. A halted run
-    (halt_state.py) still counts as healthy for this purpose — halting is
-    an intentional, already-alerted state (see check_daily_loss_limit()/
-    check_drawdown_limit(), risk_filter.py), not a job malfunction; the
-    heartbeat's only job is proving the process itself is still alive and
-    completing runs.
+    Healthchecks.io alerts if this ping doesn't arrive within its
+    configured window (~26h) — this catches the daily job/timer not
+    running at all (crash before returning, disabled timer, host down), a
+    failure mode none of this module's existing Telegram alerts cover,
+    since those all fire FROM INSIDE a run that's already happening. A
+    halted run (halt_state.py) still counts as healthy for this purpose —
+    halting is an intentional, already-alerted state (see
+    check_daily_loss_limit()/check_drawdown_limit(), risk_filter.py), not
+    a job malfunction; the heartbeat's only job is proving the process
+    itself is still alive and completing runs.
 
     Best-effort only, deliberately: a failed ping is logged and returns
     False, never raised — a monitoring-side hiccup (network blip,
-    UptimeRobot outage) must never be mistaken for, or cause, a daily job
-    failure.
+    Healthchecks.io outage) must never be mistaken for, or cause, a daily
+    job failure.
+
+    Provider note (spec v38 §10.8): pings HEALTHCHECKS_DAILY_HEARTBEAT_URL
+    (renamed from UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL when the
+    heartbeat-monitoring provider switched from UptimeRobot to
+    Healthchecks.io) — rename only, this function's behavior is unchanged.
     """
     if heartbeat_url is None:
         heartbeat_url = get_heartbeat_config().daily_job_url
     if not heartbeat_url:
-        log.warning("send_daily_heartbeat: UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL not set — skipping heartbeat ping.")
+        log.warning("send_daily_heartbeat: HEALTHCHECKS_DAILY_HEARTBEAT_URL not set — skipping heartbeat ping.")
         return False
     if run_log.get("errors"):
         return False
