@@ -2153,7 +2153,8 @@ Implementation proceeds now, per instruction, against this resolved
 design.
 
 **UPDATE: the daily-job per-symbol DEBUG logging milestone (spec v41
-§10.10 / v42 §10.11) is now IMPLEMENTED.**
+§10.10 / v42 §10.11) is now IMPLEMENTED — committed as `e842ce6` on
+`paper`.**
 
 1. **`scripts/backtest_etf_donchian.py`** — `compute_channel_long_entry_
    indices()` now returns `(entry_indices, atr, upper, lower)` (was
