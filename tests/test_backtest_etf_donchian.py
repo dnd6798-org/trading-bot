@@ -43,7 +43,7 @@ def test_channel_entry_does_not_fire_before_window_is_seeded():
     candles = [_flat_candle("SPY", dates[i]) for i in range(19)]  # one short of a full 20-day window
     candles.append(_candle("SPY", dates[19], close=125, high=130, low=120))
 
-    entry_indices, atr = compute_channel_long_entry_indices(candles, channel_length=20)
+    entry_indices, atr, upper, lower = compute_channel_long_entry_indices(candles, channel_length=20)
 
     assert 19 not in entry_indices
 
@@ -53,10 +53,14 @@ def test_channel_entry_fires_on_close_above_band_once_window_is_seeded():
     candles = [_flat_candle("SPY", dates[i]) for i in range(20)]
     candles.append(_candle("SPY", dates[20], close=125, high=130, low=120))
 
-    entry_indices, atr = compute_channel_long_entry_indices(candles, channel_length=20)
+    entry_indices, atr, upper, lower = compute_channel_long_entry_indices(candles, channel_length=20)
 
     assert 20 in entry_indices
     assert atr[20] is not None
+    # window[0:20] is the 20 flat candles (close=100, high=105, low=95) —
+    # the just-appended breakout candle at index 20 itself is excluded (causal).
+    assert upper[20] == 105
+    assert lower[20] == 95
 
 
 def test_channel_entry_defaults_to_module_channel_length_of_100():
@@ -64,7 +68,7 @@ def test_channel_entry_defaults_to_module_channel_length_of_100():
     candles = [_flat_candle("SPY", dates[i]) for i in range(100)]
     candles.append(_candle("SPY", dates[100], close=125, high=130, low=120))
 
-    entry_indices, atr = compute_channel_long_entry_indices(candles)
+    entry_indices, atr, upper, lower = compute_channel_long_entry_indices(candles)
 
     assert 100 in entry_indices
 

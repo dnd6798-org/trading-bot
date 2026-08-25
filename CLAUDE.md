@@ -2152,6 +2152,75 @@ instruction, before any code was written.**
 Implementation proceeds now, per instruction, against this resolved
 design.
 
+**UPDATE: the daily-job per-symbol DEBUG logging milestone (spec v41
+§10.10 / v42 §10.11) is now IMPLEMENTED.**
+
+1. **`scripts/backtest_etf_donchian.py`** — `compute_channel_long_entry_
+   indices()` now returns `(entry_indices, atr, upper, lower)` (was
+   `(entry_indices, atr)`) — `upper`/`lower` are the same
+   `compute_donchian_levels()` arrays it already computed internally for
+   the entry check, previously discarded, now also returned; no
+   recomputation, no drift risk against a second, independent call site.
+   `entry_indices`/`atr` themselves are byte-for-byte unchanged.
+   `build_symbol_series()` stores the two new values as additive
+   `"upper"`/`"lower"` keys in its returned dict — every existing key
+   (`symbol`/`candles`/`atr`/`entry_indices`/`date_index`) is untouched.
+   3 existing tests in `tests/test_backtest_etf_donchian.py` updated to
+   unpack the 2 new return values (one gained real assertions on
+   `upper`/`lower`'s computed values, verified against the fixture's
+   actual window rather than guessed).
+2. **`src/config.py`** gained `get_log_level()` — reads `LOG_LEVEL`,
+   `required=False`, default `"INFO"` (reproducing the level
+   `execution.py`'s `__main__` hardcoded before this milestone exactly).
+   `LOG_LEVEL` documented in `.env.example`.
+3. **`src/execution.py`**:
+   - `fetch_track_b_symbol_data()` gained one `log.debug(...)` line per
+     symbol at its existing per-symbol loop — bar count + first/last bar
+     date, or an explicit `"0 bars returned"` message — using data
+     (`series["candles"]`) already available at that point, no new
+     fetch or computation needed.
+   - `generate_daily_candidates()` gained one `log.debug(...)` line per
+     universe symbol (close, `donchian_upper`, `donchian_lower`, and a
+     synthesized `signal=entry_signal`/`no_signal` label, or an explicit
+     `"no data for {today}"` message when the symbol has no series/no
+     bar for today) — per the resolved design, computed BEFORE the
+     `open_symbols` skip, so a symbol already holding a position still
+     gets a DEBUG line; candidate-generation behavior itself
+     (open_symbols skip, entry_indices/atr checks) is unchanged.
+   - The `if __name__ == "__main__":` block is now a callable `main()`
+     (same calls, same order: `logging.basicConfig(level=get_log_level(),
+     ...)` — was `level=logging.INFO` — then `run_daily_execution_job()`,
+     the INFO summary `log.info(...)`, then `send_daily_heartbeat()`).
+     `if __name__ == "__main__": main()` is the only remaining top-level
+     script code.
+4. **Explicitly out of scope, confirmed untouched:** the broad
+   `try/except` around the fetch step in `run_daily_execution_job()`
+   (no new per-symbol error isolation added); `data_ingestion.py`'s
+   crypto/intraday `fetch_historical_candles()` path (confirmed dead
+   code for Track B, not touched).
+
+**Tests: 10 new (286 -> 296), full suite passing.**
+`tests/test_execution.py` (8): fetch-step DEBUG bar-count/date-
+range logging, fetch-step `"0 bars returned"` logging, no fetch-step
+DEBUG output at INFO level; signal-evaluation DEBUG logging with real
+Donchian band values (both an `entry_signal` and a `no_signal` case in
+one test), signal-evaluation `"no data for {today}"` logging, signal-
+evaluation DEBUG logging still firing for an already-open-position
+symbol (candidate list unaffected), no signal-evaluation DEBUG output at
+INFO level; and the `main()` regression test — confirms `get_log_level()`
+'s return value reaches `logging.basicConfig()` unchanged, AND pins the
+existing INFO summary line's literal format string and args
+(`record.msg == "run_daily_execution_job() result: %s"`,
+`record.args == fixed_run_log`) so a future accidental format change
+would fail loudly, not just compare today's rendered string. One
+real, pre-existing Python `logging` quirk surfaced while writing this
+test, not a bug in this milestone's code: `Logger._log()` special-cases
+a single `Mapping` argument, storing it directly on `record.args` rather
+than wrapping it in a 1-tuple — true of the original, unchanged
+`log.info("...: %s", run_log)` call as much as after this milestone.
+`tests/test_config.py` (2): `get_log_level()` default/set. Full suite:
+296/296 passing.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market

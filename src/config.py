@@ -242,6 +242,21 @@ def get_listener_heartbeat_config() -> HeartbeatConfig:
     )
 
 
+def get_log_level() -> str:
+    """
+    Process log level (spec v42 §10.11, daily-job per-symbol DEBUG-logging
+    milestone) — read at process startup (execution.py's main()) to set
+    the module logger's level. Defaults to "INFO", matching the level
+    execution.py's __main__ hardcoded before this milestone, so an
+    unset/missing LOG_LEVEL reproduces the exact prior behavior. Not
+    validated against Python's logging level names here — an invalid
+    value simply fails at the logging.basicConfig()/setLevel() call site,
+    the same way any other misconfigured env var in this repo surfaces at
+    first use rather than being pre-validated in config.py.
+    """
+    return _get("LOG_LEVEL", required=False, default="INFO")
+
+
 def get_strategy_config() -> StrategyConfig:
     atr_raw = _get("ATR_MULTIPLIER", required=False, default="")
     return StrategyConfig(

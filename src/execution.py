@@ -312,7 +312,7 @@ from alpaca.trading.requests import (
 
 from . import halt_state
 from . import telegram_bot
-from .config import get_alpaca_config, get_heartbeat_config, get_track_b_guardrail_config
+from .config import get_alpaca_config, get_heartbeat_config, get_log_level, get_track_b_guardrail_config
 from .risk_filter import RiskDecision, evaluate
 from .signal_generation import SignalDirection, TradeSignal
 
@@ -589,7 +589,11 @@ def fetch_track_b_symbol_data(universe=None, end=None, lookback_days=780):
     symbol_data = {}
     for symbol in universe:
         series = build_symbol_series(symbol, start, end)
-        if series is not None:
+        if series is None:
+            log.debug(f"[{symbol}] fetch: 0 bars returned")
+        else:
+            candles = series["candles"]
+            log.debug(f"[{symbol}] fetch: {len(candles)} bars, range {candles[0].timestamp[:10]} to {candles[-1].timestamp[:10]}")
             symbol_data[symbol] = series
     return symbol_data
 
@@ -608,15 +612,36 @@ def generate_daily_candidates(symbol_data, universe_order, open_symbols, today):
     separate slot-count gate exists since MAX_CONCURRENT_POSITIONS equals
     the universe size). Skips any symbol already in `open_symbols` —
     Track B never pyramids, one position per symbol at a time.
+
+    Per-symbol DEBUG signal logging (spec v42 §10.11) is emitted for
+    EVERY universe_order symbol regardless of open-position status —
+    deliberately computed before the open_symbols skip below, so the
+    DEBUG log always shows the day's real close/Donchian bands/signal
+    even for a symbol already holding a position. This does not change
+    which symbols become candidates — that still depends only on
+    open_symbols/entry_indices/atr, exactly as before this milestone.
     """
     candidates = []
     for symbol in universe_order:
+        series = symbol_data.get(symbol)
+        idx = series["date_index"].get(today) if series is not None else None
+        if series is None or idx is None:
+            log.debug(f"[{symbol}] signal: no data for {today}")
+        else:
+            candle = series["candles"][idx]
+            upper = series["upper"][idx]
+            lower = series["lower"][idx]
+            has_signal = idx in series["entry_indices"]
+            signal_label = "entry_signal" if has_signal else "no_signal"
+            log.debug(
+                f"[{symbol}] signal: close={candle.close}, donchian_upper={upper}, "
+                f"donchian_lower={lower}, signal={signal_label}"
+            )
+
         if symbol in open_symbols:
             continue
-        series = symbol_data.get(symbol)
         if series is None:
             continue
-        idx = series["date_index"].get(today)
         if idx is None or idx not in series["entry_indices"]:
             continue
         atr = series["atr"][idx]
@@ -1413,20 +1438,31 @@ def send_daily_heartbeat(run_log: dict, heartbeat_url: str = None, requests_modu
         return False
 
 
-if __name__ == "__main__":
-    # systemd ExecStart target for trading-bot-daily.service (spec v34
-    # §10.6). Halt-state-on-boot is already handled inside
-    # run_daily_execution_job() itself (gates new entries only, per its
-    # own docstring's "Order of operations" — the ratchet step
-    # deliberately still runs while halted) — no separate check needed
-    # here. An unhandled exception escaping run_daily_execution_job()
-    # itself (e.g. missing required config) is intentionally left
-    # unswallowed: it propagates, prints a traceback, and exits non-zero,
-    # which is the correct, visible "this oneshot run failed" signal for
-    # systemd/journalctl, distinct from and complementary to the
-    # per-step Telegram alerts already inside the job for known error
-    # paths.
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def main() -> None:
+    """
+    systemd ExecStart target for trading-bot-daily.service (spec v34
+    §10.6). Extracted from a bare `if __name__ == "__main__":` block into
+    this callable (spec v42 §10.11, daily-job per-symbol DEBUG-logging
+    milestone) so LOG_LEVEL wiring and the INFO summary line are both
+    directly unit-testable — same calls, same order, no behavior change
+    from before this milestone.
+
+    Halt-state-on-boot is already handled inside run_daily_execution_job()
+    itself (gates new entries only, per its own docstring's "Order of
+    operations" — the ratchet step deliberately still runs while halted)
+    — no separate check needed here. An unhandled exception escaping
+    run_daily_execution_job() itself (e.g. missing required config) is
+    intentionally left unswallowed: it propagates, prints a traceback,
+    and exits non-zero, which is the correct, visible "this oneshot run
+    failed" signal for systemd/journalctl, distinct from and
+    complementary to the per-step Telegram alerts already inside the job
+    for known error paths.
+    """
+    logging.basicConfig(level=get_log_level(), format="%(asctime)s %(levelname)s %(message)s")
     run_log = run_daily_execution_job()
     log.info("run_daily_execution_job() result: %s", run_log)
     send_daily_heartbeat(run_log)
+
+
+if __name__ == "__main__":
+    main()

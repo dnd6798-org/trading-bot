@@ -234,8 +234,18 @@ def compute_channel_long_entry_indices(candles, channel_length=CHANNEL_LENGTH):
     function of the same name, reparameterized on channel_length rather
     than reading a module global, so this file doesn't depend on that
     file's CHANNEL_LENGTH staying at 100.
+
+    Returns (entry_indices, atr, upper, lower) — upper/lower (spec v42
+    §10.11, daily-job DEBUG-logging milestone) are the same
+    compute_donchian_levels() arrays already computed here for the entry
+    check, now also returned rather than discarded, so build_symbol_
+    series() can expose them without a second, independent
+    compute_donchian_levels() call (which would risk the two call sites
+    drifting on channel_length). entry_indices/atr are unchanged from
+    before this milestone — purely an additive return, existing callers
+    just need to unpack two more values.
     """
-    upper, _ = compute_donchian_levels(candles, channel_length)
+    upper, lower = compute_donchian_levels(candles, channel_length)
     atr = compute_atr(candles, period=ATR_PERIOD)
 
     entry_indices = set()
@@ -244,7 +254,7 @@ def compute_channel_long_entry_indices(candles, channel_length=CHANNEL_LENGTH):
             continue
         if upper[i] is not None and candles[i].close > upper[i]:
             entry_indices.add(i)
-    return entry_indices, atr
+    return entry_indices, atr, upper, lower
 
 
 def build_symbol_series(symbol, start, end):
@@ -252,14 +262,15 @@ def build_symbol_series(symbol, start, end):
     Fetches this symbol's daily history directly (Alpaca serves stock
     daily bars natively — no hourly-fetch-then-resample step the crypto
     build_symbol_series() needed) and precomputes entry signal indices,
-    ATR(14), and a date-string -> index map, same shape as the crypto
-    ensemble's symbol_data dicts so simulate_rotational_ensemble() and the
-    other imported ensemble functions work unmodified.
+    ATR(14), Donchian upper/lower bands, and a date-string -> index map,
+    same shape as the crypto ensemble's symbol_data dicts (plus the
+    additive upper/lower keys, spec v42 §10.11) so simulate_rotational_
+    ensemble() and the other imported ensemble functions work unmodified.
     """
     candles = fetch_historical_stock_candles(symbol, start, end)
     if not candles:
         return None
-    entry_indices, atr = compute_channel_long_entry_indices(candles)
+    entry_indices, atr, upper, lower = compute_channel_long_entry_indices(candles)
     date_index = {c.timestamp[:10]: i for i, c in enumerate(candles)}
     return {
         "symbol": symbol,
@@ -267,6 +278,8 @@ def build_symbol_series(symbol, start, end):
         "atr": atr,
         "entry_indices": entry_indices,
         "date_index": date_index,
+        "upper": upper,
+        "lower": lower,
     }
 
 

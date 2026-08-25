@@ -34,7 +34,7 @@ import pytest
 from alpaca.trading.enums import OrderStatus, OrderType
 from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
 
-from src import telegram_bot
+from src import execution, telegram_bot
 from src.data_ingestion import Candle
 from src.execution import (
     LivePosition,
@@ -53,6 +53,7 @@ from src.execution import (
     submit_or_resize_stop_order_with_retry,
     submit_entry_and_stop,
     generate_daily_candidates,
+    fetch_track_b_symbol_data,
     build_open_positions,
     build_account_state,
     get_today_entry_count,
@@ -62,6 +63,7 @@ from src.execution import (
     encode_client_order_id,
     decode_client_order_id,
     send_daily_heartbeat,
+    main,
     ATR_MULTIPLIER,
 )
 from src.risk_filter import RiskDecision
@@ -237,6 +239,12 @@ def _series(dates, closes, atrs):
         "atr": atrs,
         "entry_indices": set(),
         "date_index": {d: i for i, d in enumerate(dates)},
+        # spec v42 §10.11: additive keys generate_daily_candidates()'s
+        # DEBUG signal logging now reads — arbitrary but consistent
+        # placeholder values, not asserted on by most callers of this
+        # helper.
+        "upper": [c + 5 for c in closes],
+        "lower": [c - 5 for c in closes],
     }
 
 
@@ -1176,3 +1184,129 @@ def test_send_daily_heartbeat_swallows_a_network_failure_and_returns_false():
 
     assert result is False
     assert len(fake_requests.get_calls) == 1
+
+
+# --- fetch_track_b_symbol_data: per-symbol DEBUG fetch logging (spec v42 §10.11) ---
+
+def test_fetch_track_b_symbol_data_logs_bar_count_and_date_range_at_debug(monkeypatch, caplog):
+    dates = ["2026-08-01", "2026-08-02", "2026-08-03"]
+    series = _series(dates, closes=[100, 101, 102], atrs=[1, 1, 1])
+    monkeypatch.setattr(execution, "build_symbol_series", lambda symbol, start, end: series)
+
+    with caplog.at_level("DEBUG", logger="src.execution"):
+        symbol_data = fetch_track_b_symbol_data(universe=["SPY"])
+
+    assert symbol_data == {"SPY": series}
+    assert "[SPY] fetch: 3 bars, range 2026-08-01 to 2026-08-03" in caplog.messages
+
+
+def test_fetch_track_b_symbol_data_logs_zero_bars_returned_at_debug(monkeypatch, caplog):
+    monkeypatch.setattr(execution, "build_symbol_series", lambda symbol, start, end: None)
+
+    with caplog.at_level("DEBUG", logger="src.execution"):
+        symbol_data = fetch_track_b_symbol_data(universe=["QQQ"])
+
+    assert symbol_data == {}  # unchanged behavior: a 0-bar symbol is not added to symbol_data
+    assert "[QQQ] fetch: 0 bars returned" in caplog.messages
+
+
+def test_fetch_track_b_symbol_data_emits_no_debug_lines_when_level_is_info(monkeypatch, caplog):
+    dates = ["2026-08-01"]
+    series = _series(dates, closes=[100], atrs=[1])
+    monkeypatch.setattr(execution, "build_symbol_series", lambda symbol, start, end: series)
+
+    with caplog.at_level("INFO", logger="src.execution"):
+        fetch_track_b_symbol_data(universe=["SPY"])
+
+    assert caplog.records == []
+
+
+# --- generate_daily_candidates: per-symbol DEBUG signal logging (spec v42 §10.11) ---
+
+def test_generate_daily_candidates_logs_debug_signal_line_with_donchian_bands(caplog):
+    dates = ["2026-08-10"]
+    symbol_data = {
+        "SPY": _series(dates, closes=[450], atrs=[5]),
+        "QQQ": _series(dates, closes=[380], atrs=[4]),
+    }
+    symbol_data["SPY"]["entry_indices"] = {0}
+    symbol_data["SPY"]["upper"] = [440]
+    symbol_data["SPY"]["lower"] = [400]
+    symbol_data["QQQ"]["entry_indices"] = set()
+    symbol_data["QQQ"]["upper"] = [390]
+    symbol_data["QQQ"]["lower"] = [350]
+
+    with caplog.at_level("DEBUG", logger="src.execution"):
+        candidates = generate_daily_candidates(symbol_data, ["SPY", "QQQ"], open_symbols=set(), today="2026-08-10")
+
+    assert [c["symbol"] for c in candidates] == ["SPY"]
+    assert "[SPY] signal: close=450, donchian_upper=440, donchian_lower=400, signal=entry_signal" in caplog.messages
+    assert "[QQQ] signal: close=380, donchian_upper=390, donchian_lower=350, signal=no_signal" in caplog.messages
+
+
+def test_generate_daily_candidates_logs_debug_signal_line_for_a_symbol_with_no_data(caplog):
+    with caplog.at_level("DEBUG", logger="src.execution"):
+        candidates = generate_daily_candidates({}, ["SPY"], open_symbols=set(), today="2026-08-10")
+
+    assert candidates == []
+    assert "[SPY] signal: no data for 2026-08-10" in caplog.messages
+
+
+def test_generate_daily_candidates_logs_debug_signal_line_even_when_symbol_already_open(caplog):
+    # Requirement (b), spec v42 §10.11: the DEBUG signal-check is computed
+    # for every universe symbol regardless of open-position status — the
+    # existing open_symbols skip governs candidate generation only.
+    dates = ["2026-08-10"]
+    symbol_data = {"SPY": _series(dates, closes=[450], atrs=[5])}
+    symbol_data["SPY"]["entry_indices"] = {0}
+    symbol_data["SPY"]["upper"] = [440]
+    symbol_data["SPY"]["lower"] = [400]
+
+    with caplog.at_level("DEBUG", logger="src.execution"):
+        candidates = generate_daily_candidates(symbol_data, ["SPY"], open_symbols={"SPY"}, today="2026-08-10")
+
+    assert candidates == []  # still excluded from candidates — unchanged behavior
+    assert "[SPY] signal: close=450, donchian_upper=440, donchian_lower=400, signal=entry_signal" in caplog.messages
+
+
+def test_generate_daily_candidates_emits_no_debug_lines_when_level_is_info(caplog):
+    dates = ["2026-08-10"]
+    symbol_data = {"SPY": _series(dates, closes=[450], atrs=[5])}
+    symbol_data["SPY"]["entry_indices"] = {0}
+
+    with caplog.at_level("INFO", logger="src.execution"):
+        generate_daily_candidates(symbol_data, ["SPY"], open_symbols=set(), today="2026-08-10")
+
+    assert caplog.records == []
+
+
+# --- main(): LOG_LEVEL wiring + byte-for-byte INFO summary-line regression (spec v42 §10.11) ---
+
+def test_main_configures_logging_from_get_log_level_and_logs_unchanged_summary_line(monkeypatch, caplog):
+    basic_config_calls = []
+    monkeypatch.setattr(execution.logging, "basicConfig", lambda **kwargs: basic_config_calls.append(kwargs))
+    monkeypatch.setattr(execution, "get_log_level", lambda: "DEBUG")
+
+    fixed_run_log = {"date": "2026-08-25", "errors": [], "halted": False}
+    monkeypatch.setattr(execution, "run_daily_execution_job", lambda: fixed_run_log)
+    heartbeat_calls = []
+    monkeypatch.setattr(execution, "send_daily_heartbeat", lambda run_log: heartbeat_calls.append(run_log))
+
+    with caplog.at_level("INFO", logger="src.execution"):
+        main()
+
+    # LOG_LEVEL wiring: get_log_level()'s return value reaches basicConfig() unchanged.
+    assert basic_config_calls == [{"level": "DEBUG", "format": "%(asctime)s %(levelname)s %(message)s"}]
+    assert heartbeat_calls == [fixed_run_log]
+
+    # Byte-for-byte regression: the literal format template and args are pinned,
+    # not just today's rendered string, so a future accidental format change fails loudly.
+    info_records = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(info_records) == 1
+    assert info_records[0].msg == "run_daily_execution_job() result: %s"
+    # logging.Logger._log() special-cases a single Mapping arg, storing it
+    # directly on record.args rather than wrapping it in a 1-tuple — this is
+    # pre-existing %-formatting behavior of the unchanged log.info() call,
+    # not something introduced by this milestone.
+    assert info_records[0].args == fixed_run_log
+    assert info_records[0].getMessage() == f"run_daily_execution_job() result: {fixed_run_log}"
