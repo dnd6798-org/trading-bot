@@ -2014,6 +2014,69 @@ heartbeat is configured and Telegram-connected but has not yet received
 its first ping — expected, since it's waiting on its next scheduled
 weekday 17:00 ET run, not a gap.
 
+**UPDATE (spec v40/playbook v40, next session): first paper-soak
+check-in (2026-08-21 through 2026-08-25), droplet investigation only —
+no code changes this session.** Soak confirmed healthy overall; six
+items investigated and closed or recorded below.
+
+1. **Listener SIGKILL incident, 2026-08-21 18:48:26 UTC.** The listener
+   process was killed via SIGKILL (`status=9/KILL`, uncatchable by the
+   app) 2m18s after starting. **Root cause NOT confirmed** — the kernel
+   log (`journalctl -k`) had already rotated past the window by the time
+   this was investigated, so OOM could not be proven directly. Droplet
+   memory was found critically low at investigation time (458MB RAM, 0
+   swap, 13MB free), making OOM a plausible but unproven cause.
+   **Mitigation applied, not a proven fix for this specific incident:** a
+   1GB swap file added at `/swapfile`, persisted in `/etc/fstab`,
+   confirmed active via `swapon --show`. No further SIGKILL events since.
+2. **Daily job's first-ever run crashed 2026-08-21 18:34:02 UTC** on
+   `"Missing required env var: ALPACA_LIVE_API_KEY"`. **Fully traced and
+   CLOSED as a one-time mid-provisioning `.env` editing artifact, not a
+   code defect:** (a) `config.py`'s `get_alpaca_config()`/`TRADING_ENV`
+   logic is correct — this error is only reachable if `TRADING_ENV` was
+   explicitly non-`"paper"` in `.env` at that exact moment; (b) root was
+   logged in continuously from 08-21 15:13:32 to ~19:02, spanning the
+   incident, immediately followed by a reboot; (c) the job succeeded 10
+   minutes later once `.env` reached its intended state. No live trade
+   was ever at risk — the crash occurs before any Alpaca API call.
+3. **Zero trades submitted across all 4 soak days (08-21, 08-24) —
+   fully investigated and CONFIRMED as a genuine "no Donchian breakout
+   across any of the 8 ETFs" market outcome, not a silent ingestion
+   failure.** Traced the real call path: `run_daily_execution_job()`
+   (`execution.py:1277`) -> `fetch_track_b_symbol_data()` ->
+   `build_symbol_series()` (`scripts/backtest_etf_donchian.py`) ->
+   `fetch_historical_stock_candles()` (`data_ingestion.py:76`), confirmed
+   using `StockHistoricalDataClient`/`StockBarsRequest` on real daily
+   bars for the 8-ETF Track B universe. Confirmed the fetch step's error
+   handling sends a Telegram alert on any failure (not a silent
+   swallow) — user confirmed no such alert was received either day.
+   **Note for the record:** `data_ingestion.py` also contains a separate,
+   older `fetch_historical_candles()` function for a 2-symbol crypto
+   universe (BTC/USD, ETH/USD) — leftover from the rejected crypto
+   track, confirmed genuinely dead code for Track B's live path, no
+   action needed.
+4. **Manual halt test found in logs at 2026-08-21 19:10:48 UTC**
+   (`halt_reason`: `"manual test — verifying halt persists across
+   restart"`), occurring during the same setup window as item 2 above.
+   User was asked directly whether this was planned testing and said
+   they are not sure. **RECORD AS UNCONFIRMED — do not describe this as
+   a confirmed intentional test in any future context.** Current
+   `halt_state.json` is clean (`halted: false`) regardless.
+5. **New open item, not yet scoped, non-urgent:** the daily job
+   currently logs only a single summary line per run (the final result
+   dict) plus any warnings — no per-symbol fetch/signal visibility. This
+   made investigating item 3 above harder than necessary (required
+   source tracing across 3 files plus a Telegram-scrollback check,
+   rather than reading logs directly). Flagged as a candidate future
+   milestone: add DEBUG-level per-symbol fetch/signal logging to
+   `run_daily_execution_job()`'s path. Not started — needs a fresh,
+   explicit instruction.
+6. **`trading-bot-daily-job`'s Healthchecks.io heartbeat is still not
+   yet ping-verified** as of this session — the investigation ran before
+   the 17:00 ET scheduled slot. Pending confirmation next session (see
+   the spec v39/playbook v39 update above for `trading-bot-listener`'s
+   heartbeat, already confirmed pinging).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
