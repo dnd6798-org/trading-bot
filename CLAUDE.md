@@ -2083,6 +2083,35 @@ items investigated and closed or recorded below.
    live-verify v39 -> daily-job live-verify v40) is now completely closed
    on both checks.**
 
+**UPDATE (spec v41, claude.ai chat session, design only — no code
+written yet): the first paper-soak check-in (v40) and the full
+heartbeat-monitoring milestone (v37-v40) are both formally CLOSED as of
+this session** — soak confirmed healthy 2026-08-21 through 2026-08-25
+(SIGKILL incident mitigated with the swap file, root cause itself
+unrecoverable since the kernel log had already rotated past it; the
+one-time `ALPACA_LIVE_API_KEY` crash traced and closed as a
+mid-provisioning `.env` edit artifact, not a code defect; the
+zero-trades-across-4-days outcome traced end to end
+(`run_daily_execution_job()` -> `fetch_track_b_symbol_data()` ->
+`fetch_historical_stock_candles()`, `data_ingestion.py`) and confirmed as
+a genuine "no breakout" market outcome, not an ingestion failure) — all
+matching, not superseding, the detail already recorded above. Also
+reconfirmed this session: `data_ingestion.py`'s crypto/intraday fetch
+path (`fetch_historical_candles()`, `TRADING_PAIRS = ["BTC/USD",
+"ETH/USD"]`) is dead code for Track B's live path, unrelated to and
+requiring no changes for the item below.
+
+**NEW DESIGN LOCKED, NOT YET IMPLEMENTED (spec v41 §10.10): a daily-job
+per-symbol DEBUG logging enhancement**, closing the "new open item"
+flagged in the v40 update above (`run_daily_execution_job()`'s
+single-summary-line logging made investigating the zero-trades outcome
+harder than necessary). Full design detail is in spec v41 §10.10
+(project knowledge, not this repo) — this update only records the
+decision to build it, per this file's own "update whenever a real
+decision is made" rule; no code, test, or log-statement change has been
+made for it yet. **The next message in this session is the milestone
+brief for this build.**
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
