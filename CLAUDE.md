@@ -2112,6 +2112,46 @@ decision is made" rule; no code, test, or log-statement change has been
 made for it yet. **The next message in this session is the milestone
 brief for this build.**
 
+**UPDATE (spec v42 §10.11): the milestone brief's pre-implementation
+verification checkpoint surfaced one real, blocking data-availability
+gap and two smaller structural points — all three now RESOLVED, per
+instruction, before any code was written.**
+
+1. **Fetch-step logging (v41 req #2): confirmed implementable exactly as
+   specified, no changes needed.** `fetch_track_b_symbol_data()`
+   (`execution.py`) already loops per-symbol — not a batched
+   multi-symbol request — and `build_symbol_series()`'s returned dict
+   already carries the full candle list, so bar count and first/last
+   bar date are directly available at that loop.
+2. **Signal-evaluation logging (v41 req #3): blocking gap resolved.**
+   `generate_daily_candidates()` had no access to the actual Donchian
+   upper/lower band values — only `entry_indices` (a boolean
+   fired/not-fired set) and `atr` — because
+   `compute_channel_long_entry_indices()` (`scripts/
+   backtest_etf_donchian.py:230-247`) computed `upper`/`lower` via
+   `compute_donchian_levels()` and then discarded them. **Resolved:**
+   `upper` and `lower` are added as two new, additive keys to
+   `build_symbol_series()`'s returned dict, populated from the
+   `compute_donchian_levels()` call already made inside
+   `compute_channel_long_entry_indices()` — no existing key changes, no
+   existing caller's behavior changes. This was chosen over the
+   alternative (recomputing the bands a second time independently
+   inside `execution.py`) specifically to avoid a drift risk between two
+   separate call sites on `channel_length`.
+3. **Two smaller points, approved as proposed:** (a) the `if __name__ ==
+   "__main__":` block (`execution.py:1411-1432`) is extracted into a
+   callable `main()` function — same calls, same order, no behavior
+   change — needed so `LOG_LEVEL` is testable and so a real
+   `caplog`-based regression test can pin the existing INFO summary
+   line's exact text (no such test existed before this milestone); (b)
+   the DEBUG signal-check (close/upper/lower/signal) is computed for
+   every universe symbol regardless of open-position status, purely for
+   logging — the existing open-position skip that governs actual
+   candidate generation in `generate_daily_candidates()` is untouched.
+
+Implementation proceeds now, per instruction, against this resolved
+design.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
