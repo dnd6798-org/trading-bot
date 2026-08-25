@@ -2075,7 +2075,13 @@ items investigated and closed or recorded below.
    yet ping-verified** as of this session — the investigation ran before
    the 17:00 ET scheduled slot. Pending confirmation next session (see
    the spec v39/playbook v39 update above for `trading-bot-listener`'s
-   heartbeat, already confirmed pinging).
+   heartbeat, already confirmed pinging). **UPDATE (same day, 2026-08-25):
+   now LIVE-VERIFIED** — Healthchecks.io dashboard confirmed `trading-bot-
+   daily-job` at "Last Ping: 18 minutes ago" following today's scheduled
+   17:00 ET run, its first real ping ever. **The full heartbeat-monitoring
+   milestone (design v37 -> code/rename v38 -> account setup + listener
+   live-verify v39 -> daily-job live-verify v40) is now completely closed
+   on both checks.**
 
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
