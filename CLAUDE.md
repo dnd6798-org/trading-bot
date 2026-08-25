@@ -1955,6 +1955,65 @@ Out of scope, per instruction, and not done: creating the actual
 Healthchecks.io account, checks, or Telegram integration — that remains
 a separate manual/claude.ai-side task.
 
+**UPDATE (spec v39/playbook v39, next session): the heartbeat-monitoring
+milestone (env var rename, `6f9a524`+`c322a67`) is now fully deployed and
+live-verified end-to-end. No code changed this session — this update is
+a status record only.**
+
+1. **Healthchecks.io account setup — COMPLETE.** `trading-bot-listener`
+   check: Simple schedule, Period 5 min, Grace 10 min, Telegram
+   integration on. `trading-bot-daily-job` check: **corrected from the
+   original plan during setup** — a plain Period=1 day schedule would
+   have false-alarmed every weekend, since the daily job only runs
+   weekdays; configured instead as a Cron schedule `0 17 * * 1-5`,
+   timezone `America/New_York`, Grace 45 min, Telegram integration on.
+   Droplet's `/opt/trading-bot/.env` updated with both real ping URLs;
+   the stale `UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` placeholder and its
+   19-line comment block were removed (a `.env.bak` backup was taken
+   first).
+
+2. **Deployment gap found and fixed — a new category of gap, distinct
+   from the repo-backup (local-not-pushed) gap flagged earlier this
+   week.** The droplet was **6 commits behind `origin/paper`**, still
+   sitting at `da81cee` (the systemd-units commit) — meaning the entire
+   heartbeat feature (`4374ce7`, `2dd168e`, and everything after,
+   through `c322a67`) had been committed, tested, and pushed weeks
+   earlier but **never actually deployed to the droplet**. A plain
+   `systemctl restart` after editing `.env` just relaunched the same
+   stale pre-heartbeat code with no visible error — only silence (zero
+   heartbeat log lines, the Healthchecks.io check never went green).
+   Root-caused via `grep -n "heartbeat" src/fill_listener.py` on the
+   droplet returning no matches, then `git log HEAD..origin/paper
+   --oneline` showing the 6 missing commits. Fixed via `git pull origin
+   paper` on the droplet (fast-forwarded `da81cee..c322a67` cleanly, 9
+   files, no local drift, no new dependency introduced). Listener
+   restarted with the current code (PID 80146, 17:08:47 UTC) and
+   confirmed pinging Healthchecks.io successfully ~5 minutes later
+   (dashboard went green with a real Last Ping timestamp).
+
+3. **Permission incident found and fixed.** An earlier `git fetch`/`git
+   status` run as root on the droplet left `.git/FETCH_HEAD`
+   root-owned, which blocked the first `sudo -u tradingbot git pull`
+   attempt with `"Permission denied."` Fixed via `chown -R
+   tradingbot:tradingbot /opt/trading-bot/.git`. Confirmed via `find
+   /opt/trading-bot -not -user tradingbot -not -group tradingbot` that
+   no other repo files were affected (only `.env.bak`, expected).
+
+4. **Two new permanent rules added to `RULES.md` §4 this session** (see
+   that file — content authored in the claude.ai chat, not originated
+   here, per the file's own §1/§6 convention and the process correction
+   from earlier this week): droplet-deployed-state must be checked
+   independently of push state before any droplet-side milestone is
+   marked complete; git commands on the droplet must run as
+   `sudo -u tradingbot`, never as root, to avoid leaving `.git`
+   internals root-owned.
+
+**Current live status:** `trading-bot-listener`'s heartbeat is confirmed
+pinging successfully from the real droplet. `trading-bot-daily-job`'s
+heartbeat is configured and Telegram-connected but has not yet received
+its first ping — expected, since it's waiting on its next scheduled
+weekday 17:00 ET run, not a gap.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market

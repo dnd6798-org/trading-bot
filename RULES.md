@@ -39,6 +39,8 @@ If Claude is uncertain, the fix is more research, not deferring the decision to 
   2. **Milestone/task brief** — sent second, only after CLAUDE.md confirmation.
 - When Claude Code reports a milestone back, the user pastes that report into claude.ai. Claude.ai's job is to validate it — check it against what was actually briefed, not just accept a summary at face value. If anything doesn't match the brief (wrong content, unexplained claims, mismatched commit history), stop and ask for direct verification (e.g., `git log`) before treating it as accepted.
 - **Droplet-side verification must be reported back the same session.** Claude Code has no droplet access of its own — any check performed directly against the droplet (e.g. manual SSH, guided live by claude.ai) is invisible to Claude Code until it's explicitly reported. Report the exact result (what was checked, what happened, pass/fail) back to Claude Code the same session it happens, so CLAUDE.md never drifts from what's actually true. A milestone with a droplet-verification component is not closed, on either surface, until Claude Code has recorded that confirmation itself. (Added 2026-08-22, after the four systemd-units Step 5 checks ran and passed live on the droplet but sat unreported to Claude Code for a full session afterward.)
+- "Pushed to origin/paper" and "deployed on the droplet" are different facts and neither may be asserted without checking the other — verify the droplet's own `git log -1` against origin/paper before marking any droplet-side milestone complete.
+- Don't run git commands as root on the droplet; use `sudo -u tradingbot` for anything touching the repo, to avoid leaving `.git` internals root-owned.
 
 ## 5. Proactive clarity
 
