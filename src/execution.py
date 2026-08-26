@@ -160,6 +160,45 @@ design session — same "flag it, don't guess" status as the gap above:
     post-close run — not built here, flagged for the same chat-interface
     design-call as the qty gap above.
 
+*** PER-SYMBOL DUPLICATE-ENTRY PROTECTION (spec v44 §10.13, CLOSES a real
+gap surfaced by an unplanned same-day restart of trading-bot-daily.service
+— see CLAUDE.md "Current status") ***
+check_trade_count_limit()'s today_entry_count cap (risk_filter.py) is a
+coarse, WHOLE-UNIVERSE limit (8, sized to the full universe) — it cannot
+catch a single symbol being double-entered by two same-day invocations of
+run_daily_execution_job() (e.g. a service restart). generate_daily_
+candidates()'s open_symbols skip only reflects FILLED positions
+(build_open_positions()) — a pending, unfilled entry order from an
+earlier same-day invocation (Track B entries are always submitted
+post-close, meant to fill at next session's open, so they are ALWAYS
+pending at the moment of any same-day second invocation) does not block a
+second candidate for that same symbol.
+
+Fix: client_order_id (encode_client_order_id(), just below) is already
+fully deterministic from that trading day's own closing bar — the SAME
+symbol firing the SAME signal on the SAME day always produces the
+IDENTICAL id, regardless of how many times this function runs that day.
+submit_entry_and_stop() now looks up that exact client_order_id via
+trading_client.get_order_by_client_id() BEFORE submitting a new entry
+order; if ANY order already exists under it (any status), this is a
+detected duplicate — no new order is submitted, and TrackBEntryResult's
+reason is "duplicate_client_order_id_skipped" (deliberately NOT a
+Telegram alert — a detected duplicate is the guard working as intended,
+not an error).
+
+Empirically confirmed against the real paper account (alpaca-py 0.43.5,
+per this module's own established "verify, don't guess" convention —
+see the client_order_id max-length and ReplaceOrderRequest.qty typing
+findings elsewhere in this file): a genuine not-found lookup raises
+alpaca.common.exceptions.APIError with .status_code == 404 (.code ==
+40410000, message "order not found for {id}") — NOT a None return and
+NOT a different exception type. Only that specific outcome is treated as
+"no duplicate, proceed normally"; any other APIError status or exception
+propagates up to run_daily_execution_job()'s existing per-candidate
+try/except (same fail-toward-alert convention as every other check in
+this function), rather than being silently treated as either a duplicate
+or a clear-to-proceed.
+
 Fail-safe behavior (spec §4.5): any data-fetch or API failure during the
 daily job's data-gathering step halts NEW ENTRIES for that day only —
 existing positions stay protected by their resting GTC stop orders
@@ -300,6 +339,7 @@ from types import SimpleNamespace
 
 import requests
 
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderStatus, OrderType, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
@@ -1248,6 +1288,24 @@ def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrail
     # an extended-hours fill for testing).
     signal_date = candidate["timestamp"][:10]
     client_order_id = encode_client_order_id(symbol, signal_date, stop_price)
+
+    # Idempotency guard (spec v44 §10.13, module docstring's "PER-SYMBOL
+    # DUPLICATE-ENTRY PROTECTION" section) — the SAME symbol firing the
+    # SAME signal on the SAME day always produces this IDENTICAL client_
+    # order_id, so an existing order under it means an earlier same-day
+    # invocation of this function already submitted this exact entry.
+    # Empirically confirmed (real paper account, alpaca-py 0.43.5): a
+    # genuine not-found lookup raises APIError with status_code == 404 —
+    # that is the ONLY outcome treated as "no duplicate, proceed"; any
+    # other exception propagates to the caller's existing per-candidate
+    # try/except rather than being silently resolved either way here.
+    try:
+        trading_client.get_order_by_client_id(client_order_id)
+    except APIError as exc:
+        if exc.status_code != 404:
+            raise
+    else:
+        return TrackBEntryResult(symbol=symbol, submitted=False, filled=False, reason="duplicate_client_order_id_skipped")
 
     entry_order = submit_entry_market_order(trading_client, symbol, qty, client_order_id=client_order_id)
     entry_order = poll_order_until_terminal(trading_client, entry_order.id, timeout_seconds=poll_timeout_seconds, sleep_fn=sleep_fn)

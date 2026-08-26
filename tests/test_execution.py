@@ -31,6 +31,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from alpaca.common.exceptions import APIError
 from alpaca.trading.enums import OrderStatus, OrderType
 from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
 
@@ -96,6 +97,22 @@ class FakeOrder:
         self.client_order_id = client_order_id
 
 
+def _not_found_api_error(client_order_id="some-id"):
+    """
+    Mirrors the EMPIRICALLY CONFIRMED real behavior of TradingClient.
+    get_order_by_client_id() on a genuine not-found lookup (real paper
+    account, alpaca-py 0.43.5): raises alpaca.common.exceptions.APIError
+    with .status_code == 404 (.code == 40410000). Constructed via a real
+    APIError with a fake http_error carrying just enough shape
+    (.response.status_code) for the real .status_code property to work,
+    not a hand-rolled stand-in exception type.
+    """
+    return APIError(
+        f'{{"code":40410000,"message":"order not found for {client_order_id}"}}',
+        http_error=SimpleNamespace(response=SimpleNamespace(status_code=404)),
+    )
+
+
 class FakePosition:
     def __init__(self, symbol, qty, avg_entry_price, market_value):
         self.symbol = symbol
@@ -124,6 +141,7 @@ class FakeTradingClient:
         self.cancel_calls = []
         self.submit_order_fn = None
         self.get_order_by_id_fn = None
+        self.get_order_by_client_id_fn = None
         self.cancel_order_by_id_fn = None
         self.replace_order_by_id_fn = None
         self.orders_by_request = None  # optional callable(filter) -> list[FakeOrder]
@@ -141,6 +159,18 @@ class FakeTradingClient:
         if self.get_order_by_id_fn is not None:
             return self.get_order_by_id_fn(order_id)
         raise NotImplementedError("test must set get_order_by_id_fn")
+
+    def get_order_by_client_id(self, client_order_id):
+        # Default: no order found under this id — the ordinary, common
+        # case (no earlier same-day submission exists yet). Matches real
+        # get_order_by_client_id()'s empirically-confirmed not-found
+        # behavior exactly (see _not_found_api_error()), so every existing
+        # test that never touches duplicate detection keeps working
+        # unchanged. A test exercising the duplicate path sets
+        # get_order_by_client_id_fn explicitly.
+        if self.get_order_by_client_id_fn is not None:
+            return self.get_order_by_client_id_fn(client_order_id)
+        raise _not_found_api_error(client_order_id)
 
     def replace_order_by_id(self, order_id, order_data=None):
         self.replace_calls.append((order_id, order_data))
@@ -777,6 +807,108 @@ def test_submit_entry_and_stop_shares_the_has_resting_protective_stop_check():
     from src import execution
     source = inspect.getsource(execution.submit_entry_and_stop)
     assert "has_resting_protective_stop(" in source
+
+
+# --- submit_entry_and_stop: per-symbol duplicate-entry protection (spec v44 §10.13) ---
+
+def test_submit_entry_and_stop_detects_existing_order_under_client_order_id_and_skips_submission(captured_telegram_messages):
+    # An earlier same-day invocation (e.g. a service restart) already
+    # submitted this exact symbol/signal/day's entry — get_order_by_
+    # client_id() finds it (any status — here still pending, unfilled).
+    # Must NOT submit a second entry order, and must NOT alert (a detected
+    # duplicate is the guard working as intended, not a failure).
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    client = FakeTradingClient()
+    client.get_order_by_client_id_fn = lambda coid: FakeOrder(id="earlier-invocation-order", client_order_id=coid, status=OrderStatus.NEW)
+
+    def submit_order(req):
+        raise AssertionError("must not submit any order when a duplicate client_order_id is detected")
+    client.submit_order_fn = submit_order
+
+    result = submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    assert result.submitted is False
+    assert result.filled is False
+    assert result.reason == "duplicate_client_order_id_skipped"
+    assert client.submitted_orders == []
+    assert captured_telegram_messages == []  # not a failure — no alert
+
+
+def test_submit_entry_and_stop_proceeds_normally_when_no_existing_order_under_client_order_id():
+    # The ordinary, common case: get_order_by_client_id() raises the real
+    # confirmed not-found error (APIError, status_code == 404) — must
+    # proceed exactly as before this milestone, no behavior change.
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    client = FakeTradingClient()
+    client.get_order_by_client_id_fn = lambda coid: (_ for _ in ()).throw(_not_found_api_error(coid))
+
+    def submit_order(req):
+        if isinstance(req, StopOrderRequest):
+            return FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+        assert isinstance(req, MarketOrderRequest)
+        return FakeOrder(id="entry-1", status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+
+    client.submit_order_fn = submit_order
+    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+
+    result = submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    assert result.submitted is True
+    assert result.filled is True
+    assert result.reason is None
+    assert len(client.submitted_orders) == 2  # entry + stop, unchanged from before this milestone
+
+
+def test_submit_entry_and_stop_duplicate_check_is_independent_of_the_resting_stop_race_closure():
+    # Regression guard: the new client_order_id duplicate check and the
+    # existing has_resting_protective_stop() race-closure check (fix-up
+    # item 2, above) are two independent mechanisms that must both keep
+    # working correctly together — this scenario exercises BOTH in one
+    # call. No duplicate entry order exists yet (get_order_by_client_id
+    # -> not found, so the entry proceeds), but a resting stop for this
+    # symbol ALREADY exists (e.g. the fill_listener won a race on this
+    # exact fill) — the entry must still submit, and the stop step must
+    # still correctly skip submitting a second stop.
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    client = FakeTradingClient()
+    client.get_order_by_client_id_fn = lambda coid: (_ for _ in ()).throw(_not_found_api_error(coid))
+    client.orders_by_request = lambda filter: [
+        FakeOrder(id="stop-from-listener", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=10.0, stop_price=435.0)
+    ]
+
+    def submit_order(req):
+        assert not isinstance(req, StopOrderRequest), "must not submit a duplicate stop when one already rests"
+        return FakeOrder(id="entry-1", status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+    client.submit_order_fn = submit_order
+    client.get_order_by_id_fn = lambda order_id: FakeOrder(id=order_id, status=OrderStatus.FILLED, filled_qty=10.0, filled_avg_price=451.0)
+
+    result = submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    assert result.submitted is True
+    assert result.filled is True
+    assert result.reason is None  # not a duplicate — the entry itself went through
+    assert result.stop_order_submitted is True  # protected — via the pre-existing resting stop, not a new one
+    assert len(client.submitted_orders) == 1  # only the entry — no duplicate entry, no duplicate stop
+
+
+def test_submit_entry_and_stop_reraises_a_non_404_error_from_the_duplicate_check():
+    # A genuine API failure (not a not-found) must NOT be silently treated
+    # as either a duplicate or a clear-to-proceed — it propagates to the
+    # caller (run_daily_execution_job()'s existing per-candidate
+    # try/except), same fail-toward-alert convention as every other check
+    # in this function.
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+    client = FakeTradingClient()
+    server_error = APIError(
+        '{"code":50010000,"message":"internal server error"}',
+        http_error=SimpleNamespace(response=SimpleNamespace(status_code=500)),
+    )
+    client.get_order_by_client_id_fn = lambda coid: (_ for _ in ()).throw(server_error)
+
+    with pytest.raises(APIError):
+        submit_entry_and_stop(client, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    assert client.submitted_orders == []
 
 
 # --- generate_daily_candidates: universe-order tie-break, skip open symbols -
