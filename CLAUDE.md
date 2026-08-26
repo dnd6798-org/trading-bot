@@ -2261,6 +2261,73 @@ locked-not-implemented gap, 2026-08-26):**
    "update whenever a real decision is made" rule (this update only
    records the decision to build it).
 
+**UPDATE: the per-symbol duplicate-entry protection milestone (spec v44
+§10.13) is now IMPLEMENTED — committed as `122d5ea` on `paper`, full
+suite 300/300 passing (296 base + 4 new).**
+
+**Required pre-implementation empirical verification (per RULES.md's
+"verify, don't guess" convention, same category as this module's
+client_order_id max-length and `ReplaceOrderRequest.qty` typing findings)
+— run against the real paper account, not assumed:**
+`TradingClient.get_order_by_client_id()` on a genuine not-found lookup
+raises `alpaca.common.exceptions.APIError` with **`.status_code == 404`**
+(`.code == 40410000`, message `"order not found for {id}"`) — not a
+`None` return, not a different exception type. Confirmed directly:
+`APIError` exposes `.status_code`/`.code` as real properties (derived
+from the underlying HTTP response/JSON body), both verified non-`None`
+against the live 404 response.
+
+`submit_entry_and_stop()` (`src/execution.py`) now calls `trading_client.
+get_order_by_client_id(client_order_id)` immediately after computing the
+already-existing `client_order_id` (unchanged formula:
+`encode_client_order_id(symbol, signal_date, stop_price)`) and BEFORE
+`submit_entry_market_order()`. If the lookup returns an order (any
+status), this is a detected duplicate — no new entry order is submitted;
+`TrackBEntryResult` gets `submitted=False, filled=False, reason=
+"duplicate_client_order_id_skipped"`, and NO Telegram alert fires (a
+detected duplicate is the guard working as intended, not a failure — same
+reasoning already established for `pending_next_session_fill`). If the
+lookup raises `APIError` with `status_code == 404`, this is the ordinary
+case (no earlier same-day submission) and the function proceeds exactly
+as before this milestone. Any other exception (a non-404 `APIError`, or
+anything else) is deliberately NOT swallowed — it re-raises, propagating
+to `run_daily_execution_job()`'s existing per-candidate `try/except`
+(which alerts and logs, then continues to the next candidate), the same
+fail-toward-alert convention as every other check already in this
+function — a genuine API failure must never be silently treated as
+either "duplicate" or "clear to proceed."
+
+**Explicitly confirmed independent of the pre-existing
+`has_resting_protective_stop()` race-closure check** (fix-up item 2,
+"Current status" further above) — the two checks guard different things
+(a duplicate ENTRY order vs. a duplicate STOP order) and both must keep
+working correctly together; a dedicated regression test exercises both
+in one call (no duplicate entry exists, but a resting stop already does)
+and confirms the entry still submits while the stop step still correctly
+skips submitting a second stop.
+
+**4 new tests, `tests/test_execution.py`:** duplicate detected and
+submission skipped (no Telegram alert, zero orders submitted); no
+existing order found → proceeds normally (byte-for-byte unchanged
+behavior — entry + stop both submitted); the independence-from-
+`has_resting_protective_stop()` regression test described above; a
+non-404 `APIError` from the lookup re-raises rather than being silently
+resolved either way. `FakeTradingClient.get_order_by_client_id()` was
+added with a **default** behavior of raising the same real, empirically-
+confirmed 404 `APIError` shape when a test doesn't explicitly set
+`get_order_by_client_id_fn` — chosen specifically so every pre-existing
+`submit_entry_and_stop()` test (none of which concern duplicate
+detection) keeps passing unmodified, per this milestone's "no existing
+test may be weakened" requirement — confirmed: 296 pre-existing tests
+all still pass unchanged.
+
+**Explicitly out of scope, confirmed untouched, per instruction:**
+`check_trade_count_limit()`'s whole-universe cap (still a legitimate,
+separate, coarser guardrail, not replaced by this fix); per-symbol error
+isolation in the fetch step; spec §3.2 journaling persistence; the
+DEBUG-level live check from item 1 above (droplet-side, not a Claude Code
+task).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
