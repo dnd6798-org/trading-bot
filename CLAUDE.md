@@ -2222,6 +2222,45 @@ than wrapping it in a 1-tuple — true of the original, unchanged
 `tests/test_config.py` (2): `get_log_level()` default/set. Full suite:
 296/296 passing.
 
+**UPDATE (spec v43/v44, playbook v44 — droplet deployment + a new
+locked-not-implemented gap, 2026-08-26):**
+
+1. **Daily-job logging milestone (spec v43 §10.12): droplet deployment
+   is now COMPLETE and live-verified**, except for one remaining step.
+   `git pull` on the droplet (as the `tradingbot` user) fast-forwarded
+   `c322a67..eaa870a` cleanly; `trading-bot-daily.service` was restarted
+   successfully; post-restart `git log -1 --oneline` on the droplet
+   confirmed `eaa870a`, matching `origin/paper`'s head. The existing
+   INFO-level summary line was confirmed byte-for-byte format-unchanged
+   across pre- and post-deploy runs. **NOT yet done: the DEBUG-level
+   live check** (set `LOG_LEVEL=DEBUG`, restart, confirm a live DEBUG
+   line, revert to `INFO`, restart again) — pending.
+2. **The droplet `.env` UptimeRobot-placeholder cleanup — CONFIRMED
+   CLOSED this session, no further action needed.** The stale
+   `UPTIMEROBOT_DAILY_JOB_HEARTBEAT_URL` line is already gone from
+   `/opt/trading-bot/.env`, and `trading-bot-listener.service` was
+   already restarted after that fix (`ActiveEnterTimestamp` 2026-08-26
+   06:20:23 UTC, confirmed after the `.env` fix).
+3. **New gap found this session, fix DESIGNED AND LOCKED (spec v44
+   §10.13) but NOT YET IMPLEMENTED: per-symbol duplicate-entry
+   protection.** Restarting `trading-bot-daily.service` today caused an
+   unplanned same-day second invocation of `run_daily_execution_job()`
+   — confirmed SAFE today (zero candidates fired either time) — but it
+   surfaced a real, previously undiscovered gap: `check_trade_count_
+   limit()`'s `today_entry_count` is a whole-universe total, not
+   per-symbol, and `generate_daily_candidates()`'s `open_symbols` skip
+   only sees FILLED positions — a pending (submitted, unfilled) entry
+   order from an earlier same-day invocation does NOT block a second
+   entry order for the same symbol on the same day. **Locked fix:**
+   reuse the existing `encode_client_order_id()`/`decode_client_order_
+   id()` machinery in `execution.py` as an idempotency key — the same
+   symbol firing the same signal on the same day always produces an
+   identical `client_order_id`, so checking `get_order_by_client_id()`
+   before submission detects and skips a genuine duplicate. Not yet
+   implemented — the milestone brief is coming next, per this file's own
+   "update whenever a real decision is made" rule (this update only
+   records the decision to build it).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
