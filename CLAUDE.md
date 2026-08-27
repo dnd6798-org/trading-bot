@@ -2492,6 +2492,26 @@ the droplet's stale `origin` remote URL) is now CLOSED.**
    (`fetch_historical_candles()` / `TRADING_PAIRS`, leftover from the
    rejected crypto track, confirmed not on Track B's live path).
 
+**v49 (2026-08-27): Off-schedule daily-job executions investigated and
+closed.**
+
+Three unexplained executions of trading-bot-daily.service on 2026-08-26
+(18:08:33, 20:28:49, 21:24:50 UTC, in addition to the correct scheduled
+21:00:01 UTC run) were investigated per RULES.md's "unscheduled
+execution" rule. Root cause: all three were manual `systemctl restart
+trading-bot-daily.service` commands run directly in an already-open root
+shell on the droplet while manually testing the LOG_LEVEL=DEBUG toggle
+end-to-end (turn DEBUG on → restart → confirm output → revert to INFO →
+restart → confirm revert). Confirmed via the live shell's `history`
+output. The systemd timer itself (trading-bot-daily.timer) was confirmed
+to have fired exactly once, at the correct scheduled time, ruling out a
+timer defect. The service unit was confirmed to have no self-triggering
+hooks (no OnSuccess=/OnFailure=/Restart=). No code or config defect
+found. All four runs that day (scheduled + 3 manual) independently
+returned no_signal correctly for all 8 symbols, adding confirmation the
+signal logic works correctly under live data. No action required;
+investigation closed. See spec v49 §10.19 for full detail.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
