@@ -2512,6 +2512,17 @@ returned no_signal correctly for all 8 symbols, adding confirmation the
 signal logic works correctly under live data. No action required;
 investigation closed. See spec v49 §10.19 for full detail.
 
+**v50 (2026-08-27): Track C candidate design locked — "DMSR" (Dual
+Momentum Sector Rotation).**
+
+A second, structurally different strategy candidate was researched and
+its exact rules locked, to run alongside Track B (not replacing it). No
+backtest has been run yet, and no live/paper capital is allocated to this
+strategy — design lock only. Full rules and pre-committed adopt/abandon
+bars are in spec v50 §10.20; a backtest brief for this candidate is being
+sent as a separate message. Track B is completely unaffected — no changes
+to execution.py or any live code path.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
