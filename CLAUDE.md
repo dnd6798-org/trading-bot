@@ -2523,6 +2523,33 @@ bars are in spec v50 §10.20; a backtest brief for this candidate is being
 sent as a separate message. Track B is completely unaffected — no changes
 to execution.py or any live code path.
 
+**v51 (2026-08-27): DMSR backtest complete, RAW→SPLIT deviation accepted,
+2 of 3 adopt/abandon bars checked — no verdict yet.**
+
+The DMSR backtest (commit `873ed3e`) ran successfully across all 4
+lookback variants (10/11/12/13-month). The RAW→SPLIT adjustment deviation
+(needed because real 2:1 forward splits on 5 of the 11 sector ETFs —
+XLK/XLE/XLY/XLU/XLB — on 2025-12-05 break `Adjustment.RAW`, injecting a
+phantom ~50% one-day loss) is reviewed and accepted as a correct
+data-integrity fix, not a rule change. `Adjustment.SPLIT` is
+split-adjusted but NOT dividend-adjusted, so the brief's intended
+price-return / dividends-are-a-known-limitation basis is preserved.
+Mechanical check against the pre-committed v50 bars: Sharpe(BIL) and
+max-drawdown bars both checked for all 4 lookbacks — 10m, 11m, and 12m
+pass both; 13m fails on drawdown (35.35% vs. the 35% ceiling) and is
+provisionally eliminated. The third bar — monthly-return correlation to
+Track B — has not yet been computed; no adopt/abandon verdict can be
+reached until it is. Full detail in spec v51 §10.21.
+
+Commit `873ed3e` (DMSR backtest script) is on `origin/paper`. The Track C
+milestone itself is not yet closed — pending the Track B correlation
+calculation before any adopt/abandon verdict. Backtest-only:
+`scripts/backtest_sector_rotation.py` and
+`tests/test_backtest_sector_rotation.py` are new; `.gitignore` gained
+`backtest_output/`; no live code path (execution.py, the daily job,
+fill_listener.py, risk_filter.py) was touched. Full suite 316/316
+passing (was 300; +16 new tests).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
