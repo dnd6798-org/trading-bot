@@ -17,5 +17,10 @@ data/
 logs/
 backtest_output/
 
+# Runtime state — created at CWD on the droplet, never committed
+halt_state.json
+track_c_halt_state.json
+track_positions_state.json
+
 # OS
 .DS_Store

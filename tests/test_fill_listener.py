@@ -48,6 +48,18 @@ def captured_telegram_messages(monkeypatch):
     return sent
 
 
+@pytest.fixture(autouse=True)
+def isolated_track_positions_ledger(tmp_path, monkeypatch):
+    """
+    Every test gets its own throwaway track_positions_state.json — spec
+    v55 §10.25's ownership ledger, now updated by handle_trade_update()
+    on every buy/sell fill. Same pattern as test_risk_filter.py's
+    isolated_halt_state.
+    """
+    from src import track_positions
+    monkeypatch.setattr(track_positions, "_STATE_PATH", str(tmp_path / "track_positions_state.json"))
+
+
 # --- MonitoredTradingStream: backoff math + alert threshold ----------------
 
 def _make_stream(alert_threshold=5, max_backoff_seconds=300):
@@ -177,15 +189,23 @@ def test_handle_trade_update_accepts_a_raw_string_event_value_not_just_the_enum(
     assert result["action"] == "protected"
 
 
-def test_handle_trade_update_logs_sell_fills_only_no_action():
-    order = _order(side=OrderSide.SELL, client_order_id=encode_client_order_id("SPY", "2026-08-10", 435.0))
+def test_handle_trade_update_sell_fill_submits_no_order_but_decrements_the_ownership_ledger():
+    # spec v55 §10.25: a sell fill still triggers NO order action (no new
+    # stop is ever submitted for an exit) — but it now decrements
+    # track_b's ownership ledger for the symbol.
+    from src import track_positions
+    track_positions.set_track_qty("track_b", "SPY", 10.0)
+
+    order = _order(side=OrderSide.SELL, filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", 435.0))
     trade_update = _trade_update(order=order)
+    trade_update.qty = 10.0  # this execution's size (the per-event increment)
     client = FakeTradingClient()
 
     result = handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
 
-    assert result == {"action": "logged_exit", "symbol": "SPY", "event": "fill"}
+    assert result == {"action": "logged_exit", "symbol": "SPY", "event": "fill", "track_b_ledger_qty": 0.0}
     assert client.submitted_orders == []
+    assert track_positions.get_track_qty("track_b", "SPY") == 0.0
 
 
 def test_handle_trade_update_ignores_symbols_outside_the_universe():
@@ -281,6 +301,96 @@ def test_handle_trade_update_redelivered_event_for_an_already_protected_fill_is_
     assert result["qty_submitted"] == 0.0
     assert client.submitted_orders == []
     assert client.replace_calls == []
+
+
+# --- handle_trade_update: position-ownership ledger (spec v55 §10.25) -------
+
+def test_buy_fill_sets_track_b_ledger_to_cumulative_filled_qty():
+    from src import track_positions
+    stop_price = 435.0
+    order = _order(filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order)
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    result = handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
+
+    assert result["track_b_ledger_qty"] == 10.0
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
+
+
+def test_partial_then_full_buy_fill_ledger_tracks_cumulative_idempotently():
+    from src import track_positions
+    stop_price = 435.0
+    coid = encode_client_order_id("SPY", "2026-08-10", stop_price)
+    client = FakeTradingClient()
+    resting = []
+    client.orders_by_request = lambda filter: list(resting)
+
+    def submit(req):
+        o = FakeOrder(id=f"stop-{len(resting)+1}", symbol="SPY", status=OrderStatus.NEW,
+                      order_type=OrderType.STOP, qty=req.qty, stop_price=req.stop_price)
+        resting.append(o)
+        return o
+    client.submit_order_fn = submit
+
+    handle_trade_update(client, _trade_update(event=TradeEvent.PARTIAL_FILL, order=_order(filled_qty=6.0, client_order_id=coid)), sleep_fn=lambda s: None)
+    assert track_positions.get_track_qty("track_b", "SPY") == 6.0
+
+    handle_trade_update(client, _trade_update(event=TradeEvent.FILL, order=_order(filled_qty=10.0, client_order_id=coid)), sleep_fn=lambda s: None)
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
+
+    # redelivered final event — set-to-cumulative is idempotent
+    handle_trade_update(client, _trade_update(event=TradeEvent.FILL, order=_order(filled_qty=10.0, client_order_id=coid)), sleep_fn=lambda s: None)
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
+
+
+def test_buy_fill_updates_ledger_even_when_stop_submission_fails():
+    from src import track_positions
+    stop_price = 435.0
+    order = _order(filled_qty=10.0, client_order_id=encode_client_order_id("SPY", "2026-08-10", stop_price))
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order)
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []
+
+    def always_fail(req):
+        raise RuntimeError("broker rejected the stop")
+    client.submit_order_fn = always_fail
+
+    result = handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
+
+    assert result["action"] == "protection_failed"
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0  # shares exist regardless
+
+
+def test_sell_fill_for_a_non_universe_symbol_does_not_touch_the_ledger():
+    from src import track_positions
+    track_positions.set_track_qty("track_b", "SPY", 10.0)
+    order = _order(symbol="AAPL", side=OrderSide.SELL, filled_qty=5.0)
+    trade_update = _trade_update(order=order)
+    trade_update.qty = 5.0
+
+    result = handle_trade_update(FakeTradingClient(), trade_update, universe=["SPY", "QQQ"], sleep_fn=lambda s: None)
+
+    assert result["track_b_ledger_qty"] is None
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
+
+
+def test_partial_sell_fills_decrement_the_ledger_by_each_execution_increment():
+    from src import track_positions
+    track_positions.set_track_qty("track_b", "SPY", 10.0)
+    client = FakeTradingClient()
+
+    tu1 = _trade_update(order=_order(side=OrderSide.SELL, filled_qty=4.0))
+    tu1.qty = 4.0
+    handle_trade_update(client, tu1, sleep_fn=lambda s: None)
+    assert track_positions.get_track_qty("track_b", "SPY") == 6.0
+
+    tu2 = _trade_update(order=_order(side=OrderSide.SELL, filled_qty=10.0))
+    tu2.qty = 6.0
+    handle_trade_update(client, tu2, sleep_fn=lambda s: None)
+    assert track_positions.get_track_qty("track_b", "SPY") == 0.0
 
 
 # --- handle_trade_update: routine-success Telegram notification (fix-up

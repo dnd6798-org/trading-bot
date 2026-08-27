@@ -62,6 +62,13 @@ ARCHITECTURE (locked, see CLAUDE.md "Current status"):
     positions stay protected independent of bot uptime/halt status
     (execution.py's module docstring, "Fail-safe behavior").
 
+POSITION-OWNERSHIP LEDGER (spec v55 §10.25, Milestone 2): handle_trade_
+update() also maintains src/track_positions.py's "track_b" ledger — set
+to the cumulative filled_qty on a Track B buy fill, decremented on a
+universe-symbol sell fill. This is the real-time half of a listener-
+plus-daily-fallback pair (execution.run_daily_execution_job()'s self-heal
+is the other half), mirroring the protect_unprotected_fills() pattern.
+
 WHAT THIS MODULE DOES NOT DO: submit entry orders, evaluate signals, or
 run any guardrail check — it is purely reactive to fills that already
 happened. It also persists nothing locally; every fact it needs (stop
@@ -133,6 +140,7 @@ from alpaca.trading.enums import OrderSide, TradeEvent
 from alpaca.trading.stream import TradingStream
 
 from . import telegram_bot
+from . import track_positions
 from .config import get_alpaca_config, get_listener_heartbeat_config
 from .execution import (
     TRACK_B_UNIVERSE,
@@ -221,6 +229,23 @@ def _side_value(side) -> str:
     return side.value if isinstance(side, OrderSide) else str(side)
 
 
+def _sell_increment(trade_update, order) -> float:
+    """
+    Size of THIS sell execution, for the ownership-ledger decrement (spec
+    v55 §10.25). Prefers trade_update.qty (the current execution's size,
+    per the installed alpaca-py TradeUpdate model — module docstring),
+    which is the correct per-event increment for a multi-fill exit;
+    falls back to order.filled_qty (cumulative) only when .qty is absent
+    (a test double, or an SDK edge case) — over-decrementing on a
+    redelivered/cumulative fallback is harmless because adjust_track_qty()
+    floors at 0 and the daily self-heal resets to Alpaca truth anyway.
+    """
+    q = getattr(trade_update, "qty", None)
+    if q is not None:
+        return float(q)
+    return float(order.filled_qty or 0)
+
+
 def _seconds_since(timestamp) -> float | None:
     """None-safe elapsed-time helper for the routine-success notification (FIX-UP, item 3) — returns None (not a
     fabricated 0.0 or an exception) when `timestamp` itself is None, e.g. a test double that didn't set one."""
@@ -288,7 +313,19 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
     side = _side_value(order.side)
 
     if side == OrderSide.SELL.value:
-        return {"action": "logged_exit", "symbol": order.symbol, "event": event}
+        # spec v55 §10.25: decrement the ownership ledger on a Track B
+        # exit. A sell can't be attributed to a track from the event
+        # alone (stop orders carry no client_order_id) — see track_
+        # positions.py's "SELL ATTRIBUTION LIMITATION". Today only Track B
+        # places sells, so a universe-symbol sell is Track B's stop
+        # firing; adjust_track_qty() floors at 0 and the daily self-heal
+        # corrects any drift.
+        ledger_qty = None
+        if order.symbol in universe:
+            increment = _sell_increment(trade_update, order)
+            if increment > 0:
+                ledger_qty = track_positions.adjust_track_qty("track_b", order.symbol, -increment)
+        return {"action": "logged_exit", "symbol": order.symbol, "event": event, "track_b_ledger_qty": ledger_qty}
 
     if order.symbol not in universe:
         return None
@@ -300,6 +337,15 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
     filled_qty = float(order.filled_qty or 0)
     if filled_qty <= 0:
         return None
+
+    # spec v55 §10.25: record Track B's ownership of this fill. filled_qty
+    # is the order's CUMULATIVE fill and Track B never pyramids (one
+    # position per symbol), so it IS the whole position — set (not adjust)
+    # to the cumulative value, which is idempotent across partial-fill
+    # events and redelivered events alike. Done independently of the stop-
+    # submission outcome below: the shares exist regardless of whether
+    # their protective stop landed.
+    track_positions.set_track_qty("track_b", order.symbol, filled_qty)
 
     stop_order, qty_submitted = submit_or_resize_stop_order_with_retry(
         trading_client, order.symbol, filled_qty, decoded["stop_price"], sleep_fn=sleep_fn,
@@ -319,6 +365,7 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
         "filled_qty": filled_qty,
         "stop_price": decoded["stop_price"],
         "qty_submitted": qty_submitted,
+        "track_b_ledger_qty": filled_qty,
     }
 
 

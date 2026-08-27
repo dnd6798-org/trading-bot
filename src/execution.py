@@ -344,6 +344,20 @@ account-level HALT guardrails (daily-loss/drawdown, which halt the whole
 bot and correctly still see full-account equity) are all untouched.
 Track C has no execution code yet — this milestone only makes Track B
 partition-aware so it is ready for it.
+
+=============================================================================
+POSITION-OWNERSHIP LEDGER (spec v55 §10.25, Milestone 2). Alpaca reports
+one combined position per symbol with no per-strategy attribution, and
+Track C's risk-off asset (AGG) overlaps a symbol Track B trades directly.
+src/track_positions.py tracks each track's own share count. This module's
+contribution: heal_track_b_ownership_ledger() sets the "track_b" ledger
+to Alpaca's actual per-symbol qty every run_daily_execution_job() call —
+the daily fallback for anything fill_listener.py's real-time per-fill
+updates missed (same listener-plus-daily-job pattern as protect_
+unprotected_fills()). The risk-reporting rebase in build_open_positions()
+(Milestone 2's other half — 70% sub-balance basis for risk_pct/
+notional_pct_of_equity, see that function's docstring) is unrelated to
+the ledger; both just landed in the same milestone.
 """
 import logging
 import re
@@ -368,6 +382,7 @@ from alpaca.trading.requests import (
 from . import capital_ledger
 from . import halt_state
 from . import telegram_bot
+from . import track_positions
 from .config import (
     TRACK_B_ALLOCATION_PCT,
     get_alpaca_config,
@@ -618,6 +633,40 @@ def build_open_positions(trading_client: TradingClient, universe=None) -> list[L
             notional_pct_of_equity=(float(p.market_value) / equity * 100) if equity else 0.0,
         ))
     return result
+
+
+def heal_track_b_ownership_ledger(trading_client: TradingClient, universe=None) -> dict:
+    """
+    Daily self-heal for src/track_positions.py's "track_b" ledger (spec
+    v55 §10.25, Milestone 2) — the fallback half of the same listener-
+    plus-daily-job pair protect_unprotected_fills() already uses for stop
+    protection. For every universe symbol, SET the track_b ledger entry to
+    Alpaca's actual combined position qty (0 if not held), correcting any
+    drift from WebSocket events fill_listener.py missed (listener
+    downtime, redelivery arithmetic, a crash mid-event).
+
+    Deliberately keyed off the raw get_all_positions() list, NOT
+    build_open_positions() — the ledger is about OWNERSHIP, not
+    protection, so a filled-but-not-yet-stopped position (which build_
+    open_positions() excludes) must still be counted here.
+
+    NOTE this does not, and cannot, correct a mis-attribution between
+    track_b and track_c for a shared symbol (AGG) — it only ever writes
+    the track_b side, to Alpaca's TOTAL for that symbol. Once Track C is
+    live (Milestone 3) this heal must subtract Track C's own known
+    holding first; today track_c is always empty so track_b == total is
+    correct. Returns the healed track_b sub-ledger for the run log.
+    """
+    if universe is None:
+        universe = TRACK_B_UNIVERSE
+    actual_by_symbol = {p.symbol: float(p.qty) for p in trading_client.get_all_positions()}
+    healed = {}
+    for symbol in universe:
+        qty = actual_by_symbol.get(symbol, 0.0)
+        track_positions.set_track_qty("track_b", symbol, qty)
+        if qty > track_positions.RECONCILE_EPSILON:
+            healed[symbol] = qty
+    return healed
 
 
 def get_today_entry_count(trading_client: TradingClient, universe=None, today=None) -> int:
@@ -1433,13 +1482,17 @@ def run_daily_execution_job(trading_client: TradingClient = None, universe=None,
     if universe is None:
         universe = TRACK_B_UNIVERSE
 
-    run_log = {"date": None, "protected": [], "ratcheted": [], "entries_submitted": [], "entries_skipped": [], "errors": [], "halted": False}
+    run_log = {"date": None, "protected": [], "ratcheted": [], "entries_submitted": [], "entries_skipped": [], "errors": [], "halted": False, "track_b_ledger": {}}
 
     try:
         symbol_data = fetch_track_b_symbol_data(universe)
         run_log["protected"] = protect_unprotected_fills(trading_client, universe, symbol_data, sleep_fn=sleep_fn)
         open_positions = build_open_positions(trading_client, universe)
         account_state = build_account_state(trading_client)
+        # spec v55 §10.25: self-heal the position-ownership ledger from
+        # Alpaca truth every run — the daily fallback for anything
+        # fill_listener.py's real-time updates missed.
+        run_log["track_b_ledger"] = heal_track_b_ownership_ledger(trading_client, universe)
     except Exception as exc:  # noqa: BLE001 — fail-safe boundary, must not crash the caller
         telegram_bot.send_message(
             f"execution.py: daily job data fetch failed ({exc}) — skipped for today. "

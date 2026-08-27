@@ -77,6 +77,18 @@ def captured_telegram_messages(monkeypatch):
     return sent
 
 
+@pytest.fixture(autouse=True)
+def isolated_track_positions_ledger(tmp_path, monkeypatch):
+    """
+    Every test gets its own throwaway track_positions_state.json — spec
+    v55 §10.25's ownership ledger, written by heal_track_b_ownership_
+    ledger() inside run_daily_execution_job(). Same isolation pattern as
+    test_risk_filter.py's isolated_halt_state.
+    """
+    from src import track_positions
+    monkeypatch.setattr(track_positions, "_STATE_PATH", str(tmp_path / "track_positions_state.json"))
+
+
 # --- fakes -------------------------------------------------------------
 
 class FakeOrder:
@@ -1090,6 +1102,75 @@ def test_build_open_positions_risk_pct_feeds_combined_open_risk_budget_on_the_sa
 
     rebased_risk_pct = 150.0 / 7_000.0 * 100  # ~2.142857%
     assert abs(remaining - (8.0 - rebased_risk_pct)) < 1e-9
+
+
+# --- heal_track_b_ownership_ledger (spec v55 §10.25) ----------------------
+
+def test_heal_track_b_ownership_ledger_sets_ledger_to_alpaca_truth():
+    from src import track_positions
+    client = FakeTradingClient()
+    client.positions = [
+        FakePosition(symbol="SPY", qty=10.0, avg_entry_price=450.0, market_value=4_600.0),
+        FakePosition(symbol="AGG", qty=3.5, avg_entry_price=100.0, market_value=350.0),
+        FakePosition(symbol="BTC/USD", qty=1.0, avg_entry_price=50_000.0, market_value=50_000.0),  # not Track B
+    ]
+
+    healed = execution.heal_track_b_ownership_ledger(client, universe=["SPY", "QQQ", "AGG"])
+
+    assert healed == {"SPY": 10.0, "AGG": 3.5}  # BTC/USD ignored (outside universe)
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
+    assert track_positions.get_track_qty("track_b", "AGG") == 3.5
+    assert track_positions.get_track_qty("track_b", "QQQ") == 0.0  # not held -> absent
+
+
+def test_heal_track_b_ownership_ledger_corrects_a_drifted_value_and_clears_a_stale_one():
+    from src import track_positions
+    track_positions.set_track_qty("track_b", "SPY", 7.0)   # drifted low (listener missed a top-up)
+    track_positions.set_track_qty("track_b", "QQQ", 5.0)   # stale — position since closed
+
+    client = FakeTradingClient()
+    client.positions = [FakePosition(symbol="SPY", qty=10.0, avg_entry_price=450.0, market_value=4_600.0)]
+
+    execution.heal_track_b_ownership_ledger(client, universe=["SPY", "QQQ"])
+
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
+    assert track_positions.get_track_qty("track_b", "QQQ") == 0.0
+
+
+def test_heal_counts_a_position_even_with_no_resting_stop_unlike_build_open_positions():
+    # build_open_positions() excludes a position with no resting stop; the
+    # OWNERSHIP ledger must still count it (the shares exist).
+    from src import track_positions
+    client = FakeTradingClient()
+    client.positions = [FakePosition(symbol="SPY", qty=10.0, avg_entry_price=450.0, market_value=4_600.0)]
+    client.orders_by_request = lambda filter: []  # no resting stop anywhere
+
+    assert build_open_positions(client, universe=["SPY"]) == []  # excluded from protection state
+    execution.heal_track_b_ownership_ledger(client, universe=["SPY"])
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0  # still owned
+
+
+def test_run_daily_execution_job_heals_the_ownership_ledger_and_records_it(monkeypatch):
+    from src import halt_state, track_positions
+
+    client = FakeTradingClient()
+    client.positions = [FakePosition(symbol="SPY", qty=10.0, avg_entry_price=450.0, market_value=4_600.0)]
+    client.orders_by_request = lambda filter: [
+        FakeOrder(symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, stop_price=435.0, id="stop-1")
+    ]
+    track_positions.set_track_qty("track_b", "SPY", 2.0)  # drifted
+
+    monkeypatch.setattr(execution, "fetch_track_b_symbol_data", lambda universe: {"SPY": {"date_index": {"2026-08-10": 0}}})
+    monkeypatch.setattr(execution, "protect_unprotected_fills", lambda *a, **k: [])
+    monkeypatch.setattr(execution, "_latest_shared_date", lambda sd: "2026-08-10")
+    monkeypatch.setattr(execution, "generate_daily_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(execution, "get_today_entry_count", lambda *a, **k: 0)
+    monkeypatch.setattr(halt_state, "load_halt_state", lambda: halt_state.HaltState(halted=False))
+
+    run_log = execution.run_daily_execution_job(trading_client=client, universe=["SPY"], sleep_fn=_no_sleep)
+
+    assert run_log["track_b_ledger"] == {"SPY": 10.0}
+    assert track_positions.get_track_qty("track_b", "SPY") == 10.0
 
 
 def test_build_open_positions_ignores_symbols_outside_track_b_universe():
