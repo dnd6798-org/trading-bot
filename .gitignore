@@ -15,6 +15,7 @@ venv/
 *.log
 data/
 logs/
+backtest_output/
 
 # OS
 .DS_Store
