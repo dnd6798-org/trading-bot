@@ -2616,6 +2616,32 @@ Milestone 2 (Track C's own live execution script, scheduling,
 monitoring) remains fully designed (spec v53 §10.23) but not yet briefed
 — a dedicated future session.
 
+**v55 (2026-08-27): Position-ownership gap discovered and fixed by
+design, before Track C execution code was written. Milestone 2 (renamed)
+briefed.**
+
+A critical gap was found while reviewing the Track C architecture before
+building it: Alpaca has no per-strategy position concept — it reports one
+combined position per symbol per account. Track C's risk-off asset is
+AGG, the same symbol Track B already trades directly, creating real
+overlap risk (both tracks could legitimately hold AGG at the same time
+with no way to know which shares are whose). Fix: a persisted
+position-ownership ledger (`track_positions_state.json`, same pattern as
+`halt_state.json`), tracking each track's own share count per symbol,
+updated by each track after its own fills, with mandatory reconciliation
+against Alpaca's actual combined position after every Track C rebalance —
+any mismatch triggers an URGENT Telegram alert and halts Track C's
+autonomous trading pending review.
+
+Milestone naming update: what was called "Milestone 2" in spec v53
+(Track C's own execution script) is renamed Milestone 3, since it now
+depends on this ledger existing first. This session's Milestone 2 = the
+position ledger + the previously-tracked `build_open_positions()`
+risk-reporting rebase from v54 (Track B's pre-existing-position
+risk/notional-pct reporting should also use the 70% sub-balance, not
+full equity, consistent with how new entries already do
+post-Milestone-1). Full detail in spec v55 §10.25.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
