@@ -2682,6 +2682,50 @@ risk-reporting rebase onto the 70% sub-balance), `75613d0` (Part A —
 `halt_state.py`, listener + daily-job self-heal, reconcile_symbol()
 built+tested-only), `<this CLAUDE.md update>`.
 
+**v57 (2026-08-27): Milestone 3 DESIGNED AND LOCKED (spec v57 §10.27) —
+position-ownership attribution fixes, the two hard preconditions from
+spec v56 §10.26.** Renumbering note: v56's "Milestone 3" (Track C's live
+execution script) is now Milestone 4 — don't confuse the two in any
+future reference.
+
+Design summary (full detail in the task brief that follows):
+- New constant + helper in `src/track_positions.py`:
+  `TRACK_C_CLIENT_ORDER_ID_PREFIX = "tc"`,
+  `is_track_c_client_order_id(client_order_id) -> bool`.
+- `src/fill_listener.py`'s `handle_trade_update()` SELL branch now routes
+  the ledger decrement to `"track_c"` if the sell order's
+  `client_order_id` matches the `tc-` prefix, else `"track_b"` (unchanged
+  default — Track B's stop orders carry no `client_order_id` today, so
+  this is a no-op for the current live system).
+- `src/fill_listener.py`'s BUY branch is restructured (not just
+  extended): the existing `tb-` decode path is tried first and is
+  byte-for-byte unchanged if it matches; only if it doesn't match do we
+  check for a `tc-` prefix, in which case we ONLY set the `track_c`
+  ledger entry (no stop order logic at all — Track C is
+  no-stop-by-design).
+- New function `src/track_positions.py`:
+  `heal_track_c_ownership_ledger(trading_client, universe) -> dict`.
+  Reconstructs Track C's true per-symbol holdings entirely from Track C's
+  OWN order history (orders whose `client_order_id` matches the `tc-`
+  prefix, queried via `QueryOrderStatus.ALL`), summing filled BUY qty
+  minus filled SELL qty per symbol. Independent of Alpaca's combined
+  position total — this is what avoids circular trust with Track B's heal
+  for the shared AGG symbol. Not wired into any live path yet (Track C
+  has no execution module or scheduled job — Milestone 4).
+- `src/execution.py`'s `heal_track_b_ownership_ledger()` now computes
+  `max(0, alpaca_total_qty(symbol) - track_positions.get_track_qty(
+  "track_c", symbol))` instead of the raw total. No-op for every symbol
+  Track C doesn't trade (`get_track_qty` returns 0.0 there).
+
+Context correction: Track C is the DMSR (dual-momentum sector rotation,
+12-month lookback) candidate adopted in spec v52 — monthly rebalance,
+no-stop-by-design, multi-leg, AGG as its risk-off asset. Not GEM in
+isolation, and not the original three-track-plan's rejected
+options-credit-spread "Track C" from the earliest strategy search (a
+different, superseded use of the same letter).
+
+Status: DESIGNED and BRIEFED, NOT YET BUILT. Awaiting implementation.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
