@@ -2593,6 +2593,29 @@ sub-balance of current account equity, not full account equity). No other
 Track B behavior changes. A separate message with the full Milestone 1
 brief follows.
 
+**v54 (2026-08-27): Milestone 1 validated and CLOSED.**
+
+Capital ledger + Track B position-sizing retrofit checked against every
+requirement in the brief and confirmed correct: single call-site change
+(equity → 70% sub-balance via
+`capital_ledger.get_available_capital`), `submit_entry_and_stop()`
+internals correctly left untouched, equity-field choice consistent with
+existing code, test discipline solid (322→333, 0 modified, 11 new with
+clear rationale for why none needed changing). Committed as `556d1a7` on
+`paper`.
+
+One new tracked item for Milestone 2 (not a blocker, not fixed now):
+`build_open_positions()`'s risk/notional-pct reporting for pre-existing
+positions still uses full account equity rather than the 70%
+sub-balance, while newly-sized entries correctly use it. This must be
+resolved as part of Milestone 2's design, before Track C is actually
+live and drawing on its own sub-balance — noted so it isn't forgotten.
+See spec v54 §10.24.
+
+Milestone 2 (Track C's own live execution script, scheduling,
+monitoring) remains fully designed (spec v53 §10.23) but not yet briefed
+— a dedicated future session.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
