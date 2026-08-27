@@ -2642,6 +2642,46 @@ risk/notional-pct reporting should also use the 70% sub-balance, not
 full equity, consistent with how new entries already do
 post-Milestone-1). Full detail in spec v55 §10.25.
 
+**v56 (2026-08-27): Milestone 2 CLOSED and validated. Two hard
+preconditions locked for Milestone 3.**
+
+Position-ownership ledger + risk-reporting rebase checked against every
+A1-A6 decision and Part B's pre-approved plan — all correct, including
+the one additional test modification you flagged (fill_listener
+sell-branch return-dict assertion), which is legitimate: a new dict key
+breaks exact-equality, the core "no order submitted on a sell" assertion
+is preserved, and a genuinely new, stronger assertion was added. Test
+suite 333->335->361 (28 new, 2 modified, both with explicit rationale),
+all green.
+
+Two things you self-identified during implementation are now locked as
+HARD, non-negotiable preconditions for Milestone 3 — not optional
+cleanup:
+1. Sell attribution: the listener currently decrements track_b's ledger
+   for ANY universe-symbol sell, correct only because Track C can't sell
+   anything yet. Milestone 3 must give Track C's own orders a
+   distinguishable identifier (e.g. a client_order_id prefix like Track
+   B's "tb-") so sells route to the correct track, BEFORE Track C places
+   its first live sell order.
+2. Self-heal AGG-sharing: heal_track_b_ownership_ledger() currently sets
+   Track B's ledger to Alpaca's ENTIRE position for a symbol, correct
+   only while Track C holds nothing. Milestone 3 must change this to
+   alpaca_total minus Track C's known holding, BEFORE Track C holds its
+   first live position in any symbol Track B also trades (concretely:
+   AGG).
+
+Both of these were reasoned through correctly as "safe today, dangerous
+once Track C exists" — exactly the standard this project holds. Full
+detail in spec v56 §10.26. Milestone 3 (Track C's actual execution
+script) remains unbriefed until both preconditions are designed as part
+of it.
+
+Commits (on `origin/paper`): `24747a5` (Part B — build_open_positions()
+risk-reporting rebase onto the 70% sub-balance), `75613d0` (Part A —
+`src/track_positions.py` ownership ledger, Track-C halt in
+`halt_state.py`, listener + daily-job self-heal, reconcile_symbol()
+built+tested-only), `<this CLAUDE.md update>`.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
