@@ -571,11 +571,27 @@ def build_open_positions(trading_client: TradingClient, universe=None) -> list[L
     resting stops independently for its own per-stop ratchet decisions
     rather than trusting this single id, so nothing downstream relies on
     it representing the WHOLE resting-stop state in the multi-stop case.
+
+    CAPITAL PARTITION (spec v55 §10.25, Milestone 2 — the risk-reporting
+    rebase tracked since v54): `risk_pct` and `notional_pct_of_equity`
+    below are measured against Track B's 70% sub-balance of current
+    account equity (capital_ledger.get_available_capital(trading_client,
+    TRACK_B_ALLOCATION_PCT)), NOT full account equity — matching how
+    submit_entry_and_stop() (via compute_realized_risk()) and
+    run_daily_execution_job()'s in-loop live_open_positions already size/
+    report newly-entered positions post-Milestone-1. Before this change,
+    pre-existing positions under-reported their risk (divided by full
+    equity instead of the 0.70x base), so risk_filter.check_combined_
+    open_risk_budget()'s 8% Track B budget (= 8 slots x 1%, itself on the
+    0.70x base) was effectively too loose whenever a position was already
+    open. build_account_state()'s equity is deliberately NOT rebased —
+    the account-level daily-loss/drawdown HALT checks still see
+    full-account equity, per the module docstring's "CAPITAL PARTITION"
+    section.
     """
     if universe is None:
         universe = TRACK_B_UNIVERSE
-    account = trading_client.get_account()
-    equity = float(account.equity)
+    equity = capital_ledger.get_available_capital(trading_client, TRACK_B_ALLOCATION_PCT)
     positions = trading_client.get_all_positions()
 
     result = []

@@ -1038,8 +1038,58 @@ def test_build_open_positions_derives_risk_from_the_real_resting_stop_order():
     assert pos.symbol == "SPY"
     assert pos.stop_price == 435.0
     assert abs(pos.risk_amount - 10.0 * (450.0 - 435.0)) < 1e-9
-    assert abs(pos.risk_pct - (150.0 / 10_000.0 * 100)) < 1e-9
-    assert abs(pos.notional_pct_of_equity - 46.0) < 1e-9
+    # spec v55 §10.25 (Milestone 2): risk_pct / notional_pct_of_equity are
+    # now measured against Track B's 70% sub-balance (0.70 * 10,000 =
+    # 7,000), NOT full account equity — risk_amount itself (qty * stop
+    # distance) is equity-independent and unchanged.
+    assert abs(pos.risk_pct - (150.0 / 7_000.0 * 100)) < 1e-9
+    assert abs(pos.notional_pct_of_equity - (4_600.0 / 7_000.0 * 100)) < 1e-9
+    # explicitly NOT the full-account-equity values (mirrors the negative
+    # assertion in test_run_daily_execution_job_sizes_new_entry_against_
+    # track_b_70pct_subbalance).
+    assert abs(pos.risk_pct - (150.0 / 10_000.0 * 100)) > 1e-6
+    assert abs(pos.notional_pct_of_equity - 46.0) > 1e-6
+
+
+def test_build_open_positions_rebases_reported_pct_when_account_equity_moves():
+    # The rebase reads equity via capital_ledger.get_available_capital()
+    # (a fresh get_account() * 0.70), so a different account equity must
+    # flow straight through the 0.70 factor.
+    client = FakeTradingClient()
+    client.account = FakeAccount(equity=20_000.0, last_equity=20_000.0)
+    client.positions = [FakePosition(symbol="SPY", qty=10.0, avg_entry_price=450.0, market_value=4_600.0)]
+    client.orders_by_request = lambda filter: [
+        FakeOrder(symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, stop_price=435.0, id="stop-1")
+    ]
+
+    pos = build_open_positions(client, universe=["SPY"])[0]
+
+    assert abs(pos.risk_pct - (150.0 / (0.70 * 20_000.0) * 100)) < 1e-9
+    assert abs(pos.notional_pct_of_equity - (4_600.0 / (0.70 * 20_000.0) * 100)) < 1e-9
+
+
+def test_build_open_positions_risk_pct_feeds_combined_open_risk_budget_on_the_same_70pct_base():
+    # The whole point of the rebase: a pre-existing position's risk_pct
+    # (from build_open_positions) and the Track B 8% open-risk budget (=
+    # 8 slots x 1%, itself on the 0.70x base) are finally measured against
+    # the same base, so check_combined_open_risk_budget()'s remaining
+    # figure is coherent.
+    from src.risk_filter import check_combined_open_risk_budget
+    from src.config import get_track_b_guardrail_config
+
+    client = FakeTradingClient()
+    client.account = FakeAccount(equity=10_000.0, last_equity=10_000.0)
+    client.positions = [FakePosition(symbol="SPY", qty=10.0, avg_entry_price=450.0, market_value=4_600.0)]
+    client.orders_by_request = lambda filter: [
+        FakeOrder(symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, stop_price=435.0, id="stop-1")
+    ]
+
+    positions = build_open_positions(client, universe=["SPY"])
+    guardrails = get_track_b_guardrail_config()  # max_combined_open_risk_pct = 8.0
+    remaining = check_combined_open_risk_budget(positions, new_signal=None, guardrails=guardrails)
+
+    rebased_risk_pct = 150.0 / 7_000.0 * 100  # ~2.142857%
+    assert abs(remaining - (8.0 - rebased_risk_pct)) < 1e-9
 
 
 def test_build_open_positions_ignores_symbols_outside_track_b_universe():
