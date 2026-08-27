@@ -2577,6 +2577,22 @@ monitoring integration all need to be locked before implementation is
 briefed). Track B is completely unaffected by anything in this milestone.
 See spec v52 §10.22 for full detail.
 
+**v53 (2026-08-27): Concurrent-execution architecture locked. Milestone 1
+(capital ledger + Track B retrofit) queued next.**
+
+Full architecture for running Track B and Track C concurrently in one
+Alpaca account is now locked (spec v53 §10.23): a shared capital ledger
+enforcing a 70%/30% Track B/Track C split entirely in application code
+(confirmed via research that Alpaca has no retail sub-account feature —
+the partition cannot be delegated to the broker). Track C's order
+mechanics, scheduling, and monitoring are also fully designed but NOT yet
+briefed — that's Milestone 2, deferred to a future session. This session
+only queues Milestone 1: the capital ledger module plus a required
+retrofit to Track B's existing position sizing (must size against its 70%
+sub-balance of current account equity, not full account equity). No other
+Track B behavior changes. A separate message with the full Milestone 1
+brief follows.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
