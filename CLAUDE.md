@@ -2328,6 +2328,170 @@ isolation in the fetch step; spec §3.2 journaling persistence; the
 DEBUG-level live check from item 1 above (droplet-side, not a Claude Code
 task).
 
+**UPDATE (spec v45, playbook v45, same day — claude.ai chat session,
+review + repo hygiene, no code changed this session):**
+
+1. **The duplicate-entry-protection milestone (`122d5ea`, `c387399`) is
+   now CONFIRMED VALIDATED, not just self-reported.** claude.ai pulled
+   the actual commit diff from GitHub directly and reviewed it
+   line-by-line (not just the milestone report above). Guard placement
+   (immediately after `client_order_id` is computed, before
+   `submit_entry_market_order()`), the 404-only exception-handling logic
+   (a non-404 re-raises, not silently resolved either way), the new
+   `"duplicate_client_order_id_skipped"` reason value, and all 4 new
+   tests all check out exactly as implemented and reported above. Full
+   suite reconfirmed at **300/300**.
+2. **A real discrepancy was caught and resolved this session: the
+   milestone report above cited `122d5ea`/`c387399` before they existed
+   on `origin/paper`.** Traced to 3 unpushed local commits sitting only
+   on the local `paper` branch (`bc18428`, `122d5ea`, `c387399`) —
+   `bc18428` predated this session (the spec v44 §10.13 design-lock,
+   docs-only, 296/296 unaffected — see its own commit message above) and
+   was independently confirmed legitimate before pushing, not assumed.
+   All 3 are now on `origin/paper`: `eaa870a..c387399`, fast-forward, no
+   conflicts. **General lesson for future sessions, restated here per
+   this file's own convention (same category as the earlier droplet-
+   deployed-state-vs-push-state gap, "Current status" v40 update
+   above): a milestone report's cited commit hashes are only meaningful
+   once `git status`/`git log origin/paper..HEAD` confirms they're
+   actually on the remote — a local, unpushed commit is not yet a fact
+   anyone else (including a droplet-side pull) can act on.**
+3. **The local `origin` remote URL (a minor, low-priority backlog item
+   flagged since v41 — GitHub's repo-move redirect) is FIXED**, now
+   `https://github.com/dnd6798-org/trading-bot.git` for both fetch and
+   push, confirmed via `git remote -v`. Closes that backlog item
+   permanently — no further redirect-dependent pushes.
+4. **IMPORTANT, restated per RULES.md §4's "pushed ≠ deployed" rule: this
+   guard is NOT yet deployed.** The droplet is still running `eaa870a`
+   (pre-guard code) — pushing to `origin/paper` does not by itself change
+   what's running on the droplet (same gap category as the daily-job
+   logging milestone's own droplet-deployment step, spec v43 §10.12,
+   above). Do not treat this guard as providing any live protection until
+   droplet deployment happens and is verified. **Queued for a future
+   session, walked live via claude.ai + the user directly (not a Claude
+   Code task — this Windows-local session has no droplet/SSH access, per
+   the standing asymmetric droplet-access model already established
+   across every prior droplet-adjacent milestone in this file).**
+
+**UPDATE (spec v46, playbook v46, RULES.md updated — droplet-side
+session, two milestones closed, no code changed this session):**
+
+1. **Daily-job per-symbol DEBUG logging (spec v43 §10.10) — the
+   DEBUG-level live check (the one item left open since that milestone's
+   record above) is now COMPLETE, closing it in full.** `LOG_LEVEL=DEBUG`
+   added to the droplet's `.env` (line 57, no pre-existing line —
+   confirmed against `config.py`'s `get_log_level()` and
+   `.env.example`'s line 97 before editing, not assumed). Live per-symbol
+   DEBUG output confirmed in `journalctl` at 2026-08-26 20:28:51 UTC for
+   all 8 Track B symbols (SPY, QQQ, IWM, EFA, AGG, GLD, DBC, VNQ) —
+   bar-fetch counts, Donchian upper/lower bands, and signal evaluation
+   all visible at DEBUG level, matching the implementation recorded in
+   "Current status" above. Reverted to `LOG_LEVEL=INFO`, confirmed
+   functionally clean (zero DEBUG lines) in the 2026-08-26 21:24:52 UTC
+   run, exit `status=0/SUCCESS`. **No remaining steps on this
+   milestone.**
+
+2. **Per-symbol duplicate-entry protection (spec v44 §10.13,
+   `122d5ea`/`c387399`) — droplet deployment is now COMPLETE, resolving
+   the "NOT yet deployed" gap flagged in item 4 immediately above.**
+   Droplet pulled `eaa870a..c387399` (fast-forward, 3 files changed, 296
+   insertions, no conflicts) as the `tradingbot` user, per RULES.md's
+   standing droplet-git-user rule. Confirmed via a clean, standalone
+   `git log -1 --oneline`: `c387399 (HEAD -> paper, origin/paper,
+   origin/HEAD)`. `trading-bot-daily.service` restarted; commit hash
+   re-checked as `c387399` after two subsequent restarts — no
+   regression. **The guard is now live in production.** Not yet exercised
+   under real conditions, flagged rather than assumed proven: both job
+   runs during this session's window returned `entries_submitted: []`
+   (no-signal day across all 8 symbols), so the guard's actual
+   duplicate-skip path (`get_order_by_client_id()` returning a non-404
+   hit) has not yet fired live — this remains true until a real
+   breakout produces an entry, followed by any same-day re-run.
+
+3. **RESOLVED (correction, same session).** The 2026-08-26 18:08:33 UTC
+   `trading-bot-daily.service` execution flagged above as unexplained is
+   now fully investigated and CLOSED — not left open. Root cause
+   confirmed via `journalctl`'s sudo command-audit trail: it was a
+   manual, correctly-sequenced deployment command (git log → fetch → log
+   `origin/paper` → pull → restart → status → log) run from the user's
+   own persistent root SSH session — not a bug, not unauthorized access,
+   not related to the timer or any cron misconfiguration (the timer/cron
+   checks recorded above were legitimate diagnostic steps, not
+   superseded, just no longer pointing at an unsolved mystery). This
+   manual pass and the session's own later deployment steps converged on
+   the same `c387399` target with no conflict. No further action needed.
+   Per RULES.md's new dated rule (item 5 below): this was investigated
+   to a confirmed root cause before being closed, not dismissed solely
+   because the outcome was benign — the rule's bar was met, not
+   bypassed.
+
+4. **New open item, minor/low-urgency:** the droplet's own git `origin`
+   remote still points at the pre-org-transfer
+   `https://github.com/dnd6798/trading-bot.git`, confirmed from this
+   session's pull output. The spec v45 fix (to
+   `https://github.com/dnd6798-org/trading-bot.git`) was applied only on
+   the local Windows machine (see the v45 update above) — GitHub's
+   redirect currently masks the droplet's stale URL, same "local fix
+   isn't a droplet fix" gap category already established elsewhere in
+   this file. Queued as a quick fix for a future droplet-side session.
+
+5. **RULES.md gained a new dated rule this session (2026-08-26): an
+   unscheduled/unexplained execution of an order-submitting service must
+   be logged and investigated, never dismissed solely because the
+   outcome was benign** — directly motivated by item 3 above, read
+   `RULES.md` for the exact wording rather than this paraphrase.
+
+6. **Droplet-verification confirmation, recorded by Claude Code itself
+   per RULES.md §4** ("a milestone with a droplet-verification component
+   is not closed, on either surface, until Claude Code has recorded that
+   confirmation itself") — items 1 and 2 above are this confirmation,
+   not a separate step. Both milestones are now FULLY CLOSED, including
+   their droplet-verification component:
+   - **Daily-job per-symbol DEBUG logging (`e842ce6`/`eaa870a`, spec v43
+     §10.10): CLOSED.** Live DEBUG output confirmed present at
+     `LOG_LEVEL=DEBUG` (2026-08-26 20:28:51 UTC) and confirmed absent
+     after revert to `LOG_LEVEL=INFO` (2026-08-26 21:24:52 UTC,
+     `status=0/SUCCESS`). No remaining steps.
+   - **Per-symbol duplicate-entry protection (`bc18428`/`122d5ea`/
+     `c387399`, spec v44 §10.13): CLOSED.** Droplet `HEAD`,
+     `origin/paper`, and `origin/HEAD` all confirmed at `c387399`,
+     checked twice (immediately post-pull and again after two subsequent
+     service restarts) — no drift, no regression. Guard is live in
+     production. **Standing caveat, not a gap in verification:** the
+     guard's duplicate-skip branch has not yet fired live (no entries
+     were submitted during this session's no-signal test runs) — its
+     behavior is confirmed by the 300/300 unit tests from spec v45 only,
+     not yet by a live duplicate event. This does not block closing the
+     milestone; it's tracked here so a future session doesn't mistake
+     "deployed and unit-tested" for "observed live."
+
+**UPDATE (spec v47/playbook v47, 2026-08-27 — documentation-only session,
+no code changed): the last open carryover item from v46 (item 4 above —
+the droplet's stale `origin` remote URL) is now CLOSED.**
+
+1. **Droplet `origin` remote URL fixed.** It still pointed at the
+   pre-org-transfer `https://github.com/dnd6798/trading-bot.git` (the
+   spec v45 fix to `dnd6798-org` had been applied only on the local
+   Windows machine — see the v45 update above; GitHub's redirect had been
+   masking the droplet's stale URL). Fixed directly on the droplet as the
+   `tradingbot` user, per RULES.md's standing droplet-git-user rule:
+   `sudo -u tradingbot git -C /opt/trading-bot remote set-url origin
+   https://github.com/dnd6798-org/trading-bot.git`. Verified via
+   `git remote -v` on 2026-08-27 — both fetch and push now read
+   `https://github.com/dnd6798-org/trading-bot.git`. No functional
+   change, no restart required, no commit-hash implications — droplet
+   `HEAD` remains at `c387399` as previously recorded. Remote-URL
+   correction only.
+
+2. **No open action items remain** outside the three previously-flagged,
+   formally-unscoped, lower-priority backlog items, none of which are
+   currently planned for work: spec §3.2 journaling persistence of
+   `run_daily_execution_job()`'s returned log dict; per-symbol fetch
+   error isolation in the daily job's fetch step; and the dead-code
+   crypto streaming loop in `data_ingestion.py`
+   (`fetch_historical_candles()` / `TRADING_PAIRS`, leftover from the
+   rejected crypto track, confirmed not on Track B's live path).
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
