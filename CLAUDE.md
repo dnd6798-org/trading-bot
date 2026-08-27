@@ -2550,6 +2550,41 @@ calculation before any adopt/abandon verdict. Backtest-only:
 fill_listener.py, risk_filter.py) was touched. Full suite 316/316
 passing (was 300; +16 new tests).
 
+**v52 (2026-08-27): Track C ADOPTED. Backtest milestone closed. Live
+implementation not yet started.**
+
+Correlation-to-Track-B was independently verified in claude.ai directly
+from the raw CSV data (not just trusted from the reported summary) —
+matched the reported Pearson r values exactly to 6 decimal places for all
+three lookbacks. Final verdict against the pre-committed v50 bars: 10m,
+11m, and 12m lookbacks all pass all three bars (Sharpe ≥0.5, max drawdown
+≤35%, correlation ≤0.65); 13m fails on drawdown alone. 3-of-4 robustness
+threshold met. VERDICT: ADOPT the 12-month DMSR variant as Track C.
+
+Initial capital allocation locked: 70% Track B / 30% Track C,
+hard-partitioned — this is a real requirement, not just a target. Track
+B's existing risk guardrails (`MAX_SINGLE_POSITION_NOTIONAL_PCT`, 8% risk
+budget) currently assume access to 100% of account equity; before any
+Track C live code is written, both tracks must be changed to size
+positions against their own allocated sub-balance only, or risk will be
+silently double-counted across the two strategies.
+
+No Track C live execution code exists yet — no signal generation, no
+rebalance scheduling, no order submission. This is intentionally deferred
+to a future dedicated design session in claude.ai (capital-partition
+mechanism, monthly rebalance scheduling, multi-leg order submission, and
+monitoring integration all need to be locked before implementation is
+briefed). Track B is completely unaffected by anything in this milestone.
+See spec v52 §10.22 for full detail.
+
+The Track C backtest artifacts (all backtest-only, no live path): the
+DMSR backtest `scripts/backtest_sector_rotation.py` +
+`tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
+`873ed3e`), and the one-off Track B monthly-return reconstruction
+`scripts/reconstruct_track_b_monthly_returns.py` +
+`tests/test_reconstruct_track_b_monthly_returns.py` (commit `9e7aa6e`,
+built for the correlation step). Full suite 322/322 passing.
+
 `src/config.py`, `src/halt_state.py`, `src/signal_generation.py` (EMA/ATR/
 volume + long-only crossover detection), `src/data_ingestion.py`'s
 historical fetch (`fetch_historical_candles`, via Alpaca crypto market
