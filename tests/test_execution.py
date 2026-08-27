@@ -911,6 +911,84 @@ def test_submit_entry_and_stop_reraises_a_non_404_error_from_the_duplicate_check
     assert client.submitted_orders == []
 
 
+# --- capital partition: Track B sizes against its 70% sub-balance ----------
+# (spec v53 §10.23, Milestone 1)
+
+def _fill_at_requested_qty_client():
+    """A FakeTradingClient whose entry order fills at exactly the qty
+    submitted, so a test can read the sized qty straight off the entry
+    MarketOrderRequest."""
+    client = FakeTradingClient()
+
+    def submit_order(req):
+        if isinstance(req, StopOrderRequest):
+            return FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+        assert isinstance(req, MarketOrderRequest)
+        return FakeOrder(id="entry-1", status=OrderStatus.FILLED, filled_qty=req.qty, filled_avg_price=450.0)
+
+    client.submit_order_fn = submit_order
+    client.get_order_by_id_fn = lambda oid: FakeOrder(id=oid, status=OrderStatus.FILLED, filled_qty=1.0, filled_avg_price=450.0)
+    return client
+
+
+def _entry_qty(client):
+    market_orders = [o for o in client.submitted_orders if isinstance(o, MarketOrderRequest)]
+    assert len(market_orders) == 1
+    return market_orders[0].qty
+
+
+def test_submit_entry_and_stop_qty_scales_linearly_with_the_equity_base_passed_in():
+    # The retrofit passes Track B's 70% sub-balance as `equity` at the
+    # call site (run_daily_execution_job), so a 7,000 base must produce
+    # exactly 0.70x the qty a 10,000 base would.
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+
+    full = _fill_at_requested_qty_client()
+    submit_entry_and_stop(full, candidate, _approved_decision(1.0), equity=10_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    sub = _fill_at_requested_qty_client()
+    submit_entry_and_stop(sub, candidate, _approved_decision(1.0), equity=7_000.0, guardrails=_guardrails(), sleep_fn=_no_sleep)
+
+    # stop_distance = ATR_MULTIPLIER(3.0) * 5.0 = 15; qty = (equity * 1%) / 15,
+    # rounded to 4 dp by submit_entry_and_stop().
+    assert _entry_qty(full) == round(100.0 / 15.0, 4)
+    assert _entry_qty(sub) == round(70.0 / 15.0, 4)
+    # ~0.70x, modulo the 4-dp rounding of each qty independently.
+    assert _entry_qty(sub) == pytest.approx(_entry_qty(full) * 0.70, abs=1e-4)
+
+
+def test_run_daily_execution_job_sizes_new_entry_against_track_b_70pct_subbalance(monkeypatch):
+    from src import halt_state
+    from src.config import TRACK_B_ALLOCATION_PCT
+
+    client = _fill_at_requested_qty_client()
+    client.account = FakeAccount(equity=10_000.0, last_equity=10_000.0)
+    client.portfolio_history_equity = [10_000.0]
+
+    candidate = {"symbol": "SPY", "close": 450.0, "atr": 5.0, "timestamp": "2026-08-10T00:00:00"}
+
+    monkeypatch.setattr(execution, "fetch_track_b_symbol_data", lambda universe: {"SPY": {"date_index": {"2026-08-10": 0}}})
+    monkeypatch.setattr(execution, "protect_unprotected_fills", lambda *a, **k: [])
+    monkeypatch.setattr(execution, "build_open_positions", lambda *a, **k: [])
+    monkeypatch.setattr(execution, "_latest_shared_date", lambda sd: "2026-08-10")
+    monkeypatch.setattr(execution, "generate_daily_candidates", lambda *a, **k: [candidate])
+    monkeypatch.setattr(execution, "get_today_entry_count", lambda *a, **k: 0)
+    monkeypatch.setattr(halt_state, "load_halt_state", lambda: halt_state.HaltState(halted=False))
+
+    run_log = execution.run_daily_execution_job(trading_client=client, sleep_fn=_no_sleep)
+
+    assert run_log["errors"] == []
+    assert len(run_log["entries_submitted"]) == 1
+
+    # stop_distance = ATR_MULTIPLIER(3.0) * 5.0 = 15.
+    # risk budget = 1% of the 70% sub-balance (0.70 * 10,000 = 7,000) = 70.
+    expected_qty = round(70.0 / 15.0, 4)
+    assert _entry_qty(client) == expected_qty
+    # and explicitly NOT the full-account-equity qty (1% of 10,000 = 100).
+    assert _entry_qty(client) != round(100.0 / 15.0, 4)
+    assert TRACK_B_ALLOCATION_PCT == 0.70  # the value this test's arithmetic assumes
+
+
 # --- generate_daily_candidates: universe-order tie-break, skip open symbols -
 
 def test_generate_daily_candidates_skips_symbols_already_open():

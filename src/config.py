@@ -83,6 +83,44 @@ IS_PAPER = TRADING_ENV.lower() == "paper"
 # threshold-sweep table.
 MAX_SINGLE_POSITION_NOTIONAL_PCT = 55.0
 
+# Capital partition between the concurrently-running strategy tracks
+# (spec v53 §10.23, Milestone 1). Alpaca has no sub-account feature for
+# individual retail accounts, so the 70/30 Track B / (future) Track C
+# split is enforced entirely in application code: each track sizes its
+# positions against (its allocation fraction * current total account
+# equity), never the full balance — see src/capital_ledger.py. THE
+# canonical definition of both numbers: nothing else reads
+# TRACK_B_ALLOCATION_PCT / TRACK_C_ALLOCATION_PCT from the environment
+# (same single-source-of-truth convention as
+# MAX_SINGLE_POSITION_NOTIONAL_PCT above). Stored as fractions in [0, 1]
+# (0.70, not 70) — the form capital_ledger.allocated_capital() expects.
+# _validate_allocations() is factored out so it can be unit-tested
+# directly with arbitrary values; it is also called once here so a bad
+# partition fails loudly on import (startup), not at first trade.
+
+
+def _validate_allocations(track_b_pct: float, track_c_pct: float) -> None:
+    """
+    Raises RuntimeError (same style as _get's missing-var error) if the
+    capital partition is invalid. Never silently clamps or ignores:
+      - each allocation must be in [0, 1]
+      - the two must sum to no more than 1.0 (small float tolerance)
+    """
+    for name, pct in (("TRACK_B_ALLOCATION_PCT", track_b_pct), ("TRACK_C_ALLOCATION_PCT", track_c_pct)):
+        if not (0.0 <= pct <= 1.0):
+            raise RuntimeError(f"{name} must be between 0 and 1 (inclusive); got {pct!r}")
+    total = track_b_pct + track_c_pct
+    if total > 1.0 + 1e-9:
+        raise RuntimeError(
+            "TRACK_B_ALLOCATION_PCT + TRACK_C_ALLOCATION_PCT must sum to no more than 1.0; "
+            f"got {track_b_pct!r} + {track_c_pct!r} = {total!r}"
+        )
+
+
+TRACK_B_ALLOCATION_PCT = float(_get("TRACK_B_ALLOCATION_PCT", required=False, default="0.70"))
+TRACK_C_ALLOCATION_PCT = float(_get("TRACK_C_ALLOCATION_PCT", required=False, default="0.30"))
+_validate_allocations(TRACK_B_ALLOCATION_PCT, TRACK_C_ALLOCATION_PCT)
+
 
 def get_alpaca_config() -> AlpacaConfig:
     prefix = "ALPACA_PAPER" if IS_PAPER else "ALPACA_LIVE"

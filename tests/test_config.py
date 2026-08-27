@@ -6,6 +6,7 @@ This is the one piece of this scaffold that's actually meant to run today,
 not a stub for a future session.
 """
 import pytest
+from src import config
 from src.config import (
     get_alpaca_config,
     get_telegram_config,
@@ -13,6 +14,7 @@ from src.config import (
     get_heartbeat_config,
     get_listener_heartbeat_config,
     get_log_level,
+    _validate_allocations,
 )
 
 
@@ -68,3 +70,33 @@ def test_log_level_defaults_to_info_when_unset(monkeypatch):
 def test_log_level_reads_value_when_set(monkeypatch):
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     assert get_log_level() == "DEBUG"
+
+
+# --- capital partition (spec v53 §10.23, Milestone 1) ----------------------
+
+def test_allocation_pcts_default_to_the_locked_70_30_split():
+    """Guards against a typo drifting the locked partition. .env / .env.example
+    both ship 0.70 / 0.30; config.py also defaults to those if the vars are
+    absent, so this holds either way."""
+    assert config.TRACK_B_ALLOCATION_PCT == 0.70
+    assert config.TRACK_C_ALLOCATION_PCT == 0.30
+    # stored as fractions in [0, 1], NOT percentages out of 100
+    assert 0.0 <= config.TRACK_B_ALLOCATION_PCT <= 1.0
+
+
+def test_validate_allocations_accepts_a_valid_split():
+    _validate_allocations(0.70, 0.30)   # sums to exactly 1.0
+    _validate_allocations(0.60, 0.30)   # sums to < 1.0 — leaving a cash buffer is allowed
+    _validate_allocations(0.0, 1.0)     # boundary values allowed
+
+
+def test_validate_allocations_rejects_a_fraction_outside_0_to_1():
+    with pytest.raises(RuntimeError, match="TRACK_B_ALLOCATION_PCT must be between 0 and 1"):
+        _validate_allocations(-0.1, 0.3)
+    with pytest.raises(RuntimeError, match="TRACK_C_ALLOCATION_PCT must be between 0 and 1"):
+        _validate_allocations(0.5, 1.5)
+
+
+def test_validate_allocations_rejects_a_partition_that_sums_over_one():
+    with pytest.raises(RuntimeError, match="must sum to no more than 1.0"):
+        _validate_allocations(0.80, 0.30)

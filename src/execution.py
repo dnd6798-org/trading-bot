@@ -329,6 +329,21 @@ retries automatically) — instead ratchet_position_stop() sends its own
 non-urgent Telegram summary directly (_send_ratchet_failure_summary()),
 naming which order(s) ratcheted and which remain at their old price with
 the error hit, so the failure stays visible without paging a human.
+
+=============================================================================
+CAPITAL PARTITION (spec v53 §10.23, Milestone 1). Track B will eventually
+share one Alpaca account with Track C, and Alpaca has no sub-account
+feature for individual retail accounts — so the 70/30 split is enforced
+in application code. run_daily_execution_job() now sizes every new entry
+against Track B's 70% sub-balance of current account equity
+(capital_ledger.get_available_capital(trading_client,
+config.TRACK_B_ALLOCATION_PCT), fetched fresh each run) instead of full
+account equity. This is the ONLY behavioral change from that milestone:
+signal generation, entry logic, stop-loss/ratchet logic, and the
+account-level HALT guardrails (daily-loss/drawdown, which halt the whole
+bot and correctly still see full-account equity) are all untouched.
+Track C has no execution code yet — this milestone only makes Track B
+partition-aware so it is ready for it.
 """
 import logging
 import re
@@ -350,9 +365,16 @@ from alpaca.trading.requests import (
     StopOrderRequest,
 )
 
+from . import capital_ledger
 from . import halt_state
 from . import telegram_bot
-from .config import get_alpaca_config, get_heartbeat_config, get_log_level, get_track_b_guardrail_config
+from .config import (
+    TRACK_B_ALLOCATION_PCT,
+    get_alpaca_config,
+    get_heartbeat_config,
+    get_log_level,
+    get_track_b_guardrail_config,
+)
 from .risk_filter import RiskDecision, evaluate
 from .signal_generation import SignalDirection, TradeSignal
 
@@ -1253,6 +1275,16 @@ def submit_entry_and_stop(trading_client, candidate, decision, equity, guardrail
     retry+alert. See module docstring's flagged design-gap section for
     why the entry qty is a pre-fill PROXY, not the true post-fill
     risk-pinned size.
+
+    `equity` (spec v53 §10.23, Milestone 1): the caller passes Track B's
+    ALLOCATED sub-balance here (capital_ledger.get_available_capital(
+    trading_client, config.TRACK_B_ALLOCATION_PCT) — 70% of current
+    account equity), NOT the full account equity. Every equity-derived
+    number computed below — the risk budget (`equity * position_size`),
+    the notional cap (`cap_qty_to_notional`), and the realized-risk
+    reporting (`compute_realized_risk`) — is therefore scaled to Track
+    B's capital partition. The function itself is agnostic to what
+    `equity` means; the partition is applied entirely at the call site.
     """
     symbol = candidate["symbol"]
     stop_price = compute_signal_day_stop_price(candidate["close"], candidate["atr"])
@@ -1425,6 +1457,16 @@ def run_daily_execution_job(trading_client: TradingClient = None, universe=None,
         return run_log
 
     guardrails = get_track_b_guardrail_config()
+    # Capital partition (spec v53 §10.23, Milestone 1): Track B sizes
+    # every new position against its 70% sub-balance of current account
+    # equity, not the full account — so it never double-counts capital
+    # reserved for the future Track C. Pulled fresh here (its own GET
+    # /v2/account) at the moment of sizing, per capital_ledger's
+    # no-stale-value contract. Account-level HALT guardrails
+    # (daily-loss / drawdown in evaluate() below) deliberately still see
+    # full-account equity via `account_state` — those halt the whole bot
+    # and are not a per-track sizing concern.
+    track_b_sizing_equity = capital_ledger.get_available_capital(trading_client, TRACK_B_ALLOCATION_PCT)
     open_symbols = {p.symbol for p in open_positions}
     candidates = generate_daily_candidates(symbol_data, universe, open_symbols, today)
     today_entry_count = get_today_entry_count(trading_client, universe, today=datetime.fromisoformat(today).date())
@@ -1441,7 +1483,7 @@ def run_daily_execution_job(trading_client: TradingClient = None, universe=None,
             continue
 
         try:
-            result = submit_entry_and_stop(trading_client, candidate, decision, account_state.equity, guardrails, sleep_fn=sleep_fn)
+            result = submit_entry_and_stop(trading_client, candidate, decision, track_b_sizing_equity, guardrails, sleep_fn=sleep_fn)
         except Exception as exc:  # noqa: BLE001 — one symbol's entry failure must not sink the run or other candidates
             telegram_bot.send_message(f"execution.py: entry flow raised for {candidate['symbol']} ({exc})")
             run_log["errors"].append({"symbol": candidate["symbol"], "step": "entry", "error": str(exc)})
