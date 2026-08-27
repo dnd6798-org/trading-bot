@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from alpaca.trading.enums import OrderSide
+
 from src import halt_state, telegram_bot, track_positions
 
 
@@ -35,12 +37,24 @@ def captured_telegram(monkeypatch):
 
 
 class _FakeTradingClient:
-    def __init__(self, positions):
+    def __init__(self, positions, orders=None):
         # positions: dict {symbol: qty}
         self._positions = [SimpleNamespace(symbol=s, qty=str(q)) for s, q in positions.items()]
+        # orders: flat list of SimpleNamespace(symbol=, side=, filled_qty=, client_order_id=)
+        self._orders = list(orders or [])
 
     def get_all_positions(self):
         return list(self._positions)
+
+    def get_orders(self, filter=None):
+        wanted = set(getattr(filter, "symbols", None) or [])
+        return [o for o in self._orders if not wanted or o.symbol in wanted]
+
+
+def _tc_order(symbol, side, filled_qty, client_order_id):
+    return SimpleNamespace(
+        symbol=symbol, side=side, filled_qty=str(filled_qty), client_order_id=client_order_id,
+    )
 
 
 # --- ledger primitives ----------------------------------------------------
@@ -184,3 +198,74 @@ def test_reconcile_symbol_halted_track_c_flag_false_when_already_halted(captured
     assert result.matched is False
     assert result.halted_track_c is False  # was already halted, this call didn't newly halt it
     assert halt_state.load_track_c_halt().halted is True
+
+
+# --- is_track_c_client_order_id (spec v57 §10.27) ---------------------------
+
+def test_is_track_c_client_order_id_matches_only_the_tc_prefix():
+    assert track_positions.is_track_c_client_order_id("tc-AGG-20260827-0") is True
+    assert track_positions.is_track_c_client_order_id("tc-anything") is True
+
+
+def test_is_track_c_client_order_id_rejects_non_matching_none_and_empty():
+    assert track_positions.is_track_c_client_order_id("tb-SPY-20260827-43512") is False
+    assert track_positions.is_track_c_client_order_id("tcfoo") is False  # no hyphen after prefix
+    assert track_positions.is_track_c_client_order_id("some-manual-order") is False
+    assert track_positions.is_track_c_client_order_id("") is False
+    assert track_positions.is_track_c_client_order_id(None) is False
+
+
+# --- heal_track_c_ownership_ledger (spec v57 §10.27) -----------------------
+
+def test_heal_track_c_reconstructs_holdings_from_tc_order_history_only():
+    orders = [
+        _tc_order("AGG", OrderSide.BUY, 4.0, "tc-AGG-20260801-0"),      # counted
+        _tc_order("AGG", OrderSide.SELL, 1.0, "tc-AGG-20260815-0"),     # counted (net 3.0)
+        _tc_order("AGG", OrderSide.BUY, 10.0, "tb-AGG-20260801-9900"),  # Track B — ignored
+        _tc_order("AGG", OrderSide.BUY, 7.0, None),                     # no client_order_id — ignored
+        _tc_order("XLK", OrderSide.BUY, 5.0, "tc-XLK-20260801-0"),      # counted
+    ]
+    client = _FakeTradingClient({"AGG": 99.0}, orders=orders)  # position total is irrelevant here
+
+    healed = track_positions.heal_track_c_ownership_ledger(client, universe=["AGG", "XLK", "IWM"])
+
+    assert healed == {"AGG": 3.0, "XLK": 5.0}  # IWM: no tc- orders -> absent
+    assert track_positions.get_track_qty("track_c", "AGG") == 3.0
+    assert track_positions.get_track_qty("track_c", "XLK") == 5.0
+    assert track_positions.get_track_qty("track_c", "IWM") == 0.0
+
+
+def test_heal_track_c_floors_at_zero_when_sells_exceed_buys():
+    orders = [
+        _tc_order("AGG", OrderSide.BUY, 4.0, "tc-AGG-1"),
+        _tc_order("AGG", OrderSide.SELL, 6.0, "tc-AGG-2"),  # net -2.0 -> floored to 0
+    ]
+    client = _FakeTradingClient({}, orders=orders)
+
+    healed = track_positions.heal_track_c_ownership_ledger(client, universe=["AGG"])
+
+    assert healed == {}
+    assert track_positions.get_track_qty("track_c", "AGG") == 0.0
+
+
+def test_heal_track_c_is_idempotent_across_two_calls_with_unchanged_history():
+    orders = [_tc_order("AGG", OrderSide.BUY, 4.0, "tc-AGG-1")]
+    client = _FakeTradingClient({}, orders=orders)
+
+    first = track_positions.heal_track_c_ownership_ledger(client, universe=["AGG"])
+    second = track_positions.heal_track_c_ownership_ledger(client, universe=["AGG"])
+
+    assert first == second == {"AGG": 4.0}
+    assert track_positions.get_track_qty("track_c", "AGG") == 4.0
+
+
+def test_heal_track_c_ignores_unfilled_tc_orders():
+    orders = [
+        _tc_order("AGG", OrderSide.BUY, 0.0, "tc-AGG-pending"),  # submitted, not filled
+        _tc_order("AGG", OrderSide.BUY, 2.0, "tc-AGG-filled"),
+    ]
+    client = _FakeTradingClient({}, orders=orders)
+
+    healed = track_positions.heal_track_c_ownership_ledger(client, universe=["AGG"])
+
+    assert healed == {"AGG": 2.0}

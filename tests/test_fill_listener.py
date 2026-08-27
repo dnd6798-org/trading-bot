@@ -190,9 +190,12 @@ def test_handle_trade_update_accepts_a_raw_string_event_value_not_just_the_enum(
 
 
 def test_handle_trade_update_sell_fill_submits_no_order_but_decrements_the_ownership_ledger():
-    # spec v55 §10.25: a sell fill still triggers NO order action (no new
-    # stop is ever submitted for an exit) — but it now decrements
-    # track_b's ownership ledger for the symbol.
+    # spec v55 §10.25 / v57 §10.27: a sell fill still triggers NO order
+    # action (no new stop is ever submitted for an exit) — but it now
+    # decrements the ownership ledger for the symbol. Return-dict shape
+    # changed in v57: "track_b_ledger_qty" -> "track" + "track_ledger_qty"
+    # (the decrement is now track-routed). A "tb-"-encoded (i.e. non-"tc-")
+    # client_order_id routes to "track_b", the unchanged default.
     from src import track_positions
     track_positions.set_track_qty("track_b", "SPY", 10.0)
 
@@ -203,9 +206,30 @@ def test_handle_trade_update_sell_fill_submits_no_order_but_decrements_the_owner
 
     result = handle_trade_update(client, trade_update, sleep_fn=lambda s: None)
 
-    assert result == {"action": "logged_exit", "symbol": "SPY", "event": "fill", "track_b_ledger_qty": 0.0}
+    assert result == {"action": "logged_exit", "symbol": "SPY", "event": "fill", "track": "track_b", "track_ledger_qty": 0.0}
     assert client.submitted_orders == []
     assert track_positions.get_track_qty("track_b", "SPY") == 0.0
+
+
+def test_handle_trade_update_sell_fill_with_tc_client_order_id_decrements_track_c_not_track_b():
+    # spec v57 §10.27: a sell whose client_order_id carries the "tc-"
+    # prefix is Track C's own exit — the decrement must route to track_c
+    # and leave track_b untouched.
+    from src import track_positions
+    track_positions.set_track_qty("track_b", "AGG", 6.0)
+    track_positions.set_track_qty("track_c", "AGG", 4.0)
+
+    order = _order(symbol="AGG", side=OrderSide.SELL, filled_qty=4.0, client_order_id="tc-AGG-20260827-0")
+    trade_update = _trade_update(order=order)
+    trade_update.qty = 4.0
+    client = FakeTradingClient()
+
+    result = handle_trade_update(client, trade_update, universe=["SPY", "AGG"], sleep_fn=lambda s: None)
+
+    assert result == {"action": "logged_exit", "symbol": "AGG", "event": "fill", "track": "track_c", "track_ledger_qty": 0.0}
+    assert client.submitted_orders == []
+    assert track_positions.get_track_qty("track_c", "AGG") == 0.0
+    assert track_positions.get_track_qty("track_b", "AGG") == 6.0  # untouched
 
 
 def test_handle_trade_update_ignores_symbols_outside_the_universe():
@@ -364,6 +388,45 @@ def test_buy_fill_updates_ledger_even_when_stop_submission_fails():
     assert track_positions.get_track_qty("track_b", "SPY") == 10.0  # shares exist regardless
 
 
+def test_tc_prefixed_buy_fill_sets_track_c_ledger_only_and_never_submits_a_stop(monkeypatch):
+    # spec v57 §10.27: a BUY whose client_order_id has the "tc-" prefix is
+    # a Track C entry — set the track_c ledger, return action
+    # "ledger_only", and (Track C is no-stop-by-design) NEVER reach the
+    # stop-submission path. The monkeypatched _boom is the assertion that
+    # no-stop-by-design is actually respected.
+    from src import fill_listener, track_positions
+
+    def _boom(*a, **k):
+        raise AssertionError("submit_or_resize_stop_order_with_retry must NOT be called for a Track C fill")
+    monkeypatch.setattr(fill_listener, "submit_or_resize_stop_order_with_retry", _boom)
+
+    order = _order(symbol="AGG", filled_qty=4.0, client_order_id="tc-AGG-20260827-0")
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order)
+    client = FakeTradingClient()
+
+    result = handle_trade_update(client, trade_update, universe=["SPY", "AGG"], sleep_fn=lambda s: None)
+
+    assert result == {
+        "action": "ledger_only", "symbol": "AGG", "event": "fill",
+        "track": "track_c", "filled_qty": 4.0, "track_c_ledger_qty": 4.0,
+    }
+    assert client.submitted_orders == []
+    assert track_positions.get_track_qty("track_c", "AGG") == 4.0
+    assert track_positions.get_track_qty("track_b", "AGG") == 0.0
+
+
+def test_tc_prefixed_buy_fill_with_zero_filled_qty_is_ignored():
+    from src import track_positions
+
+    order = _order(symbol="AGG", filled_qty=0.0, client_order_id="tc-AGG-20260827-0")
+    trade_update = _trade_update(event=TradeEvent.FILL, order=order)
+
+    result = handle_trade_update(FakeTradingClient(), trade_update, universe=["SPY", "AGG"], sleep_fn=lambda s: None)
+
+    assert result is None
+    assert track_positions.get_track_qty("track_c", "AGG") == 0.0
+
+
 def test_sell_fill_for_a_non_universe_symbol_does_not_touch_the_ledger():
     from src import track_positions
     track_positions.set_track_qty("track_b", "SPY", 10.0)
@@ -373,7 +436,10 @@ def test_sell_fill_for_a_non_universe_symbol_does_not_touch_the_ledger():
 
     result = handle_trade_update(FakeTradingClient(), trade_update, universe=["SPY", "QQQ"], sleep_fn=lambda s: None)
 
-    assert result["track_b_ledger_qty"] is None
+    # v57: key renamed track_b_ledger_qty -> track_ledger_qty; still None
+    # (symbol outside universe -> no decrement), and still routed track_b.
+    assert result["track"] == "track_b"
+    assert result["track_ledger_qty"] is None
     assert track_positions.get_track_qty("track_b", "SPY") == 10.0
 
 

@@ -1150,6 +1150,38 @@ def test_heal_counts_a_position_even_with_no_resting_stop_unlike_build_open_posi
     assert track_positions.get_track_qty("track_b", "SPY") == 10.0  # still owned
 
 
+def test_heal_track_b_subtracts_track_c_known_holding_for_a_shared_symbol():
+    # spec v57 §10.27: AGG is shared. Alpaca reports the combined 10.0;
+    # Track C's own ledger already claims 4.0 of it -> Track B must get
+    # 10.0 - 4.0 = 6.0, not the whole 10.0 (the pre-v57 bug).
+    from src import track_positions
+    track_positions.set_track_qty("track_c", "AGG", 4.0)
+
+    client = FakeTradingClient()
+    client.positions = [
+        FakePosition(symbol="AGG", qty=10.0, avg_entry_price=100.0, market_value=1_000.0),
+        FakePosition(symbol="SPY", qty=8.0, avg_entry_price=450.0, market_value=3_600.0),
+    ]
+
+    healed = execution.heal_track_b_ownership_ledger(client, universe=["SPY", "AGG"])
+
+    assert healed == {"SPY": 8.0, "AGG": 6.0}
+    assert track_positions.get_track_qty("track_b", "AGG") == 6.0
+    assert track_positions.get_track_qty("track_c", "AGG") == 4.0  # untouched by track_b's heal
+
+
+def test_heal_track_b_floors_at_zero_if_track_c_claims_more_than_alpaca_reports():
+    from src import track_positions
+    track_positions.set_track_qty("track_c", "AGG", 12.0)
+
+    client = FakeTradingClient()
+    client.positions = [FakePosition(symbol="AGG", qty=10.0, avg_entry_price=100.0, market_value=1_000.0)]
+
+    execution.heal_track_b_ownership_ledger(client, universe=["AGG"])
+
+    assert track_positions.get_track_qty("track_b", "AGG") == 0.0
+
+
 def test_run_daily_execution_job_heals_the_ownership_ledger_and_records_it(monkeypatch):
     from src import halt_state, track_positions
 

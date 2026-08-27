@@ -37,20 +37,33 @@ independent by design). This milestone only BUILDS and TESTS
 reconcile_symbol(); it is not wired into any live path (Track C has no
 rebalance loop yet — that's Milestone 3).
 
-SELL ATTRIBUTION LIMITATION, flagged (not silently assumed away): Track
-B's resting stop orders carry no client_order_id, so a SELL fill cannot
-be attributed to Track B vs. Track C from the event alone. The listener
-decrements "track_b" on any universe-symbol sell, floored at 0. Today
-this is correct — only Track B places sells. Once Track C is live
-(Milestone 3), a Track C AGG sell would be mis-attributed to track_b
-until the next daily self-heal corrects it, and reconcile_symbol() would
-catch a genuine drift in the meantime (fail-safe: it halts Track C).
-Milestone 3 must give Track C's own sells a track_c-side decrement and
-revisit this heuristic.
+SELL ATTRIBUTION (spec v57 §10.27, Milestone 3): Track B's resting stop
+orders carry no client_order_id, so a SELL fill cannot be attributed from
+that. Track C's (future) execution module stamps every order with a "tc-"
+client_order_id (TRACK_C_CLIENT_ORDER_ID_PREFIX / is_track_c_client_order_
+id()). The listener's SELL branch now routes the decrement to "track_c"
+when the sell order's client_order_id matches that prefix, else "track_b"
+(the unchanged default — Track B's stops have no client_order_id, so this
+is a no-op for the current live system). The BUY branch recognises both
+"tb-" (execution.py's decode_client_order_id(), full protection path) and
+"tc-" (ledger-only, no stop — Track C is no-stop-by-design).
+
+SELF-HEAL: heal_track_c_ownership_ledger() (below) reconstructs Track C's
+holdings from Track C's OWN "tc-" order history alone, never from Alpaca's
+combined position total — so execution.heal_track_b_ownership_ledger() can
+safely subtract it (max(0, alpaca_total - track_c_known)) for a shared
+symbol without circular trust.
+
+RECONCILE / heal_track_c_ownership_ledger() are BUILT AND TESTED ONLY this
+milestone; neither is wired into a live path yet (Track C has no rebalance
+loop — that's Milestone 4).
 """
 import json
 import os
 from dataclasses import dataclass
+
+from alpaca.trading.enums import OrderSide, QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
 
 from . import halt_state
 from . import telegram_bot
@@ -58,6 +71,15 @@ from . import telegram_bot
 _STATE_PATH = os.environ.get("TRACK_POSITIONS_STATE_PATH", "track_positions_state.json")
 
 VALID_TRACKS = ("track_b", "track_c")
+
+# Track C's (not-yet-built) execution module will stamp every order it
+# submits — entries AND exits alike, since Track C is no-stop-by-design
+# and so nothing prevents a client_order_id on any of its orders — with a
+# client_order_id starting "tc-", mirroring execution.py's "tb-"
+# convention for Track B (spec v57 §10.27). This is the ONLY signal the
+# shared fill listener / self-heal has to attribute a fill to Track C vs.
+# Track B.
+TRACK_C_CLIENT_ORDER_ID_PREFIX = "tc"
 
 # Mismatch tolerance for reconcile_symbol() (spec v55 §10.25, confirmed in
 # the Milestone 2 brief). Track B position sizing produces fractional
@@ -75,6 +97,13 @@ class ReconcileResult:
     actual: float            # Alpaca's actual combined position qty
     matched: bool            # abs(expected - actual) <= RECONCILE_EPSILON
     halted_track_c: bool     # True iff this call just halted Track C
+
+
+def is_track_c_client_order_id(client_order_id: str | None) -> bool:
+    """True iff client_order_id starts with 'tc-' (Track C's future
+    execution module's convention, mirroring execution.py's 'tb-'
+    convention for Track B). Never raises on None/empty."""
+    return bool(client_order_id) and client_order_id.startswith(f"{TRACK_C_CLIENT_ORDER_ID_PREFIX}-")
 
 
 def _empty_ledger() -> dict:
@@ -189,3 +218,57 @@ def reconcile_symbol(trading_client, symbol: str, epsilon: float = RECONCILE_EPS
         symbol=symbol, expected=expected, actual=actual, matched=False,
         halted_track_c=not already_halted,
     )
+
+
+def heal_track_c_ownership_ledger(trading_client, universe) -> dict:
+    """
+    Daily/per-run self-heal for the 'track_c' ledger (spec v57 §10.27) —
+    INDEPENDENT of Alpaca's combined per-symbol position total (unlike
+    Track B's heal in execution.heal_track_b_ownership_ledger(), which
+    reads the total directly). Track C's true holding in each universe
+    symbol is reconstructed entirely from Track C's OWN order history,
+    identified by the 'tc-' client_order_id prefix
+    (is_track_c_client_order_id()) — never from the shared position total
+    — so there is no circular trust when execution.heal_track_b_ownership_
+    ledger() subsequently treats this function's output as its trusted
+    subtrahend for a shared symbol (AGG).
+
+    For each symbol in `universe`: queries ALL orders for that symbol
+    (QueryOrderStatus.ALL, covering full order history), keeps only those
+    whose client_order_id matches is_track_c_client_order_id(), and sums
+    filled_qty for BUY sides minus filled_qty for SELL sides. Floors the
+    result at 0 (same convention as adjust_track_qty()). Sets (absolute,
+    idempotent) the 'track_c' ledger entry via set_track_qty().
+
+    `universe` is a REQUIRED, caller-supplied parameter (no default) —
+    Track C's exact universe list is not locked in this milestone; this
+    function only builds the mechanism.
+
+    Returns the healed track_c sub-ledger (symbol -> qty, only entries
+    above RECONCILE_EPSILON) for the run log, same shape as
+    execution.heal_track_b_ownership_ledger()'s return value.
+
+    Not wired into any live/scheduled path yet (Track C has no execution
+    module or scheduled job — that's Milestone 4).
+    """
+    healed = {}
+    for symbol in universe:
+        orders = trading_client.get_orders(
+            GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol])
+        )
+        net_qty = 0.0
+        for o in orders:
+            if not is_track_c_client_order_id(getattr(o, "client_order_id", None)):
+                continue
+            filled = float(o.filled_qty or 0)
+            if filled <= 0:
+                continue
+            if o.side == OrderSide.BUY:
+                net_qty += filled
+            elif o.side == OrderSide.SELL:
+                net_qty -= filled
+        qty = max(net_qty, 0.0)
+        set_track_qty("track_c", symbol, qty)
+        if qty > RECONCILE_EPSILON:
+            healed[symbol] = qty
+    return healed

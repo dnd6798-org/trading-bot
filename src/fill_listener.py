@@ -62,12 +62,18 @@ ARCHITECTURE (locked, see CLAUDE.md "Current status"):
     positions stay protected independent of bot uptime/halt status
     (execution.py's module docstring, "Fail-safe behavior").
 
-POSITION-OWNERSHIP LEDGER (spec v55 §10.25, Milestone 2): handle_trade_
-update() also maintains src/track_positions.py's "track_b" ledger — set
-to the cumulative filled_qty on a Track B buy fill, decremented on a
-universe-symbol sell fill. This is the real-time half of a listener-
-plus-daily-fallback pair (execution.run_daily_execution_job()'s self-heal
-is the other half), mirroring the protect_unprotected_fills() pattern.
+POSITION-OWNERSHIP LEDGER (spec v55 §10.25 / v57 §10.27): handle_trade_
+update() also maintains src/track_positions.py's per-track ledger — the
+real-time half of a listener-plus-daily-fallback pair (execution.run_
+daily_execution_job()'s self-heal is the other half), mirroring the
+protect_unprotected_fills() pattern. spec v57 §10.27 made it track-aware:
+a BUY with a "tb-" client_order_id is a Track B entry (set track_b ledger
++ full protection path); a BUY with a "tc-" client_order_id is a Track C
+entry (set track_c ledger only, NO stop — Track C is no-stop-by-design);
+a SELL routes its decrement to track_c if its client_order_id has the
+"tc-" prefix, else track_b (unchanged default — Track B stops carry no
+client_order_id). This milestone does NOT build Track C's execution
+module — the "tc-" handling is exercised only by synthetic test fixtures.
 
 WHAT THIS MODULE DOES NOT DO: submit entry orders, evaluate signals, or
 run any guardrail check — it is purely reactive to fills that already
@@ -313,60 +319,71 @@ def handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=ti
     side = _side_value(order.side)
 
     if side == OrderSide.SELL.value:
-        # spec v55 §10.25: decrement the ownership ledger on a Track B
-        # exit. A sell can't be attributed to a track from the event
-        # alone (stop orders carry no client_order_id) — see track_
-        # positions.py's "SELL ATTRIBUTION LIMITATION". Today only Track B
-        # places sells, so a universe-symbol sell is Track B's stop
-        # firing; adjust_track_qty() floors at 0 and the daily self-heal
-        # corrects any drift.
+        # spec v57 §10.27: decrement the ownership ledger on an exit,
+        # routed to the correct track. A "tc-" client_order_id => Track C's
+        # own sell; anything else (including Track B's stop orders, which
+        # carry no client_order_id) => "track_b", the unchanged default.
+        # adjust_track_qty() floors at 0 and the daily self-heal corrects
+        # any drift.
         ledger_qty = None
+        track = "track_c" if track_positions.is_track_c_client_order_id(order.client_order_id) else "track_b"
         if order.symbol in universe:
             increment = _sell_increment(trade_update, order)
             if increment > 0:
-                ledger_qty = track_positions.adjust_track_qty("track_b", order.symbol, -increment)
-        return {"action": "logged_exit", "symbol": order.symbol, "event": event, "track_b_ledger_qty": ledger_qty}
+                ledger_qty = track_positions.adjust_track_qty(track, order.symbol, -increment)
+        return {"action": "logged_exit", "symbol": order.symbol, "event": event, "track": track, "track_ledger_qty": ledger_qty}
 
     if order.symbol not in universe:
         return None
 
+    # spec v57 §10.27: BUY branch restructured. The "tb-" path
+    # (decode_client_order_id) is tried first and is byte-for-byte the
+    # pre-v57 behavior when it matches — full protection path. Only if it
+    # does NOT match do we check for Track C's "tc-" prefix, in which case
+    # we set the track_c ledger and nothing else (Track C is
+    # no-stop-by-design — no stop order logic at all).
     decoded = decode_client_order_id(order.client_order_id)
-    if decoded is None:
-        return None
-
-    filled_qty = float(order.filled_qty or 0)
-    if filled_qty <= 0:
-        return None
-
-    # spec v55 §10.25: record Track B's ownership of this fill. filled_qty
-    # is the order's CUMULATIVE fill and Track B never pyramids (one
-    # position per symbol), so it IS the whole position — set (not adjust)
-    # to the cumulative value, which is idempotent across partial-fill
-    # events and redelivered events alike. Done independently of the stop-
-    # submission outcome below: the shares exist regardless of whether
-    # their protective stop landed.
-    track_positions.set_track_qty("track_b", order.symbol, filled_qty)
-
-    stop_order, qty_submitted = submit_or_resize_stop_order_with_retry(
-        trading_client, order.symbol, filled_qty, decoded["stop_price"], sleep_fn=sleep_fn,
-    )
-
-    if stop_order is not None and qty_submitted > 0:
-        elapsed = _seconds_since(getattr(trade_update, "timestamp", None))
-        elapsed_str = f"{elapsed:.1f}s after fill event" if elapsed is not None else "elapsed time unknown (no event timestamp)"
-        telegram_bot.send_message(
-            f"fill_listener: protected {order.symbol} — qty {qty_submitted} @ stop {decoded['stop_price']}, {elapsed_str}."
+    if decoded is not None:
+        filled_qty = float(order.filled_qty or 0)
+        if filled_qty <= 0:
+            return None
+        # spec v55 §10.25: record Track B's ownership of this fill.
+        # filled_qty is the order's CUMULATIVE fill and Track B never
+        # pyramids (one position per symbol), so it IS the whole position
+        # — set (not adjust) to the cumulative value, idempotent across
+        # partial-fill and redelivered events alike. Done independently of
+        # the stop-submission outcome: the shares exist regardless.
+        track_positions.set_track_qty("track_b", order.symbol, filled_qty)
+        stop_order, qty_submitted = submit_or_resize_stop_order_with_retry(
+            trading_client, order.symbol, filled_qty, decoded["stop_price"], sleep_fn=sleep_fn,
         )
+        if stop_order is not None and qty_submitted > 0:
+            elapsed = _seconds_since(getattr(trade_update, "timestamp", None))
+            elapsed_str = f"{elapsed:.1f}s after fill event" if elapsed is not None else "elapsed time unknown (no event timestamp)"
+            telegram_bot.send_message(
+                f"fill_listener: protected {order.symbol} — qty {qty_submitted} @ stop {decoded['stop_price']}, {elapsed_str}."
+            )
+        return {
+            "action": "protected" if stop_order is not None else "protection_failed",
+            "symbol": order.symbol,
+            "event": event,
+            "filled_qty": filled_qty,
+            "stop_price": decoded["stop_price"],
+            "qty_submitted": qty_submitted,
+            "track_b_ledger_qty": filled_qty,
+        }
 
-    return {
-        "action": "protected" if stop_order is not None else "protection_failed",
-        "symbol": order.symbol,
-        "event": event,
-        "filled_qty": filled_qty,
-        "stop_price": decoded["stop_price"],
-        "qty_submitted": qty_submitted,
-        "track_b_ledger_qty": filled_qty,
-    }
+    if track_positions.is_track_c_client_order_id(order.client_order_id):
+        filled_qty = float(order.filled_qty or 0)
+        if filled_qty <= 0:
+            return None
+        track_positions.set_track_qty("track_c", order.symbol, filled_qty)
+        return {
+            "action": "ledger_only", "symbol": order.symbol, "event": event,
+            "track": "track_c", "filled_qty": filled_qty, "track_c_ledger_qty": filled_qty,
+        }
+
+    return None
 
 
 def send_listener_heartbeat(heartbeat_url: str = None, requests_module=requests) -> bool:

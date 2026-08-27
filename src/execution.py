@@ -650,19 +650,28 @@ def heal_track_b_ownership_ledger(trading_client: TradingClient, universe=None) 
     protection, so a filled-but-not-yet-stopped position (which build_
     open_positions() excludes) must still be counted here.
 
-    NOTE this does not, and cannot, correct a mis-attribution between
-    track_b and track_c for a shared symbol (AGG) — it only ever writes
-    the track_b side, to Alpaca's TOTAL for that symbol. Once Track C is
-    live (Milestone 3) this heal must subtract Track C's own known
-    holding first; today track_c is always empty so track_b == total is
-    correct. Returns the healed track_b sub-ledger for the run log.
+    spec v57 §10.27: for a symbol Track C also trades (AGG), this heal now
+    subtracts track_c's CURRENT ledger entry before assigning the
+    remainder to track_b — max(0, alpaca_total - track_c_known) — closing
+    the AGG-sharing gap from spec v56 §10.26 (previously it set track_b to
+    Alpaca's whole total, which silently erased Track C's rightful share
+    once Track C held any). For every symbol Track C doesn't trade,
+    track_positions.get_track_qty("track_c", symbol) returns 0.0, so this
+    is a no-op versus the pre-v57 formula. track_c's own ledger is healed
+    independently from Track C's "tc-" order history alone
+    (track_positions.heal_track_c_ownership_ledger()), never from the
+    combined total — so there is no circular trust here.
+
+    Returns the healed track_b sub-ledger for the run log.
     """
     if universe is None:
         universe = TRACK_B_UNIVERSE
     actual_by_symbol = {p.symbol: float(p.qty) for p in trading_client.get_all_positions()}
     healed = {}
     for symbol in universe:
-        qty = actual_by_symbol.get(symbol, 0.0)
+        total = actual_by_symbol.get(symbol, 0.0)
+        track_c_known = track_positions.get_track_qty("track_c", symbol)
+        qty = max(total - track_c_known, 0.0)
         track_positions.set_track_qty("track_b", symbol, qty)
         if qty > track_positions.RECONCILE_EPSILON:
             healed[symbol] = qty
