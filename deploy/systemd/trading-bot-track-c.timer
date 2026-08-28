@@ -1,0 +1,29 @@
+# spec v59 §10.29 — daily weekday trigger for trading-bot-track-c.service.
+#
+# Same schedule as trading-bot-daily.timer (Mon..Fri 17:00 America/New_York,
+# post-close). trading-bot-track-c.service self-gates via
+# dmsr_signal.is_rebalance_day() — it is a no-op on every weekday except
+# the first trading day after a month-end — so a plain daily weekday
+# trigger is correct; the timer does not need to know the calendar.
+#
+# FLAGGED (not resolved here): this fires at the SAME 17:00 as
+# trading-bot-daily.timer. Track B's daily job heals the track_b ledger
+# (computing AGG as `alpaca_total - track_c_known`) while this job may be
+# mid-rebalance changing the track_c AGG position and ledger — a
+# transient race on the shared AGG bookkeeping that self-corrects on the
+# next run of each, but is avoidable. Consider offsetting this timer by a
+# few minutes (e.g. 17:05) or adding an ordering dependency once a
+# droplet-side decision is made.
+#
+# Requires systemd >= 239 for the per-line OnCalendar= timezone suffix —
+# see trading-bot-daily.timer's header for the older-systemd fallback.
+[Unit]
+Description=Run trading-bot-track-c.service every weekday post-close (self-gates to monthly rebalance)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:00:00 America/New_York
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

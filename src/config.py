@@ -280,6 +280,31 @@ def get_listener_heartbeat_config() -> HeartbeatConfig:
     )
 
 
+def get_track_c_heartbeat_config() -> HeartbeatConfig:
+    """
+    Track C (DMSR) rebalance-job heartbeat (spec v59 §10.29, Milestone
+    4) — a THIRD Healthchecks.io monitor, alongside the daily job's and
+    the fill listener's. Pinged once at the end of every
+    src/track_c_execution.py run that completes with no per-step errors
+    (its main() -> send_track_c_heartbeat()). The trading-bot-track-c
+    timer fires every weekday but the job self-gates to a monthly
+    rebalance, so a healthy day is usually a no-op — the ping still
+    fires (liveness is independent of trading activity), so configure
+    this monitor's schedule the same way as the daily job's (weekday
+    cron, generous grace), NOT as a once-a-month check.
+
+    Same required=False / fail-toward-warning convention as
+    get_heartbeat_config() / get_listener_heartbeat_config(), for the
+    same reason: a missing/blank URL must never crash the rebalance job
+    (which must still be free to submit/attribute real orders regardless
+    of whether monitoring is configured). A missing URL is logged and
+    the ping skipped — see track_c_execution.send_track_c_heartbeat().
+    """
+    return HeartbeatConfig(
+        daily_job_url=_get("HEALTHCHECKS_TRACK_C_HEARTBEAT_URL", required=False, default=None)
+    )
+
+
 def get_log_level() -> str:
     """
     Process log level (spec v42 §10.11, daily-job per-symbol DEBUG-logging

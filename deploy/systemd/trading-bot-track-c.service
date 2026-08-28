@@ -1,0 +1,27 @@
+# spec v59 §10.29 — Track C (DMSR) monthly-rebalance job (oneshot).
+#
+# PATH ASSUMPTION, NOT A VERIFIED FACT: WorkingDirectory/ExecStart/
+# EnvironmentFile below assume the repo is deployed to /opt/trading-bot
+# with its venv at /opt/trading-bot/venv, the same chosen convention as
+# trading-bot-daily.service (no droplet access from the Windows-local
+# Claude Code session that authored this; see CLAUDE.md "Current
+# status"). The three absolute paths here MUST match
+# trading-bot-daily.service / trading-bot-listener.service exactly —
+# WorkingDirectory= in particular, since halt_state.py (and
+# track_positions.py) resolve their JSON state files relative to CWD, and
+# Track B's daily job and this job share those files.
+[Unit]
+Description=Trading bot - Track C DMSR rebalance job (one-shot, self-gates to monthly)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/trading-bot
+EnvironmentFile=/opt/trading-bot/.env
+ExecStart=/opt/trading-bot/venv/bin/python -m src.track_c_execution
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

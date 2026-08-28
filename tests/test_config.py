@@ -13,6 +13,7 @@ from src.config import (
     get_guardrail_config,
     get_heartbeat_config,
     get_listener_heartbeat_config,
+    get_track_c_heartbeat_config,
     get_log_level,
     _validate_allocations,
 )
@@ -60,6 +61,16 @@ def test_listener_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
 def test_listener_heartbeat_config_reads_url_when_set(monkeypatch):
     monkeypatch.setenv("HEALTHCHECKS_LISTENER_HEARTBEAT_URL", "https://uptimerobot.example/heartbeat/listener-xyz")
     assert get_listener_heartbeat_config().listener_url == "https://uptimerobot.example/heartbeat/listener-xyz"
+
+
+def test_track_c_heartbeat_config_defaults_to_none_when_unset(monkeypatch):
+    monkeypatch.delenv("HEALTHCHECKS_TRACK_C_HEARTBEAT_URL", raising=False)
+    assert get_track_c_heartbeat_config().daily_job_url is None
+
+
+def test_track_c_heartbeat_config_reads_url_when_set(monkeypatch):
+    monkeypatch.setenv("HEALTHCHECKS_TRACK_C_HEARTBEAT_URL", "https://healthchecks.example/track-c-xyz")
+    assert get_track_c_heartbeat_config().daily_job_url == "https://healthchecks.example/track-c-xyz"
 
 
 def test_log_level_defaults_to_info_when_unset(monkeypatch):
