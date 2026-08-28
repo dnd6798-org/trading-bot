@@ -3076,6 +3076,54 @@ new `src/` modules and the two new systemd units, which must be
 Per RULES.md §4, that droplet deploy is NOT closed on either surface
 until Claude Code has recorded the droplet-side confirmation itself.
 
+**CRITICAL FINDING (2026-08-28): a real end-to-end validation test
+against the live paper account — a manual SPY buy with a genuine `tb-`
+`client_order_id`, processed by the actual running
+`trading-bot-listener.service` — surfaced two previously-undetected
+PRODUCTION bugs. Both fixes are design-locked (spec — task brief follows
+this update) and are the next implementation task.**
+
+1. **Alpaca rejects fractional-quantity GTC stop orders outright**
+   (`APIError 42210000`: "stop/stop_limit fractional GTC orders are not
+   enabled"). This is a structural Alpaca platform limitation —
+   fractional stops are supported for `DAY` time-in-force only, not
+   `GTC` — NOT a config/account toggle. Every real Track B entry
+   produces a fractional qty (`submit_entry_and_stop()` rounds to 4dp),
+   and the resting protective stop is submitted `TIF=GTC`
+   (`submit_stop_order()`, `execution.py`), so **every real Track B
+   entry would hit this exact rejection** and leave the position
+   unprotected. The paper soak has seen zero trades so far — that, and
+   nothing else, is why this has not already happened live.
+
+2. **`telegram_bot.py`'s `send_message()` is still an unimplemented stub**
+   (`raise NotImplementedError("Build session — python-telegram-bot,
+   sendMessage")`). When bug 1's stop-retry exhaustion tried to fire the
+   `URGENT — UNPROTECTED POSITION` alert (`submit_stop_order_with_
+   retry()`), the alert call itself crashed on the stub. That exception
+   then propagated into `fill_listener.py`'s own top-level handler in
+   `run_listener()`'s `_handler` — which ALSO calls `send_message()` to
+   report the error — crashing a SECOND time, surfacing in the
+   listener's logs as the opaque "error during websocket communication".
+   Every "URGENT" / alerting path in this repo
+   (`submit_stop_order_with_retry`, `_send_ratchet_failure_summary`,
+   `reconcile_symbol`, the `track_c_execution` URGENT alerts, etc.) has
+   the same unfired dependency.
+
+**STANDING ASSUMPTION RETRACTED:** "zero trades + zero Telegram alerts
+during soak = healthy" is NO LONGER valid evidence. The alerting path
+itself had never successfully fired in production, so silence proved
+nothing. Every prior soak-health statement in this file that leaned on
+"no alerts received" (e.g. the v40 zero-trades investigation, the v46
+guard-not-yet-exercised note) should be read with this caveat — those
+findings are not overturned, but "no alert" was never the positive
+confirmation it was treated as.
+
+**Test cleanup / state:** the SPY test position (0.01 qty) was fully
+flattened via a direct market sell and confirmed flat. A second planned
+test leg — QQQ, exercising Track C's `tc-` ledger-only path in
+`fill_listener.handle_trade_update()` — was intentionally NOT run,
+paused pending these two fixes.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
