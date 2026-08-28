@@ -2819,7 +2819,111 @@ own `is_rebalance_day()` self-gate makes a daily trigger correct). New
 `src/config.py` accessor `get_track_c_heartbeat_config()` for a third
 Healthchecks.io monitor.
 
-Status: DESIGNED and BRIEFED, NOT YET BUILT. Awaiting implementation.
+**UPDATE: Milestone 4 was EXECUTED — committed as `f5295fd` on `paper`
+(local; not yet pushed at time of writing). Full suite 372 -> 394 (22
+new tests: 11 `tests/test_dmsr_signal.py`, 9
+`tests/test_track_c_execution.py`, 2 `tests/test_config.py`); 0 existing
+tests modified; no Track B code (`execution.py`, `fill_listener.py`,
+`risk_filter.py`, `backtest_etf_donchian.py`, `track_positions.py`)
+touched.**
+
+What landed, per Changes A-D of the brief:
+- **`src/dmsr_signal.py`** (new, pure, no I/O): `SECTOR_UNIVERSE` (11
+  SPDR sectors), `DEFENSIVE_ASSET` / `MARKET_FILTER_SYMBOL` /
+  `TOP_N_HOLD` (3) / `HYSTERESIS_RANK` (5) / `LOOKBACK_MONTHS` (12),
+  plus `compute_month_end_dates()`, `is_rebalance_day()`,
+  `trailing_return()`, `rank_sectors()`, `select_target_holdings()` —
+  the last three ported verbatim from
+  `scripts/backtest_sector_rotation.py` (which earned the ADOPT verdict,
+  spec v52), `compute_month_end_dates()` a verbatim copy of
+  `scripts/backtest_gem.py`'s (a regression test pins the equality). No
+  stop-loss anywhere — the monthly SPY absolute-momentum filter is Track
+  C's entire risk control, by design.
+- **`src/track_c_execution.py`** (new): `run_track_c_execution_job(
+  trading_client=None, sleep_fn=time.sleep) -> dict`, structurally
+  mirroring `execution.py`. Per invocation: (1) halt check
+  (`halt_state.load_track_c_halt()` — returns immediately, no orders, no
+  heal); (2) start-of-run `track_positions.heal_track_c_ownership_
+  ledger()`; (3) fetch ~400 trailing days of `Adjustment.SPLIT` daily
+  bars for 11 sectors + AGG + SPY, derive the calendar from SPY's bar
+  timestamps, self-gate on `is_rebalance_day()`; (4) decide —
+  trailing-12m SPY return, sector ranks, `current_holdings` from the
+  FRESHLY-HEALED track_c ledger; (5) execute sell-then-buy sequentially,
+  `tc-{symbol}-{YYYYMMDD}` client_order_ids, sells QTY-based from the
+  ledger, buys NOTIONAL (100% of `capital_ledger.get_available_capital(
+  ..., TRACK_C_ALLOCATION_PCT)` if risk-off, else that / 3); (6) soft
+  reconcile (positions vs. target, non-halting Telegram note); (7)
+  end-of-run heal (in a `finally`), then `main()` pings the heartbeat.
+  `send_track_c_heartbeat()` mirrors `send_daily_heartbeat()` exactly.
+- **`deploy/systemd/trading-bot-track-c.service` + `.timer`** (new;
+  `deploy/systemd/README.md` updated): mirror
+  `trading-bot-daily.service` / `.timer`'s format and Mon-Fri 17:00
+  `America/New_York` schedule. NOT enabled/started anywhere —
+  deployment is a later step, per the brief.
+- **`src/config.py` `get_track_c_heartbeat_config()`** + new
+  `HEALTHCHECKS_TRACK_C_HEARTBEAT_URL` in `.env.example` — same
+  `required=False` / fail-toward-warning pattern as the other two
+  heartbeat configs.
+
+**The SAFETY-CRITICAL requirement is implemented and has a dedicated
+passing test** (`test_sell_quantity_comes_from_the_ledger_never_from_
+alpacas_combined_position`): with the track_c ledger at 5 AGG shares and
+Alpaca reporting a combined AGG position of 25 (20 being Track B's), a
+risk-on rebalance's AGG sell is submitted for exactly 5 shares — the
+ledger figure — not 25. `_submit_sell()` never calls any Alpaca position
+endpoint.
+
+**Flagged, NOT resolved this milestone (see `track_c_execution.py`
+module docstring GAP A-D — recommend a chat-interface design call before
+live capital):**
+1. **GAP A/B — post-close fill timing.** "Confirm each fill before
+   moving to the next" and "fetch allocated_capital AFTER the sells
+   settle" cannot be literally satisfied in one ~17:00 ET invocation:
+   market orders fill at the *next* session's open. Mirrors
+   `execution.py`'s short 60s poll; a still-open zero-fill order is an
+   expected "pending" outcome (recorded, surfaced by step 6, not retried
+   on the following non-rebalance day). On a risk-off transition the AGG
+   buy for the full 30% sleeve can be rejected for insufficient buying
+   power until the sells fill. Same root cause `execution.py` flags for
+   Track B.
+2. **GAP C — hard vs. soft reconciliation.** CLAUDE.md v55/v56
+   (§10.25/§10.26) describe a MANDATORY `track_positions.reconcile_
+   symbol()` reconcile-and-HALT "after every Track C rebalance". The
+   brief's step 6 specifies a SOFT, alert-only positions-vs-target check
+   that does not halt. **The brief's step 6 is what was implemented.**
+   Whether the hard halt should also run here — and how to sequence it
+   around the two ledger heals to avoid a false halt on the shared AGG
+   boundary (Track C's job does not heal the track_b ledger) — needs a
+   decision.
+3. **GAP D — 400-day fetch window is marginal** (~12-13 month-ends; a
+   12-month trailing return needs 13). The DECIDE step raises + alerts +
+   submits no orders if it is ever too short. Recommend widening
+   `SIGNAL_LOOKBACK_DAYS` to ~450.
+4. **Brief helper-code contradiction (resolved to stated intent, not
+   silently).** The brief's pasted `compute_month_end_dates()` (adds an
+   unconditional `append(calendar[-1])`, unlike `backtest_gem.py`) and
+   `is_rebalance_day()` (calls it on `calendar[:-1]`) are
+   self-contradictory: taken literally `is_rebalance_day()` returns True
+   on every call (defeating the self-gate); with a truly-verbatim gem
+   port + the `[:-1]` slice it returns False on every call. The intent
+   is stated three concordant ways (the docstring, the required test,
+   step 4's "index of the most recent month-end"). Implemented to that
+   intent: verbatim gem `compute_month_end_dates()` (no append) +
+   `is_rebalance_day()` calling it on the FULL `calendar`.
+5. **Heartbeat on a halted run.** Pinged from `main()` after the job
+   returns (mirroring `execution.py`), so it fires on a healthy no-op or
+   halted run and is suppressed only when `run_log["errors"]` is
+   non-empty. Configure the Healthchecks.io monitor as a weekday check,
+   not a monthly one.
+6. **Same-17:00 timer race** with `trading-bot-daily.timer` over the
+   shared AGG ledger — transient, self-correcting, avoidable by
+   offsetting the Track C timer a few minutes. Flagged in the `.timer`
+   header; not changed (brief said mirror the daily timer exactly).
+
+Status: IMPLEMENTED and committed (`f5295fd`, `paper`, local — push
+pending). Awaiting claude.ai validation of the report and a design call
+on gaps A-D. The two hard preconditions from spec v56 §10.26 remain
+closed.
 
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
