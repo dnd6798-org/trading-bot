@@ -32,6 +32,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(track_positions, "_STATE_PATH", str(tmp_path / "track_positions_state.json"))
     monkeypatch.setattr(halt_state, "_TRACK_C_STATE_PATH", str(tmp_path / "track_c_halt_state.json"))
     monkeypatch.setattr(halt_state, "_STATE_PATH", str(tmp_path / "halt_state.json"))
+    monkeypatch.setattr(track_c_execution, "_PENDING_STATE_PATH", str(tmp_path / "track_c_pending_state.json"))
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +77,7 @@ class FakeTradingClient:
         self.submitted = []
         self.poll_status = OrderStatus.FILLED
         self.get_order_by_client_id_fn = None
+        self.fail_submit_for = set()  # {(symbol, OrderSide)} -> submit_order raises
 
     def get_account(self):
         return self.account
@@ -94,6 +96,8 @@ class FakeTradingClient:
 
     def submit_order(self, request):
         self.submitted.append(request)
+        if (request.symbol, request.side) in self.fail_submit_for:
+            raise RuntimeError(f"insufficient buying power for {request.symbol}")
         n = len(self.submitted)
         qty = float(getattr(request, "qty", None) or 0.0)
         return FakeOrder(id=f"ord-{n}", status=self.poll_status, filled_qty=qty)
@@ -113,25 +117,30 @@ REBALANCE_TAIL = ("2026-02-02",)      # calendar[-2] = 2026-01-30 (a month-end) 
 NOOP_TAIL = ("2026-02-02", "2026-02-03")  # calendar[-2] = 2026-02-02 -> not a month-end
 
 
-def _one_series(symbol, last_close, tail_dates):
-    dated = [(d, 100.0) for d in MONTH_ENDS[:-1]] + [(MONTH_ENDS[-1], last_close)]
+def _one_series(symbol, last_close, tail_dates, month_ends):
+    dated = [(d, 100.0) for d in month_ends[:-1]] + [(month_ends[-1], last_close)]
     dated += [(d, last_close) for d in tail_dates]
     candles = [Candle(symbol, f"{d}T00:00:00+00:00", open=c, high=c, low=c, close=c, volume=1000) for d, c in dated]
     return {"symbol": symbol, "candles": candles, "date_index": {c.timestamp[:10]: i for i, c in enumerate(candles)}}
 
 
-def _symbol_data(spy_12m_return=0.10, sector_12m_returns=None, tail_dates=REBALANCE_TAIL):
+def _symbol_data(spy_12m_return=0.10, sector_12m_returns=None, tail_dates=REBALANCE_TAIL, month_ends=None):
+    mes = month_ends or MONTH_ENDS
     sr = sector_12m_returns or {}
-    data = {"SPY": _one_series("SPY", 100.0 * (1 + spy_12m_return), tail_dates)}
+    data = {"SPY": _one_series("SPY", 100.0 * (1 + spy_12m_return), tail_dates, mes)}
     for i, s in enumerate(dmsr_signal.SECTOR_UNIVERSE):
         r = sr.get(s, -0.5 + i * 0.01)  # distinct, deterministic default
-        data[s] = _one_series(s, 100.0 * (1 + r), tail_dates)
-    data["AGG"] = _one_series("AGG", 100.0, tail_dates)
+        data[s] = _one_series(s, 100.0 * (1 + r), tail_dates, mes)
+    data["AGG"] = _one_series("AGG", 100.0, tail_dates, mes)
     return data
 
 
 def _patch_fetch(monkeypatch, data):
     monkeypatch.setattr(track_c_execution, "fetch_track_c_symbol_data", lambda *a, **k: data)
+
+
+def _matched_result(symbol, matched=True, halted=False):
+    return SimpleNamespace(symbol=symbol, expected=0.0, actual=0.0, matched=matched, halted_track_c=halted)
 
 
 # --- halt gating -------------------------------------------------------
@@ -297,3 +306,182 @@ def test_send_track_c_heartbeat_pings_on_a_clean_run():
         {"errors": []}, heartbeat_url="http://hc.example/x", requests_module=fake_requests
     )
     assert ok is True and calls == ["http://hc.example/x"]
+
+
+# =====================================================================
+# spec v60 §10.30 correction — deferred mandatory reconcile + buy retry
+# =====================================================================
+
+_TOP3_RETURNS = {"XLK": 0.5, "XLV": 0.4, "XLE": 0.3}
+
+
+def _risk_on_data(monkeypatch, tail_dates=REBALANCE_TAIL):
+    sr = {s: -0.9 for s in dmsr_signal.SECTOR_UNIVERSE}
+    sr.update(_TOP3_RETURNS)
+    _patch_fetch(monkeypatch, _symbol_data(spy_12m_return=0.15, sector_12m_returns=sr, tail_dates=tail_dates))
+
+
+def test_rebalance_queues_reconcile_symbols_and_does_not_reconcile_in_the_same_invocation(monkeypatch):
+    client = FakeTradingClient(equity=10_000.0)
+    _risk_on_data(monkeypatch)
+    reconcile_calls = []
+    monkeypatch.setattr(track_positions, "reconcile_symbol",
+                        lambda tc, sym, **k: reconcile_calls.append(sym) or _matched_result(sym))
+
+    result = track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+
+    assert result["rebalance_day"] is True
+    assert set(result["target"]) == {"XLK", "XLV", "XLE"}
+    # Every touched (bought) symbol is queued for a LATER invocation.
+    pending = track_c_execution.load_pending_state()
+    assert set(pending["pending_reconcile_symbols"]) == {"XLK", "XLV", "XLE"}
+    # ...and reconcile_symbol() was NOT called during this same invocation.
+    assert reconcile_calls == []
+    assert result["step_2b"]["reconciled"] == []
+
+
+def test_subsequent_invocation_reconciles_all_pending_symbols_and_clears_them_regardless_of_outcome(monkeypatch):
+    client = FakeTradingClient(equity=10_000.0)
+    track_c_execution.save_pending_state({"pending_reconcile_symbols": ["XLK", "XLV"], "pending_retry_buys": {}})
+    _patch_fetch(monkeypatch, _symbol_data(tail_dates=NOOP_TAIL))  # non-rebalance day
+    calls = []
+
+    def fake_reconcile(tc, sym, **k):
+        calls.append(sym)
+        return _matched_result(sym, matched=(sym == "XLK"))  # XLV deliberately "mismatched" (no halt in this fake)
+
+    monkeypatch.setattr(track_positions, "reconcile_symbol", fake_reconcile)
+
+    result = track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+
+    assert result["rebalance_day"] is False
+    assert sorted(calls) == ["XLK", "XLV"]
+    assert track_c_execution.load_pending_state()["pending_reconcile_symbols"] == []
+    outcomes = {r["symbol"]: r["matched"] for r in result["step_2b"]["reconciled"]}
+    assert outcomes == {"XLK": True, "XLV": False}
+
+
+def test_step_2b_reconcile_mismatch_halts_track_c_and_the_next_invocation_short_circuits_at_step_1(monkeypatch):
+    # ledger_c(XLK) rebuilt from tc- history = 5; ledger_b = 0; Alpaca combined = 999 -> mismatch.
+    client = FakeTradingClient(equity=10_000.0, positions={"XLK": 999.0})
+    client._tc_orders = [_tc_order("XLK", OrderSide.BUY, 5.0)]
+    track_c_execution.save_pending_state({"pending_reconcile_symbols": ["XLK"], "pending_retry_buys": {}})
+    _patch_fetch(monkeypatch, _symbol_data(tail_dates=NOOP_TAIL))
+    # REAL reconcile_symbol() — the wiring under test.
+
+    r1 = track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+
+    assert r1["halted"] is True
+    assert r1["halted_during"] == "step_2b_reconcile"
+    assert halt_state.load_track_c_halt().halted is True
+    assert track_c_execution.load_pending_state()["pending_reconcile_symbols"] == []  # cleared even on mismatch
+
+    # Next invocation: step 1's halt-check returns before the start-heal.
+    client2 = FakeTradingClient(equity=10_000.0)
+    heal_spy = []
+    monkeypatch.setattr(track_positions, "heal_track_c_ownership_ledger",
+                        lambda *a, **k: heal_spy.append(1) or {})
+
+    r2 = track_c_execution.run_track_c_execution_job(client2, sleep_fn=_no_sleep)
+
+    assert r2["halted"] is True
+    assert "halted_during" not in r2
+    assert heal_spy == []
+    assert client2.submitted == []
+
+
+def test_failed_buy_is_retried_next_invocation_with_fresh_sizing_then_queued_for_reconcile(monkeypatch):
+    client = FakeTradingClient(equity=10_000.0)
+    client.fail_submit_for = {("XLK", OrderSide.BUY)}
+    _risk_on_data(monkeypatch)
+    monkeypatch.setattr(track_positions, "reconcile_symbol", lambda tc, sym, **k: _matched_result(sym))
+
+    r1 = track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+
+    assert r1["rebalance_day"] is True
+    pending = track_c_execution.load_pending_state()
+    assert pending["pending_retry_buys"] == {"XLK": 0}
+    assert set(pending["pending_reconcile_symbols"]) == {"XLV", "XLE"}  # the two that succeeded
+    xlk_attempt1 = [r for r in client.submitted if r.symbol == "XLK" and r.side == OrderSide.BUY]
+    assert len(xlk_attempt1) == 1 and xlk_attempt1[0].notional == 1000.0  # 10_000 * 0.30 / 3
+
+    # Next invocation: equity has grown, XLK now succeeds — sizing MUST be recomputed.
+    client.fail_submit_for = set()
+    client.account = SimpleNamespace(equity=20_000.0, last_equity=20_000.0)
+    _patch_fetch(monkeypatch, _symbol_data(tail_dates=NOOP_TAIL))
+
+    r2 = track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+
+    assert r2["step_2b"]["retries_succeeded"] == ["XLK"]
+    xlk_retry = [r for r in client.submitted if r.symbol == "XLK" and r.side == OrderSide.BUY][-1]
+    assert xlk_retry.notional == 2000.0  # 20_000 * 0.30 / 3 — FRESH, not the stale 1000
+    pending2 = track_c_execution.load_pending_state()
+    assert "XLK" not in pending2["pending_retry_buys"]
+    assert "XLK" in pending2["pending_reconcile_symbols"]
+
+
+def test_buy_that_fails_three_consecutive_retries_alerts_urgent_and_is_abandoned(monkeypatch, captured_telegram):
+    client = FakeTradingClient(equity=10_000.0)
+    client.fail_submit_for = {("XLK", OrderSide.BUY)}  # XLK buy always fails
+    monkeypatch.setattr(track_positions, "reconcile_symbol", lambda tc, sym, **k: _matched_result(sym))
+
+    _risk_on_data(monkeypatch)  # invocation 1 — the rebalance
+    track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+    assert track_c_execution.load_pending_state()["pending_retry_buys"] == {"XLK": 0}
+
+    _patch_fetch(monkeypatch, _symbol_data(tail_dates=NOOP_TAIL))  # invocations 2..5 are non-rebalance days
+    track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)  # retry 1 -> count 1
+    assert track_c_execution.load_pending_state()["pending_retry_buys"] == {"XLK": 1}
+    track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)  # retry 2 -> count 2
+    assert track_c_execution.load_pending_state()["pending_retry_buys"] == {"XLK": 2}
+
+    urgent_before = [m for m in captured_telegram if m.startswith("URGENT")]
+    track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)  # retry 3 -> count 3 -> give up
+    assert "XLK" not in track_c_execution.load_pending_state()["pending_retry_buys"]
+    urgent_after = [m for m in captured_telegram if m.startswith("URGENT")]
+    assert len(urgent_after) == len(urgent_before) + 1
+    assert "3 consecutive" in urgent_after[-1] and "XLK" in urgent_after[-1]
+
+    attempts_through_inv4 = len([r for r in client.submitted if r.symbol == "XLK" and r.side == OrderSide.BUY])
+    assert attempts_through_inv4 == 4  # 1 original + 3 retries
+
+    track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)  # invocation 5 — nothing left to retry
+    attempts_through_inv5 = len([r for r in client.submitted if r.symbol == "XLK" and r.side == OrderSide.BUY])
+    assert attempts_through_inv5 == 4  # no 4th retry / 5th attempt
+
+
+# --- GAP D: fetch window widened 400 -> 450 -------------------------
+
+def test_signal_lookback_window_is_450_calendar_days(monkeypatch):
+    assert track_c_execution.SIGNAL_LOOKBACK_DAYS == 450
+    captured = {}
+
+    def fake_fetch(symbol, start, end, adjustment):
+        captured["delta_days"] = (end - start).days
+        return [Candle(symbol, "2026-01-02T00:00:00+00:00", 1.0, 1.0, 1.0, 1.0, 1.0)]
+
+    monkeypatch.setattr(track_c_execution, "fetch_historical_stock_candles", fake_fetch)
+    track_c_execution.fetch_track_c_symbol_data()
+    assert captured["delta_days"] == 450
+
+
+def test_decide_guard_raises_with_too_few_month_ends_and_passes_with_enough(monkeypatch):
+    monkeypatch.setattr(track_positions, "reconcile_symbol", lambda tc, sym, **k: _matched_result(sym))
+    sr = {s: -0.9 for s in dmsr_signal.SECTOR_UNIVERSE}
+    sr.update(_TOP3_RETURNS)
+
+    # 12 month-ends -> t = 11 < LOOKBACK_MONTHS (12) -> DECIDE raises, no orders.
+    client = FakeTradingClient(equity=10_000.0)
+    _patch_fetch(monkeypatch, _symbol_data(spy_12m_return=0.15, sector_12m_returns=sr, month_ends=MONTH_ENDS[:12]))
+    r = track_c_execution.run_track_c_execution_job(client, sleep_fn=_no_sleep)
+    assert r["rebalance_day"] is True
+    assert any(e.get("step") == "decide" for e in r["errors"])
+    assert client.submitted == []
+
+    # 13 month-ends -> t = 12 -> DECIDE succeeds.
+    client2 = FakeTradingClient(equity=10_000.0)
+    _patch_fetch(monkeypatch, _symbol_data(spy_12m_return=0.15, sector_12m_returns=sr, month_ends=MONTH_ENDS))
+    r2 = track_c_execution.run_track_c_execution_job(client2, sleep_fn=_no_sleep)
+    assert r2["rebalance_day"] is True
+    assert not any(e.get("step") == "decide" for e in r2["errors"])
+    assert set(r2["target"]) == {"XLK", "XLV", "XLE"}

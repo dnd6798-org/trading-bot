@@ -21,6 +21,7 @@ backtest_output/
 halt_state.json
 track_c_halt_state.json
 track_positions_state.json
+track_c_pending_state.json
 
 # OS
 .DS_Store
