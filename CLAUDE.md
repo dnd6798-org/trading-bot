@@ -3197,6 +3197,42 @@ was 11 commits behind `origin/paper` as of the v61 record; these two
 fixes add to that. Per RULES.md §4, not closed on either surface until
 Claude Code records the droplet-side + live-fire confirmation itself.
 
+**THIRD BUG FOUND (2026-08-28, same session as the two fixes just
+shipped): a full live-fire re-verification of FIX 1 / FIX 2 — pushed
+through to actual Telegram message CONTENT, not stopped at "no crash in
+the logs" — surfaced two more things.**
+
+1. **A real, PRE-EXISTING config error, unrelated to either code fix:**
+   the droplet's `.env` had `TELEGRAM_CHAT_ID` set to the bot's own
+   Telegram username (`dandd_tradingbot_bot`) instead of a valid numeric
+   `chat_id`. Confirmed via a direct Telegram API call bypassing
+   `send_message()`'s `try/except`: `400 Bad Request`, `"chat not
+   found"`. This meant Telegram alerting had **never actually reached
+   anyone this entire session**, even after FIX 2 shipped —
+   `send_message()`'s "never raises" contract was working exactly as
+   designed, which is precisely why this was invisible without going
+   around it. Corrected **LIVE ON THE DROPLET ONLY (not a commit — `.env`
+   is never committed)**: `TELEGRAM_CHAT_ID=8228421960` (the real numeric
+   ID, recovered via Telegram's `getUpdates` API), listener restarted to
+   pick it up. This is an operational fact recorded here, not a code
+   change.
+
+2. **A real, distinct THIRD bug in FIX 1's code:** with Telegram
+   genuinely working, a live 2.5-share SPY test produced the message
+   `"fill_listener: protected SPY — qty 2.5 @ stop 615.53"` — but the
+   actual resting GTC stop order (confirmed directly against Alpaca) was
+   correctly sized to **2 whole shares**. Real protection is correct;
+   only the REPORTED number is wrong. Root cause:
+   `submit_or_resize_stop_order_with_retry()`'s initial-submission branch
+   returns the raw UNFLOORED `qty` as `qty_submitted` instead of the
+   floored value that was actually submitted. `fill_listener.py` puts
+   this value directly into the Telegram message. The top-up branch
+   (which the v65 brief specified this exact behavior for) is correct —
+   this is a gap in that spec, not an implementation error.
+
+**Fix locked (see the task brief that follows this message) — one line,
+in the same function.**
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
