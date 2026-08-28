@@ -3233,6 +3233,30 @@ the logs" — surfaced two more things.**
 **Fix locked (see the task brief that follows this message) — one line,
 in the same function.**
 
+**UPDATE (2026-08-28): FIX 3 IMPLEMENTED — the specified one-line
+change, no other behavior touched. Full suite 407 -> 408 (1 new test in
+`tests/test_execution.py`; 1 modified assertion in
+`tests/test_fill_listener.py`).** `submit_or_resize_stop_order_with_
+retry()`'s initial-submission branch (`src/execution.py`) now returns
+`math.floor(qty)` (was the raw unfloored `qty`) as `qty_submitted` —
+matching the value actually submitted to Alpaca and the already-correct
+top-up branch. `math` was already imported (FIX 1). The one modified test
+(`test_handle_trade_update_fires_a_routine_success_notification_on_a_
+fresh_protect`) asserted the pre-fix `"qty 10.0"` message text; since
+`math.floor()` returns an `int`, a whole-share qty now renders as `"qty
+10"` — the assertion was updated to match, the test's intent (routine
+non-urgent notification fires on a fresh protect) is unchanged. New test:
+a fractional 2.5-share initial submission now reports `qty_submitted == 2`
+(not 2.5) while the submitted order still carries the correct floored qty
+2. **Separate housekeeping in the same commit (not a bug fix):**
+`.env.example` gained a two-line comment above `TELEGRAM_CHAT_ID` noting
+it must be the numeric chat ID (not the bot `@username`) and pointing at
+Telegram's `getUpdates` API to look it up — motivated by this session's
+live droplet data-entry error (the existing placeholder was not itself
+misleading). **The droplet `.env` `TELEGRAM_CHAT_ID` correction itself
+was applied live on the droplet only (`.env` is never committed) — see
+the THIRD BUG block above.**
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit

@@ -477,7 +477,7 @@ def test_handle_trade_update_fires_a_routine_success_notification_on_a_fresh_pro
     assert len(routine) == 1
     msg = routine[0]
     assert "SPY" in msg
-    assert "qty 10.0" in msg
+    assert "qty 10" in msg  # math.floor(10.0) -> int 10 (2026-08-28 THIRD-bug fix; was "10.0")
     assert "stop 435.0" in msg
     assert "s after fill event" in msg
     assert "URGENT" not in msg  # routine, non-urgent — distinct from the failure alert path

@@ -1459,6 +1459,26 @@ def test_submit_or_resize_stop_order_with_retry_submits_when_no_existing_stop():
     assert client.submitted_orders[0].qty == 10.0
 
 
+def test_submit_or_resize_stop_order_with_retry_initial_submission_reports_floored_qty():
+    # 2026-08-28 THIRD bug: the initial-submission branch returned the raw
+    # UNFLOORED qty as qty_submitted, so fill_listener.py's Telegram
+    # message reported (e.g.) "qty 2.5" while the real resting GTC stop
+    # was correctly sized to 2 (Alpaca rejects fractional GTC stops). The
+    # submitted order was already correct — only the reported number was
+    # wrong. qty_submitted must now be floor(qty), matching the top-up
+    # branch and the actual order.
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: []  # no resting stop
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
+
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 2.5, 435.0, sleep_fn=_no_sleep)
+
+    assert order.id == "stop-1"
+    assert qty_submitted == 2  # math.floor(2.5), NOT 2.5
+    assert len(client.submitted_orders) == 1
+    assert client.submitted_orders[0].qty == 2  # order itself was already correctly floored
+
+
 def test_submit_or_resize_stop_order_with_retry_is_a_noop_when_qty_already_covered():
     client = FakeTradingClient()
     client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=10.0, stop_price=435.0)]
