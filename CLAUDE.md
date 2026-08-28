@@ -2775,7 +2775,51 @@ now, but needs its own claude.ai design session first — spec v53
 §10.23's exact order mechanics / scheduling / monitoring integration
 need re-verification against the actual code, not just the paraphrase
 carried so far. No implementation work is currently queued for Claude
-Code.**
+Code.** [SUPERSEDED — see the v59 update immediately below: that
+design session has now happened and Milestone 4 is DESIGNED AND
+LOCKED.]
+
+**v59 (2026-08-28): Milestone 4 DESIGNED AND LOCKED (spec v59 §10.29)
+— Track C's live execution script, scheduling, and monitoring.** Both
+hard preconditions from spec v56 §10.26 (sell/buy attribution via the
+`tc-` prefix; the self-heal AGG-sharing gap) are closed as of spec v58
+§10.28 above, so Milestone 4 is now fully unblocked. claude.ai
+chat-side design session only — no code written this session; this
+update records the decision to build, per this file's own "update
+whenever a real decision is made" rule. **The next message in this
+session is the Milestone 4 task brief.**
+
+Two new modules:
+- `src/dmsr_signal.py` — pure DMSR signal logic (11 SPDR sectors, AGG
+  defensive, SPY market filter, 12-month lookback, top-3 hold with
+  top-5 hysteresis buffer, monthly rebalance, NO stop-loss by design).
+  Re-implemented from `scripts/backtest_sector_rotation.py` (the
+  backtest that earned Track C its ADOPT verdict, spec v52) rather than
+  imported from `scripts/` — same precedent as
+  `MAX_SINGLE_POSITION_NOTIONAL_PCT`'s earlier move from a backtest
+  script into `src/config.py` (spec v32/v33 clarification pass).
+- `src/track_c_execution.py` — the live job
+  (`run_track_c_execution_job()`), structurally mirroring
+  `execution.py`'s role for Track B: halt-gated, self-gates on
+  `is_rebalance_day()` (a no-op on most days), heals the `track_c`
+  ownership ledger at both the start and the end of every run, submits
+  sell-then-buy sequentially with `tc-{symbol}-{YYYYMMDD}`
+  `client_order_id`s.
+
+**One safety-critical design point, flagged explicitly in the brief:**
+sell order quantities MUST come from `track_positions.get_track_qty(
+"track_c", symbol)` — never from Alpaca's raw combined position —
+because for AGG (shared with Track B), the raw total includes Track B's
+shares too. Selling "the position" would liquidate Track B's holding.
+
+New systemd unit (`deploy/systemd/trading-bot-track-c.service` /
+`.timer`), mirroring `trading-bot-daily.service` / `.timer`'s exact
+format, same Mon-Fri 17:00 `America/New_York` schedule (the script's
+own `is_rebalance_day()` self-gate makes a daily trigger correct). New
+`src/config.py` accessor `get_track_c_heartbeat_config()` for a third
+Healthchecks.io monitor.
+
+Status: DESIGNED and BRIEFED, NOT YET BUILT. Awaiting implementation.
 
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
