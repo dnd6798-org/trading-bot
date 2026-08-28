@@ -3257,6 +3257,38 @@ misleading). **The droplet `.env` `TELEGRAM_CHAT_ID` correction itself
 was applied live on the droplet only (`.env` is never committed) — see
 the THIRD BUG block above.**
 
+**FOURTH BUG FOUND (2026-08-28, same session): the final live-fire retest
+of FIX 3 — a 2.5-share SPY test — produced the Telegram message
+`"fill_listener: protected SPY — qty 1.5 @ stop 615.34"`. A `qty` of
+`1.5` out of a flooring operation is impossible — that was the immediate
+tell.**
+
+**Root cause:** `submit_or_resize_stop_order_with_retry()`'s TOP-UP
+branch (used for a second/later `trade_update` event against an
+already-partially-protected position) has the **IDENTICAL** defect FIX 3
+just corrected in the initial-submission branch — it returns the raw,
+unfloored `increment` as `qty_submitted` instead of the floored value
+actually submitted:
+
+    order = submit_stop_order_with_retry(trading_client, symbol, increment, stop_price, ...)
+    return order, (increment if order is not None else 0.0)   # BUG: should be math.floor(increment)
+
+Confirmed via direct inspection before flattening: the actual resting
+stops were two orders of `qty 1` each (summing to `floor(2.5) = 2`,
+correct) — real protection was correct throughout, only the reported
+number was wrong, exactly as with FIX 3.
+
+**Ownership note:** the original v65 FIX 3 brief (claude.ai's own text)
+asserted "the top-up branch below this one is already correct and
+untouched" — that claim was made without re-reading that specific return
+line at the time. Recorded here as a claude.ai process error, not a
+Claude Code implementation gap — flagged in case it affects how future
+claude.ai claims about "unaffected" code (without an accompanying diff
+reference) should be weighted.
+
+**Fix locked (see the task brief that follows) — same one-line pattern
+as FIX 3, different branch of the same function.**
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
