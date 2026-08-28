@@ -3033,7 +3033,48 @@ inherent to a daily-cadence post-close job.
 Status: **Milestone 4 still OPEN.** **PUSH WITHHELD — `647c8f4` /
 `f5295fd` / `e0a05ca` / `4f3db0b` / `e3b7559` MUST NOT be pushed to
 `origin/paper` until claude.ai explicitly authorizes it after validating
-the correction.**
+the correction.** [SUPERSEDED by the v61 update below — validated,
+closed, and pushed.]
+
+**v61 (2026-08-28): Milestone 4 (initial v59 §10.29 + v60 §10.30
+correction) is CLOSED and VALIDATED (spec v61 §10.31).** claude.ai
+confirmed the full implementation via manual trace-through — including
+the snapshot-ordering fix (2b's reconcile pass runs on a pre-retry
+snapshot so it never reconciles an order submitted in the same
+invocation) and the post-2b halt re-check (a mismatch found in 2b stops
+the current invocation before it submits new orders), both flagged as
+deviations beyond the brief's literal text and both confirmed correct.
+
+**PUSH DONE.** All 6 local commits were pushed to `origin/paper`:
+`99150d4..75f5092` (= `647c8f4`, `f5295fd`, `e0a05ca`, `4f3db0b`,
+`e3b7559`, `75f5092`). Confirmed `origin/paper` HEAD =
+`75f5092773bf009e36f9f0cf1d9376fe23c3389c`; local `paper` and
+`origin/paper` fully in sync (`git status`: no ahead/behind). Full suite
+**401/401 passing** at that HEAD.
+
+**Track C now has live execution code** — `src/dmsr_signal.py` (pure DMSR
+signal) and `src/track_c_execution.py` (`run_track_c_execution_job()`,
+pending-completion tracking via `track_c_pending_state.json`), plus
+`deploy/systemd/trading-bot-track-c.service` / `.timer` and
+`get_track_c_heartbeat_config()` / `HEALTHCHECKS_TRACK_C_HEARTBEAT_URL`.
+Both spec v56 §10.26 hard preconditions are closed and Track C's
+mandatory reconcile-with-halt (spec v55 §10.25) is now wired live
+(deferred to a later invocation via the pending-state file).
+
+**One known-open item, inherent not a bug: GAP A** — a Track C order is
+unconfirmed for up to ~1 trading day after submission (post-close market
+order fills at next session's open); the pending-completion mechanism
+makes the reconcile/retry correct around this, but the timing fact
+itself is intrinsic to a daily-cadence post-close job.
+
+**No implementation work is queued.** Next (claude.ai + user side): an
+independent diff check against `origin/paper`, then a droplet deploy
+pass — the droplet is **11 commits behind** `origin/paper` once this
+lands (still at `c387399` per the spec v46 record), including Track C's
+new `src/` modules and the two new systemd units, which must be
+`git pull`ed as the `tradingbot` user and (separately, later) enabled.
+Per RULES.md §4, that droplet deploy is NOT closed on either surface
+until Claude Code has recorded the droplet-side confirmation itself.
 
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
