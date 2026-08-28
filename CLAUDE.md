@@ -2925,6 +2925,58 @@ pending). Awaiting claude.ai validation of the report and a design call
 on gaps A-D. The two hard preconditions from spec v56 §10.26 remain
 closed.
 
+**v60 (2026-08-28): Milestone 4 CORRECTION LOCKED (spec v60 §10.30) —
+Milestone 4 remains OPEN, not closed. claude.ai chat-side decision
+record only; no code this turn (the correction's task brief is the next
+message).**
+
+**Root of the discrepancy (claude.ai's side, not Claude Code's):** spec
+v55 §10.25 (Milestone 2's design) locked a MANDATORY
+`track_positions.reconcile_symbol()`-with-halt requirement after every
+Track C rebalance. The v59 §10.29 brief only specified a soft/alert-only
+reconcile — an omission of that earlier lock on claude.ai's part, NOT a
+new decision superseding it. Claude Code correctly implemented what was
+actually briefed (the soft reconcile) and correctly flagged the
+discrepancy as GAP C rather than inventing unbriefed hard-halt logic.
+This correction restores the mandatory hard-halt reconcile.
+
+**Confirmed correct by claude.ai, no changes needed:**
+- The `compute_month_end_dates` / `is_rebalance_day` contradiction
+  resolution (verbatim `backtest_gem.py` port, no appended last element;
+  `is_rebalance_day()` membership-checks against the FULL calendar) is
+  mathematically correct — verified by tracing both the brief's pasted
+  version and the implemented version. Flag 4 of the v59 execution
+  record is settled; no further action.
+- GAP A/B interim handling (mirror `execution.py`'s short poll; a
+  still-open zero-fill order is an expected "pending" outcome, not a
+  failure) stands as the correct interim behavior.
+- GAP D fix adopted directly: `SIGNAL_LOOKBACK_DAYS` 400 -> 450.
+
+**New mechanism this correction locks — pending-completion tracking:**
+a persisted `track_c_pending_state.json` (same pattern/semantics as
+`halt_state.json` / `track_positions_state.json` — plain JSON, survives
+restart, easy to hand-audit). Purpose: the mandatory
+`reconcile_symbol()`-with-halt must run on a LATER invocation, once the
+rebalance's fills have actually settled — NOT on the same run that
+submitted still-pending orders (Track C entries fill at next-session
+open, the same mechanical fact behind GAP A/B, so a same-run reconcile
+would false-halt on EVERY rebalance). The pending-state file records
+which symbols/orders from a rebalance are still awaiting fill; a
+subsequent invocation checks them, and once all are terminal, runs the
+mandatory reconcile-and-halt-on-mismatch.
+
+**Same mechanism also closes GAP B** (risk-off AGG buy — or any buy —
+rejected for insufficient buying power until the sells settle): the
+pending-state file drives a bounded retry, capped at **3 consecutive
+business-day attempts**, of any leg that did not fill/was rejected.
+
+Status: **Milestone 4 OPEN.** **PUSH WITHHELD — `647c8f4` / `f5295fd` /
+`e0a05ca` and any commits from this correction MUST NOT be pushed to
+`origin/paper` until claude.ai explicitly authorizes it after validating
+the correction.** (Restated per RULES.md §4's "pushed ≠ deployed" /
+local-commit-is-not-yet-a-shared-fact discipline — an explicit hold, not
+just "not yet pushed".)
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
