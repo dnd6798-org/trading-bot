@@ -3125,8 +3125,20 @@ test leg — QQQ, exercising Track C's `tc-` ledger-only path in
 paused pending these two fixes.
 
 **UPDATE (2026-08-28): both fixes IMPLEMENTED — committed on `paper`,
-full suite 401 -> 407 (7 net: 6 new + 1 modified; no other existing test
-touched). Pushed to `origin/paper` (see below for the exact hashes).**
+full suite **401 -> 407** (6 new tests + 1 modified; no other existing
+test touched). Pushed to `origin/paper` (see below for the exact
+hashes).**
+
+**COMMIT-MESSAGE CORRECTION (immutable, so recorded here — same
+convention as the `4374ce7` spec-citation correction above):** the
+`a2cb3a1` and `565c2ed` commit messages state "401 -> 405" and
+"405 -> 407" for the intermediate suite count. The correct intermediate
+count after `a2cb3a1` (FIX 1 alone) is **404**, verified by checking out
+that file state and running the suite. So: 401 (before) -> **404**
+(after FIX 1, `a2cb3a1`, +3 new tests) -> **407** (after FIX 2,
+`565c2ed`, +3 new tests). The 401 -> 407 total and the "3 new per fix"
+breakdown are correct; only the "405" waypoint in the two commit
+messages is off by one.
 
 - **FIX 1 — `a2cb3a1`** (`src/execution.py`, `tests/test_execution.py`).
   `submit_stop_order_with_retry()` now `math.floor()`s `qty` before
