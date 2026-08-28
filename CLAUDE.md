@@ -2970,12 +2970,70 @@ rejected for insufficient buying power until the sells settle): the
 pending-state file drives a bounded retry, capped at **3 consecutive
 business-day attempts**, of any leg that did not fill/was rejected.
 
-Status: **Milestone 4 OPEN.** **PUSH WITHHELD — `647c8f4` / `f5295fd` /
-`e0a05ca` and any commits from this correction MUST NOT be pushed to
+**UPDATE: the v60 correction was IMPLEMENTED — committed as `e3b7559` on
+`paper` (LOCAL ONLY, unpushed). Full suite 394 -> 401 (7 new tests in
+`tests/test_track_c_execution.py`; 0 existing test assertions changed —
+only test helpers / the isolation fixture / the fake trading client were
+extended); no Track B code touched.**
+
+What landed:
+- **`src/track_c_execution.py` — new persisted state**
+  `track_c_pending_state.json` (path override
+  `TRACK_C_PENDING_STATE_PATH`; added to `.gitignore`; same
+  read-fresh/write-back/hand-auditable JSON convention as
+  `halt_state.json`). `load_pending_state()` / `save_pending_state()`;
+  shape `{"pending_reconcile_symbols": [...], "pending_retry_buys":
+  {sym: count}}`.
+- **New STEP 2b** (`_resolve_pending_work()`), between start-heal and
+  fetch/self-gate, running on EVERY invocation regardless of rebalance
+  day:
+  - *retry pass* — re-submits any buy in `pending_retry_buys` with
+    FRESH sizing (`_retry_buy_notional()` recomputes
+    `capital_ledger.get_available_capital(..., TRACK_C_ALLOCATION_PCT)`
+    then `/ TOP_N_HOLD`, or the full amount if the symbol is AGG — never
+    the stale failed amount); success -> move to
+    `pending_reconcile_symbols`; failure -> increment; at
+    `_MAX_BUY_RETRIES` (3) -> URGENT Telegram alert + drop until the
+    next scheduled monthly rebalance, no 4th attempt.
+  - *reconcile pass* — `track_positions.reconcile_symbol()` (the
+    mandatory spec v55 §10.25 hard-halt check) for each symbol in a
+    SNAPSHOT of `pending_reconcile_symbols` taken BEFORE the retry pass,
+    then removes each from the state regardless of matched/mismatched
+    (`reconcile_symbol()` halts + alerts itself on a mismatch). The
+    snapshot is the mechanism guaranteeing `reconcile_symbol()` is NEVER
+    called in the same invocation that submitted the orders being
+    reconciled (a retry that succeeds this invocation is queued for a
+    LATER one; today's step-5 additions are first seen by the NEXT
+    invocation's 2b).
+- **Step 5 additions** — every submitted sell/buy adds its symbol to
+  `pending_reconcile_symbols`; a buy that fails to submit / is rejected
+  (GAP B) adds to `pending_retry_buys` at count 0 and does NOT go into
+  `run_log["errors"]` (a queued retry is a handled condition; the
+  3-strike URGENT is the escalation), and does NOT abort the remaining
+  legs.
+- **Post-2b halt re-check** — if 2b's reconcile just halted Track C on a
+  mismatch, the current invocation returns before submitting a new
+  rebalance's orders (`run_log["halted_during"] == "step_2b_reconcile"`)
+  and skips the end-of-run heal, matching step 1's "halted -> no heal".
+  This is a safety addition beyond the brief's literal text (the brief
+  only guarantees the NEXT invocation's step-1 halt-check
+  short-circuits) — flagged in the module docstring.
+- **GAP D** — `SIGNAL_LOOKBACK_DAYS` 400 -> 450; the DECIDE guard
+  (`t < LOOKBACK_MONTHS` -> raise + alert + no orders) is retained.
+- The v59 soft `_reconcile_after_rebalance()` (positions-vs-target,
+  non-halting) is kept, now explicitly labelled as SEPARATE from the
+  mandatory step-2b integrity reconcile.
+
+Still open (unchanged): **GAP A** — a Track C order is unconfirmed for
+up to ~1 trading day after submission (post-close market order fills at
+next open). The v60 pending-completion mechanism makes the reconcile and
+retry correct end-to-end around this, but the raw timing fact is
+inherent to a daily-cadence post-close job.
+
+Status: **Milestone 4 still OPEN.** **PUSH WITHHELD — `647c8f4` /
+`f5295fd` / `e0a05ca` / `4f3db0b` / `e3b7559` MUST NOT be pushed to
 `origin/paper` until claude.ai explicitly authorizes it after validating
-the correction.** (Restated per RULES.md §4's "pushed ≠ deployed" /
-local-commit-is-not-yet-a-shared-fact discipline — an explicit hold, not
-just "not yet pushed".)
+the correction.**
 
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
