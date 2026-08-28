@@ -9,12 +9,39 @@ Two directions of traffic:
 Inbound commands need either polling (getUpdates) or a webhook — decide
 during the build session; polling is simpler to run on a single droplet.
 """
+import logging
+
+import requests
+
 from .config import get_telegram_config
 
+log = logging.getLogger(__name__)
 
-def send_message(text: str) -> None:
-    """Fire-and-forget send. Used for journals, alerts, halt notices."""
-    raise NotImplementedError("Build session — python-telegram-bot, sendMessage")
+
+def send_message(text: str, requests_module=requests) -> bool:
+    """Fire-and-forget send via Telegram's Bot API. Best-effort only,
+    deliberately: NEVER raises — a Telegram/network failure must never
+    crash a caller that's mid-alert about something else (this is the
+    actual fix for the 2026-08-28 cascading-crash finding, where a
+    raising send_message() called from inside error-handling code turned
+    one failure into two). Returns True if the send succeeded, False
+    (logged) otherwise.
+
+    Plain synchronous requests.post(), NOT the python-telegram-bot
+    library (which is async and would hit the same "cannot nest
+    asyncio.run()" constraint fill_listener.py already documents for
+    TradingStream.run(), since this is called synchronously from inside
+    that module's running event loop). Matches the exact best-effort
+    pattern of execution.send_daily_heartbeat() /
+    fill_listener.send_listener_heartbeat()."""
+    try:
+        cfg = get_telegram_config()
+        url = f"https://api.telegram.org/bot{cfg.bot_token}/sendMessage"
+        requests_module.post(url, json={"chat_id": cfg.chat_id, "text": text}, timeout=10)
+        return True
+    except Exception as exc:  # noqa: BLE001 — must never crash the caller, matches send_daily_heartbeat()'s convention
+        log.warning(f"telegram_bot.send_message: send failed ({exc}) — caller unaffected.")
+        return False
 
 
 def send_approval_request(summary: str, request_id: str) -> None:
