@@ -2726,6 +2726,57 @@ different, superseded use of the same letter).
 
 Status: DESIGNED and BRIEFED, NOT YET BUILT. Awaiting implementation.
 
+**v58 (2026-08-28): Milestone 3 CLOSED (spec v58 §10.28) —
+position-ownership attribution fixes IMPLEMENTED, committed as `3544b38`
+on `paper` (pushed; independently verified by claude.ai as `origin/paper`'s
+actual HEAD via `Git:get_commit(sha="paper")`, not just accepted from the
+Claude Code report). Full diff reviewed line by line against all 5 briefed
+changes (A-E) — no discrepancies found. Tests 361 -> 372 (11 new, 2
+modified — both `tests/test_fill_listener.py` sell-branch tests, for the
+renamed return-dict keys `track_b_ledger_qty` -> `track` +
+`track_ledger_qty`; rationale verified against the actual diff). Full
+suite 372/372 passing.**
+
+What landed:
+- `src/track_positions.py`: `TRACK_C_CLIENT_ORDER_ID_PREFIX = "tc"`,
+  `is_track_c_client_order_id()`, and `heal_track_c_ownership_ledger(
+  trading_client, universe)` — reconstructs Track C's per-symbol
+  holdings entirely from Track C's OWN `tc-`-prefixed order history
+  (`QueryOrderStatus.ALL`, filled BUY qty minus filled SELL qty, floored
+  at 0), INDEPENDENT of Alpaca's combined position total, so there is no
+  circular trust with Track B's heal for the shared AGG symbol. Built
+  and unit-tested only — NOT wired into any live/scheduled path (Track C
+  has no execution module or scheduled job yet — Milestone 4).
+- `src/fill_listener.py` `handle_trade_update()`: SELL branch routes the
+  ledger decrement to `"track_c"` when the sell order's `client_order_id`
+  carries the `tc-` prefix, else `"track_b"` (unchanged default — Track
+  B's stop orders carry no `client_order_id`, so this is a no-op for the
+  current live system). BUY branch restructured: the existing `tb-`
+  decode path (`decode_client_order_id()`) is tried first and is
+  byte-for-byte the pre-v58 behavior when it matches (full protection
+  path); only if it does NOT match is the `tc-` prefix checked, in which
+  case ONLY the `track_c` ledger entry is set (no stop order logic at
+  all — Track C is no-stop-by-design), returning `action: "ledger_only"`.
+- `src/execution.py` `heal_track_b_ownership_ledger()`: now computes
+  `max(0, alpaca_total_qty(symbol) - track_positions.get_track_qty(
+  "track_c", symbol))` instead of the raw combined total — a no-op for
+  every symbol Track C doesn't trade (`get_track_qty` returns 0.0), so
+  existing empty-`track_c`-ledger tests pass unmodified.
+
+**Both hard preconditions from spec v56 §10.26 are now CLOSED:**
+sell/buy attribution (the `tc-` prefix routing above), and the self-heal
+AGG-sharing gap (the `max(0, alpaca_total - track_c_known)` + independent
+`heal_track_c_ownership_ledger()` reconstruction above). Milestone 4 is no
+longer gated on these.
+
+**Milestone 4 (Track C's live execution script — renumbered from spec
+v56's "Milestone 3") is next: NOT briefed, not gated on anything else
+now, but needs its own claude.ai design session first — spec v53
+§10.23's exact order mechanics / scheduling / monitoring integration
+need re-verification against the actual code, not just the paraphrase
+carried so far. No implementation work is currently queued for Claude
+Code.**
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
