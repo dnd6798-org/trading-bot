@@ -1507,7 +1507,7 @@ def test_submit_or_resize_stop_order_with_retry_supports_a_fractional_topup_incr
     assert client.submitted_orders[0].qty == 5  # floor(5.45), per the fractional-GTC fix
 
 
-def test_submit_or_resize_stop_order_with_retry_topup_increment_below_one_share_is_a_silent_noop():
+def test_submit_or_resize_stop_order_with_retry_topup_increment_below_one_share_is_a_silent_noop(captured_telegram_messages):
     # 2026-08-28 fractional-GTC fix, point 5: once the whole-share
     # portion is protected, a residual <1-share top-up increment
     # (total_protected=4, cumulative fill=4.3 -> increment 0.3) must be a
@@ -1525,6 +1525,7 @@ def test_submit_or_resize_stop_order_with_retry_topup_increment_below_one_share_
     assert order is resting
     assert qty_submitted == 0.0
     assert client.submitted_orders == []
+    assert captured_telegram_messages == []  # silent — no alert
 
 
 def test_submit_or_resize_stop_order_with_retry_exhausts_retries_and_alerts_on_topup_failure(captured_telegram_messages):
