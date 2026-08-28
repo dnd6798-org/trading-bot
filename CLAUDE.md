@@ -3124,6 +3124,67 @@ test leg — QQQ, exercising Track C's `tc-` ledger-only path in
 `fill_listener.handle_trade_update()` — was intentionally NOT run,
 paused pending these two fixes.
 
+**UPDATE (2026-08-28): both fixes IMPLEMENTED — committed on `paper`,
+full suite 401 -> 407 (7 net: 6 new + 1 modified; no other existing test
+touched). Pushed to `origin/paper` (see below for the exact hashes).**
+
+- **FIX 1 — `a2cb3a1`** (`src/execution.py`, `tests/test_execution.py`).
+  `submit_stop_order_with_retry()` now `math.floor()`s `qty` before
+  every submission attempt (the single shared function every
+  stop-submission path routes through — `protect_unprotected_fills()`,
+  `submit_entry_and_stop()`, and via
+  `submit_or_resize_stop_order_with_retry()` the listener). Floored qty
+  `<= 0` -> no submission attempt at all, one distinct URGENT alert
+  ("...below 1 whole share...Alpaca does not support fractional-quantity
+  GTC stop orders..."), return `None`.
+  `submit_or_resize_stop_order_with_retry()`'s top-up guard changed
+  `increment <= _MIN_TOPUP_QTY` -> `math.floor(increment) <= 0` (a
+  permanent sub-1-share residual increment is now a SILENT no-op, not an
+  alert storm). **Entry sizing (`submit_entry_and_stop()`'s
+  `round(qty, 4)`) is UNCHANGED — backtest fidelity unaffected.**
+  Accepted, documented consequence (intentional, do not try to
+  eliminate): a position may carry up to one whole share of notional
+  with no resting GTC stop — bounded, in the same spirit as
+  `RECONCILE_EPSILON` / the top-up multi-stop state. 3 new tests
+  (fractional qty floored to whole share before submit; sub-1-share qty
+  alerts with no submission and returns `None`; sub-1-share top-up
+  increment is a silent no-op returning the existing stop with
+  `qty_submitted == 0.0`). 1 modified test
+  (`test_submit_or_resize_..._supports_a_fractional_topup_increment`):
+  it asserted the pre-fix behavior that a 5.45 increment is submitted at
+  exactly 5.45; now the submitted order carries `floor(5.45) = 5` while
+  the returned `qty_submitted` stays the true `5.45` — the test's core
+  intent (a fractional increment succeeds rather than fail-toward-alert)
+  is preserved.
+- **FIX 2 — `565c2ed`** (`src/telegram_bot.py`,
+  `tests/test_telegram_bot.py` new). `send_message()` implemented via a
+  plain synchronous `requests.post()` to Telegram's Bot API, matching
+  `execution.send_daily_heartbeat()` /
+  `fill_listener.send_listener_heartbeat()` exactly — best-effort, logs
+  on failure, **NEVER raises** (returns `True`/`False`). NOT
+  python-telegram-bot (async — would hit the same nested-`asyncio.run()`
+  constraint `fill_listener.py` documents). `send_approval_request()` /
+  `poll_for_commands()` left as stubs (not on any critical path). 3 new
+  tests (success -> `True`; POST exception -> caught, `False`, no
+  propagation; missing `TELEGRAM_*` config -> caught, `False`, no
+  propagation). This is the actual fix for the cascading-crash finding:
+  a raising `send_message()` called from inside error-handling code
+  turned one failure into two.
+
+**Every OTHER caller/path in both files is unchanged** — no other code
+path is affected: FIX 1 is confined to the two named functions (all
+stop-submission callers pass through them and all previously passed
+whole-share qtys in tests; real callers pass fractional qtys, which is
+exactly the case being fixed); FIX 2 only replaces a `raise` with a
+best-effort send, and every existing caller already ignores the return
+value.
+
+**Next: droplet deploy + live-fire re-verification** (claude.ai + user
+side) — includes re-running the paused QQQ `tc-` test leg. The droplet
+was 11 commits behind `origin/paper` as of the v61 record; these two
+fixes add to that. Per RULES.md §4, not closed on either surface until
+Claude Code records the droplet-side + live-fire confirmation itself.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
