@@ -3289,6 +3289,31 @@ reference) should be weighted.
 **Fix locked (see the task brief that follows) — same one-line pattern
 as FIX 3, different branch of the same function.**
 
+**UPDATE (2026-08-28): FIX 4 IMPLEMENTED — the specified one-line change,
+plus a fresh full-function re-read confirming nothing else needs the same
+treatment. Full suite 408 -> 409 (1 new test in `tests/test_execution.py`;
+2 modified assertions — 1 in `tests/test_execution.py`, 1 in
+`tests/test_fill_listener.py`).** `submit_or_resize_stop_order_with_
+retry()`'s TOP-UP branch (`src/execution.py`) now returns
+`math.floor(increment)` (was the raw unfloored `increment`) as
+`qty_submitted`. **Fresh re-read of the whole function, top to bottom,
+both branches — the function has exactly three `return` statements:
+(1) initial-submission branch, fixed in FIX 3; (2) the `math.floor(
+increment) <= 0` no-op guard, which returns a literal `0.0` (correct);
+(3) the top-up submission, fixed here. No other line needs the same
+treatment.** Note: both branches still pass the RAW unfloored value
+(`qty` / `increment`) INTO `submit_stop_order_with_retry()`, which is
+correct — that function floors internally before submitting (FIX 1); the
+defect was only ever in the returned `qty_submitted`. Two modified
+assertions: `test_submit_or_resize_stop_order_with_retry_supports_a_
+fractional_topup_increment` asserted the pre-fix raw `5.45`, now `5`
+(`math.floor(5.45)`, matching the submitted order); `test_handle_trade_
+update_notification_reports_the_topup_increment_not_the_full_cumulative_
+qty` asserted `"qty 3.0"`, now `"qty 3"` (`math.floor` returns `int`).
+New test: a fractional top-up increment of 1.5 (total_protected 1.0,
+cumulative 2.5) reports `qty_submitted == 1` while the submitted order
+carries the correct floored qty 1.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit

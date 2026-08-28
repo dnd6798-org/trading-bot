@@ -497,7 +497,7 @@ def test_handle_trade_update_notification_reports_the_topup_increment_not_the_fu
 
     routine = [m for m in captured_telegram_messages if m.startswith("fill_listener: protected")]
     assert len(routine) == 1
-    assert "qty 3.0" in routine[0]  # the increment, not 8.0
+    assert "qty 3" in routine[0]  # the increment (math.floor -> int 3, per the FOURTH-bug fix), not 8
 
 
 def test_handle_trade_update_no_notification_when_the_event_carries_no_timestamp(captured_telegram_messages):

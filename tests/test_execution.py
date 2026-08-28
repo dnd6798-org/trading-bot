@@ -1513,9 +1513,11 @@ def test_submit_or_resize_stop_order_with_retry_supports_a_fractional_topup_incr
     # A fractional top-up increment >= 1 whole share still succeeds (not
     # fail-toward-alert) — but the 2026-08-28 fractional-GTC fix floors
     # the SUBMITTED qty to a whole share (Alpaca rejects fractional GTC
-    # stops). The returned qty_submitted stays the true increment (5.45);
-    # the submitted order carries floor(5.45) = 5. The <1-share residual
-    # gap is the accepted, documented consequence of that fix.
+    # stops). The 2026-08-28 FOURTH-bug fix additionally floors the
+    # RETURNED qty_submitted (was the raw increment 5.45, reported
+    # verbatim in fill_listener.py's Telegram message) to match the
+    # value actually submitted: math.floor(5.45) = 5. The <1-share
+    # residual gap is the accepted, documented consequence.
     client = FakeTradingClient()
     client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.25, stop_price=435.0)]
     client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
@@ -1523,8 +1525,27 @@ def test_submit_or_resize_stop_order_with_retry_supports_a_fractional_topup_incr
     order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 10.7, 435.0, sleep_fn=_no_sleep)
 
     assert order is not None
-    assert abs(qty_submitted - 5.45) < 1e-9
+    assert qty_submitted == 5  # math.floor(5.45), matching the submitted order (FOURTH-bug fix)
     assert client.submitted_orders[0].qty == 5  # floor(5.45), per the fractional-GTC fix
+
+
+def test_submit_or_resize_stop_order_with_retry_topup_reports_floored_increment():
+    # 2026-08-28 FOURTH bug: the TOP-UP branch returned the raw unfloored
+    # `increment` as qty_submitted (fill_listener.py reports it verbatim
+    # in Telegram), producing an impossible "qty 1.5" from a flooring
+    # operation. total_protected=1.0, cumulative qty=2.5 -> increment 1.5;
+    # qty_submitted must be math.floor(1.5) == 1, matching the actually-
+    # submitted (already-correctly-floored) order.
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=1.0, stop_price=435.0)]
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
+
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 2.5, 435.0, sleep_fn=_no_sleep)
+
+    assert order.id == "stop-2"
+    assert qty_submitted == 1  # math.floor(1.5), NOT 1.5
+    assert len(client.submitted_orders) == 1
+    assert client.submitted_orders[0].qty == 1  # order itself was already correctly floored
 
 
 def test_submit_or_resize_stop_order_with_retry_topup_increment_below_one_share_is_a_silent_noop(captured_telegram_messages):

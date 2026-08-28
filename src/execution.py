@@ -1235,7 +1235,7 @@ def submit_or_resize_stop_order_with_retry(
     order = submit_stop_order_with_retry(
         trading_client, symbol, increment, stop_price, backoff_seconds=backoff_seconds, sleep_fn=sleep_fn,
     )
-    return order, (increment if order is not None else 0.0)
+    return order, (math.floor(increment) if order is not None else 0.0)
 
 
 def replace_stop_order_if_favorable(trading_client: TradingClient, stop_order_id, candidate_stop_price: float, current_stop_price: float) -> bool:
