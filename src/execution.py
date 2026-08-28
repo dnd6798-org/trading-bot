@@ -360,6 +360,7 @@ notional_pct_of_equity, see that function's docstring) is unrelated to
 the ledger; both just landed in the same milestone.
 """
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -1085,13 +1086,40 @@ def submit_stop_order_with_retry(
     NOT folded into generic error handling. Returns the stop Order on
     success, or None if every attempt failed (caller must NOT treat None
     as "no stop needed" — it means the position is unprotected).
+
+    FRACTIONAL-QTY / GTC LIMITATION (2026-08-28 finding, confirmed via a
+    real API error: APIError 42210000, "stop/stop_limit fractional GTC
+    orders are not enabled"). Alpaca rejects a GTC stop order with a
+    fractional qty outright — fractional stops are DAY-only on Alpaca's
+    platform, structurally, not a config toggle. Track B entry sizing
+    always yields a fractional qty (submit_entry_and_stop() rounds to
+    4dp — that stays unchanged, it must not affect backtest fidelity).
+    `qty` is therefore FLOORED to a whole share here before every
+    submission attempt. Accepted, documented consequence (do NOT try to
+    eliminate it — it is an intentional bounded risk, in the same spirit
+    as RECONCILE_EPSILON and the top-up model's accepted multi-stop
+    state): a position may carry up to one whole share of notional value
+    with no resting GTC stop (the fractional remainder below the floored
+    count). If the floored qty is <= 0 (a sub-1-share position) no
+    submission is attempted at all — retrying a rejection that can never
+    succeed just burns the retry budget — and the URGENT alert fires
+    immediately instead.
     """
+    floored_qty = math.floor(qty)
+    if floored_qty <= 0:
+        telegram_bot.send_message(
+            f"URGENT — UNPROTECTED POSITION: {symbol}'s position size ({qty} shares) is below 1 whole share — "
+            f"Alpaca does not support fractional-quantity GTC stop orders, so no resting stop can be submitted "
+            f"for this position at all. Manual intervention required immediately."
+        )
+        return None
+
     last_error = None
     for delay in (0,) + tuple(backoff_seconds):
         if delay:
             sleep_fn(delay)
         try:
-            return submit_stop_order(trading_client, symbol, qty, stop_price)
+            return submit_stop_order(trading_client, symbol, floored_qty, stop_price)
         except Exception as exc:  # noqa: BLE001 — must never crash the caller, this IS the alerting path
             last_error = exc
     telegram_bot.send_message(
@@ -1193,7 +1221,15 @@ def submit_or_resize_stop_order_with_retry(
 
     total_protected = _sum_resting_stop_qty(trading_client, symbol)
     increment = qty - total_protected
-    if increment <= _MIN_TOPUP_QTY:
+    # A top-up increment below one whole share is a SILENT no-op (no
+    # alert): once the whole-share portion of a position is protected
+    # (submit_stop_order_with_retry() floors GTC stop qtys — the
+    # 2026-08-28 fractional-GTC finding), the residual fractional
+    # remainder is a permanent <1-share increment that must not trigger
+    # an alert storm on every redelivered event. math.floor(...) <= 0
+    # also subsumes the old _MIN_TOPUP_QTY floating-point-noise guard
+    # (floor of a tiny positive number is 0 too).
+    if math.floor(increment) <= 0:
         return _find_resting_stop_order(trading_client, symbol), 0.0
 
     order = submit_stop_order_with_retry(

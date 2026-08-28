@@ -680,6 +680,35 @@ def test_submit_stop_order_with_retry_exhausts_all_attempts_fires_urgent_alert_a
     assert "SPY" in alert
 
 
+def test_submit_stop_order_with_retry_floors_a_fractional_qty_before_submitting(captured_telegram_messages):
+    # 2026-08-28 fractional-GTC fix: Alpaca rejects fractional-qty GTC
+    # stop orders, so the qty must be floored to a whole share.
+    client = FakeTradingClient()
+    client.submit_order_fn = lambda req: FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    order = submit_stop_order_with_retry(client, "SPY", 4.73, 435.0, sleep_fn=_no_sleep)
+
+    assert order is not None
+    assert len(client.submitted_orders) == 1
+    assert client.submitted_orders[0].qty == 4  # floor(4.73), not 4.73
+    assert captured_telegram_messages == []
+
+
+def test_submit_stop_order_with_retry_qty_below_one_share_alerts_without_any_submission(captured_telegram_messages):
+    client = FakeTradingClient()
+    client.submit_order_fn = lambda req: (_ for _ in ()).throw(AssertionError("must not submit for a sub-1-share qty"))
+
+    order = submit_stop_order_with_retry(client, "SPY", 0.6, 435.0, sleep_fn=_no_sleep)
+
+    assert order is None
+    assert client.submitted_orders == []  # no submission attempt at all
+    assert len(captured_telegram_messages) == 1
+    alert = captured_telegram_messages[0]
+    assert "URGENT" in alert and "UNPROTECTED" in alert and "SPY" in alert
+    assert "below 1 whole share" in alert
+    assert "0.6 shares" in alert  # references the original fractional qty
+
+
 # --- submit_entry_and_stop: full per-candidate flow -------------------------
 
 def _approved_decision(risk_pct=1.0):
@@ -1461,9 +1490,12 @@ def test_submit_or_resize_stop_order_with_retry_tops_up_with_an_additive_stop_fo
 
 
 def test_submit_or_resize_stop_order_with_retry_supports_a_fractional_topup_increment():
-    # This is the direct proof the fix-up actually resolves the original
-    # ReplaceOrderRequest.qty=Optional[int] limitation: a fractional
-    # increment must now succeed, not fail toward alert.
+    # A fractional top-up increment >= 1 whole share still succeeds (not
+    # fail-toward-alert) — but the 2026-08-28 fractional-GTC fix floors
+    # the SUBMITTED qty to a whole share (Alpaca rejects fractional GTC
+    # stops). The returned qty_submitted stays the true increment (5.45);
+    # the submitted order carries floor(5.45) = 5. The <1-share residual
+    # gap is the accepted, documented consequence of that fix.
     client = FakeTradingClient()
     client.orders_by_request = lambda filter: [FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=5.25, stop_price=435.0)]
     client.submit_order_fn = lambda req: FakeOrder(id="stop-2", status=OrderStatus.NEW, stop_price=req.stop_price, qty=req.qty)
@@ -1472,7 +1504,27 @@ def test_submit_or_resize_stop_order_with_retry_supports_a_fractional_topup_incr
 
     assert order is not None
     assert abs(qty_submitted - 5.45) < 1e-9
-    assert abs(client.submitted_orders[0].qty - 5.45) < 1e-9
+    assert client.submitted_orders[0].qty == 5  # floor(5.45), per the fractional-GTC fix
+
+
+def test_submit_or_resize_stop_order_with_retry_topup_increment_below_one_share_is_a_silent_noop():
+    # 2026-08-28 fractional-GTC fix, point 5: once the whole-share
+    # portion is protected, a residual <1-share top-up increment
+    # (total_protected=4, cumulative fill=4.3 -> increment 0.3) must be a
+    # SILENT no-op — no submission, no alert — matching the function's
+    # existing "genuine no-op" contract (existing resting stop returned,
+    # qty_submitted == 0.0). Without this it would alert-storm on every
+    # redelivered event for a fractionally-filled position.
+    resting = FakeOrder(id="stop-1", symbol="SPY", status=OrderStatus.NEW, order_type=OrderType.STOP, qty=4.0, stop_price=435.0)
+    client = FakeTradingClient()
+    client.orders_by_request = lambda filter: [resting]
+    client.submit_order_fn = lambda req: (_ for _ in ()).throw(AssertionError("must not submit for a sub-1-share increment"))
+
+    order, qty_submitted = submit_or_resize_stop_order_with_retry(client, "SPY", 4.3, 435.0, sleep_fn=_no_sleep)
+
+    assert order is resting
+    assert qty_submitted == 0.0
+    assert client.submitted_orders == []
 
 
 def test_submit_or_resize_stop_order_with_retry_exhausts_retries_and_alerts_on_topup_failure(captured_telegram_messages):
