@@ -3445,6 +3445,48 @@ open orders.
 (413/413), pushed (`ff27464`), deployed, and live-retested clean. No
 remaining open items for this bug.
 
+**PROCESS NOTE (2026-09-02, claude.ai session, spec v73 §10.43): the Bug
+5 CLAUDE.md commit hash reported at the end of the previous session
+(`100f846bc1539e663acdeb62b61bc6d6ab4ff075`) was initially NOT found on
+`origin/paper`** when checked via the GitHub API. Investigation found the
+commit existed locally but had not yet been pushed at the moment it was
+reported. Once the push was confirmed, the hash was re-verified and now
+matches `origin/paper` `HEAD` exactly (message and diff both
+independently confirmed: `CLAUDE.md` only, 29 additions/9 deletions). No
+corrective action needed beyond this note — flagged as a "committed but
+not yet pushed at time of reporting" gap for the record, per RULES.md's
+distinct-states principle (§4: "pushed" and "deployed" — and, by the same
+logic, "committed" and "pushed" — are different facts, neither assertable
+without checking the other).
+
+**Track C: the mandatory ledger-integrity reconcile for the 2026-09-01
+fills (XLE, XLK, XLV) is now CONFIRMED CLEAN (spec v73 §10.43).**
+Performed by directly calling the real `run_track_c_execution_job()`
+against the live trading client (not a separate ad-hoc script), after
+confirming pre-run state: `track_c_pending_state.json` genuinely
+contained `["XLE", "XLK", "XLV"]` in `pending_reconcile_symbols`, and no
+Track C halt file existed. Result: `step_2b.reconciled` showed all three
+symbols with `matched: true`, `halted_track_c: false` — ledger-tracked
+holdings (XLE 154.82179904, XLK 54.561957767, XLV 58.254980775 shares)
+agreed exactly with Alpaca's actual combined positions.
+`track_c_ledger_start == track_c_ledger_end` (no fills during this run,
+as expected for a non-rebalance-day no-op check). `rebalance_day: false`,
+`errors: []`. Verified independently via a direct `cat` of
+`track_c_pending_state.json` on the droplet (not just the run_log's
+self-report): `pending_reconcile_symbols` is now genuinely empty.
+
+**Both preconditions for Track C systemd unit installation (clean manual
+rebalance, clean mandatory reconcile) are now satisfied.** The units
+(`deploy/systemd/trading-bot-track-c.service`/`.timer`) themselves have
+NOT yet been installed/enabled on the droplet — that remains the next
+concrete action, queued for a future session.
+
+**Droplet housekeeping only, no code/config implication:** an
+unexplained `.env.bak` file was found on the droplet this session,
+investigated (timestamp + diff traced it to a stale pre-2026-08-25
+backup predating the Healthchecks.io switch and `LOG_LEVEL` config),
+confirmed unreferenced in any code via grep, and removed.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
