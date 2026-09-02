@@ -997,6 +997,7 @@ _GENUINELY_TERMINAL_NO_FILL = {
     OrderStatus.DONE_FOR_DAY, OrderStatus.STOPPED,
 }
 _STOP_RETRY_BACKOFF_SECONDS = (5, 15, 30)
+_WASH_TRADE_ERROR_CODE = 40310000  # Alpaca: "potential wash trade detected... opposite side market/stop order exists"
 
 
 def submit_entry_market_order(trading_client: TradingClient, symbol: str, qty: float, client_order_id: str | None = None):
@@ -1077,6 +1078,7 @@ def submit_stop_order(trading_client: TradingClient, symbol: str, qty: float, st
 def submit_stop_order_with_retry(
     trading_client: TradingClient, symbol: str, qty: float, stop_price: float,
     backoff_seconds=_STOP_RETRY_BACKOFF_SECONDS, sleep_fn=time.sleep,
+    wash_trade_poll_timeout_seconds=60,
 ):
     """
     A filled position with no resting stop is this system's single
@@ -1104,6 +1106,15 @@ def submit_stop_order_with_retry(
     submission is attempted at all — retrying a rejection that can never
     succeed just burns the retry budget — and the URGENT alert fires
     immediately instead.
+
+    WASH-TRADE-DURING-PARTIAL-FILL FIX (2026-09-02 finding, real
+    production incident, spec v70 §10.40) — see the inline comment at the
+    `except APIError` branch below for the full incident/root-cause
+    detail. `wash_trade_poll_timeout_seconds` (default 60, matching the
+    entry flow's own `poll_order_until_terminal()` default) exists purely
+    so tests can exercise the "the still-open BUY order never reaches
+    terminal" fallback path quickly, without a real 60-second wait — real
+    callers should never need to override it.
     """
     floored_qty = math.floor(qty)
     if floored_qty <= 0:
@@ -1115,11 +1126,48 @@ def submit_stop_order_with_retry(
         return None
 
     last_error = None
+    skip_next_backoff_sleep = False
     for delay in (0,) + tuple(backoff_seconds):
-        if delay:
+        if delay and not skip_next_backoff_sleep:
             sleep_fn(delay)
+        skip_next_backoff_sleep = False
         try:
             return submit_stop_order(trading_client, symbol, floored_qty, stop_price)
+        except APIError as exc:
+            last_error = exc
+            # 2026-09-02 finding (real production incident, spec v70
+            # §10.40): Alpaca delivers partial_fill events progressively
+            # as an entry BUY order fills in increments. Each one triggers
+            # an immediate protective-stop submission attempt (this
+            # function, via the top-up model) while the parent BUY order
+            # may still be PARTIALLY_FILLED — Alpaca's wash-trade guard
+            # correctly rejects the new opposite-side SELL stop in that
+            # state (APIError code 40310000, "potential wash trade
+            # detected... opposite side market/stop order exists"). The
+            # generic fixed backoff below has no way to distinguish this
+            # specific, checkable, waitable condition from an unknown
+            # failure — real incident (order bd9172ef-6d39-4427-8e75-
+            # eb56a915d594) only self-resolved via luck (an independent
+            # redelivered event through a different call path), not by
+            # design. Fix: on this exact code, wait for the still-open BUY
+            # order to reach a terminal status (the same bounded, 60s
+            # poll_order_until_terminal() the entry flow already uses),
+            # then retry immediately — skipping that iteration's normal
+            # fixed-delay sleep, since the poll itself was the wait. If no
+            # open BUY order is found for the symbol (a different cause),
+            # or the error is any other APIError/code, fall through
+            # UNCHANGED to the existing generic backoff/retry/alert path.
+            if exc.code == _WASH_TRADE_ERROR_CODE:
+                open_buy_orders = trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], side=OrderSide.BUY)
+                )
+                if open_buy_orders:
+                    most_recent_buy = sorted(open_buy_orders, key=lambda o: o.submitted_at, reverse=True)[0]
+                    poll_order_until_terminal(
+                        trading_client, most_recent_buy.id,
+                        timeout_seconds=wash_trade_poll_timeout_seconds, sleep_fn=sleep_fn,
+                    )
+                    skip_next_backoff_sleep = True
         except Exception as exc:  # noqa: BLE001 — must never crash the caller, this IS the alerting path
             last_error = exc
     telegram_bot.send_message(

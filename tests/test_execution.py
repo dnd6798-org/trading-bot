@@ -125,6 +125,21 @@ def _not_found_api_error(client_order_id="some-id"):
     )
 
 
+def _wash_trade_api_error():
+    """
+    Mirrors the EMPIRICALLY CONFIRMED real Alpaca rejection (2026-09-02
+    production incident, order bd9172ef-6d39-4427-8e75-eb56a915d594) that
+    fires when a protective SELL stop is submitted while the parent BUY
+    order is still PARTIALLY_FILLED: APIError code 40310000, "potential
+    wash trade detected... opposite side market/stop order exists".
+    """
+    return APIError(
+        '{"code":40310000,"message":"potential wash trade detected. use '
+        'reject_if_wash_trade in the order to override this behavior.'
+        ' opposite side market/stop order exists","existing_order_id":"buy-1"}'
+    )
+
+
 class FakePosition:
     def __init__(self, symbol, qty, avg_entry_price, market_value):
         self.symbol = symbol
@@ -707,6 +722,114 @@ def test_submit_stop_order_with_retry_qty_below_one_share_alerts_without_any_sub
     assert "URGENT" in alert and "UNPROTECTED" in alert and "SPY" in alert
     assert "below 1 whole share" in alert
     assert "0.6 shares" in alert  # references the original fractional qty
+
+
+# --- submit_stop_order_with_retry: wash-trade rejection during a partial-
+# fill protection attempt (Bug 5, 2026-09-02 real production incident,
+# spec v70 §10.40) -----------------------------------------------------
+
+def test_submit_stop_order_with_retry_polls_open_buy_order_and_retries_immediately_on_wash_trade_rejection(captured_telegram_messages):
+    # Real incident: order bd9172ef-6d39-4427-8e75-eb56a915d594. A
+    # protective-stop attempt hits Alpaca's wash-trade guard while the
+    # parent BUY is still open — must wait for that BUY to go terminal,
+    # then retry immediately (no fixed backoff delay burned on a wait we
+    # already did via polling).
+    attempts = {"n": 0}
+    sleeps = []
+
+    def submit_order(req):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _wash_trade_api_error()
+        return FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    client = FakeTradingClient()
+    client.submit_order_fn = submit_order
+    open_buy_order = FakeOrder(
+        id="buy-1", status=OrderStatus.FILLED,
+        submitted_at=datetime(2026, 9, 2, 13, 33, 58, tzinfo=timezone.utc),
+    )
+    client.orders_by_request = lambda filter: [open_buy_order]
+    client.get_order_by_id_fn = lambda order_id: open_buy_order
+
+    order = submit_stop_order_with_retry(client, "DBC", 519.0, 435.0, sleep_fn=lambda s: sleeps.append(s))
+
+    assert order is not None
+    assert attempts["n"] == 2
+    assert captured_telegram_messages == []  # recovered — no urgent alert needed
+    assert sleeps == []  # the normal first backoff delay (5s) was skipped — the poll was the wait instead
+
+
+def test_submit_stop_order_with_retry_falls_through_to_generic_retry_if_open_buy_order_never_reaches_terminal(captured_telegram_messages):
+    # The still-open BUY order never resolves within the poll's bounded
+    # timeout (wash_trade_poll_timeout_seconds=0 here, purely for test
+    # speed — see the function's own docstring for why this parameter
+    # exists) — must not hang indefinitely; falls through to (and
+    # eventually exhausts) the existing generic backoff/retry/alert path.
+    client = FakeTradingClient()
+    client.submit_order_fn = lambda req: (_ for _ in ()).throw(_wash_trade_api_error())
+    open_buy_order = FakeOrder(
+        id="buy-1", status=OrderStatus.NEW,  # never terminal, never partially-filled
+        submitted_at=datetime(2026, 9, 2, 13, 30, 0, tzinfo=timezone.utc),
+    )
+    client.orders_by_request = lambda filter: [open_buy_order]
+    client.get_order_by_id_fn = lambda order_id: open_buy_order
+
+    order = submit_stop_order_with_retry(
+        client, "DBC", 519.0, 435.0, backoff_seconds=(0, 0), sleep_fn=_no_sleep,
+        wash_trade_poll_timeout_seconds=0,
+    )
+
+    assert order is None
+    assert len(client.submitted_orders) == 3  # initial attempt + 2 backoff retries, all rejected the same way
+    assert len(captured_telegram_messages) == 1
+    alert = captured_telegram_messages[0]
+    assert "URGENT" in alert and "UNPROTECTED" in alert and "DBC" in alert
+
+
+def test_submit_stop_order_with_retry_wash_trade_error_with_no_open_buy_order_falls_through_unchanged(captured_telegram_messages):
+    # No open BUY order found for the symbol implies a different cause —
+    # must NOT poll (would be polling the wrong thing, or nothing) and
+    # must fall through to the existing, unmodified backoff schedule.
+    sleeps = []
+    client = FakeTradingClient()
+    client.submit_order_fn = lambda req: (_ for _ in ()).throw(_wash_trade_api_error())
+    client.orders_by_request = lambda filter: []  # no open BUY order found for this symbol
+    client.get_order_by_id_fn = lambda order_id: (_ for _ in ()).throw(
+        AssertionError("must not poll when no open BUY order was found")
+    )
+
+    order = submit_stop_order_with_retry(
+        client, "DBC", 519.0, 435.0, backoff_seconds=(5, 15), sleep_fn=lambda s: sleeps.append(s),
+    )
+
+    assert order is None
+    assert len(client.submitted_orders) == 3  # initial attempt + 2 backoff retries
+    assert sleeps == [5, 15]  # the normal fixed-delay backoff was NOT skipped
+    assert len(captured_telegram_messages) == 1
+
+
+def test_submit_stop_order_with_retry_other_api_error_code_falls_through_unchanged(captured_telegram_messages):
+    # A DIFFERENT APIError code (not the wash-trade 40310000) must not
+    # trigger the poll-then-retry branch at all — same unchanged fixed
+    # backoff as any other failure.
+    sleeps = []
+    client = FakeTradingClient()
+    client.submit_order_fn = lambda req: (_ for _ in ()).throw(
+        APIError('{"code":42210000,"message":"stop/stop_limit fractional GTC orders are not enabled"}')
+    )
+    client.orders_by_request = lambda filter: (_ for _ in ()).throw(
+        AssertionError("must not query open orders for a non-wash-trade APIError")
+    )
+
+    order = submit_stop_order_with_retry(
+        client, "DBC", 519.0, 435.0, backoff_seconds=(5, 15), sleep_fn=lambda s: sleeps.append(s),
+    )
+
+    assert order is None
+    assert len(client.submitted_orders) == 3
+    assert sleeps == [5, 15]
+    assert len(captured_telegram_messages) == 1
 
 
 # --- submit_entry_and_stop: full per-candidate flow -------------------------
