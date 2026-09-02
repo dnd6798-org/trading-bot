@@ -3315,8 +3315,8 @@ cumulative 2.5) reports `qty_submitted == 1` while the submitted order
 carries the correct floored qty 1.
 
 **FIFTH BUG FOUND (2026-09-02, real production incident) — fix design
-LOCKED (spec v70 §10.40), IMPLEMENTED, PUSHED, and DEPLOYED to the
-droplet (live-retest still pending — see UPDATE below).** A real Track B
+LOCKED (spec v70 §10.40), IMPLEMENTED, PUSHED, DEPLOYED, and LIVE-
+RETESTED CLEAN. CLOSED, no remaining open items.** A real Track B
 DBC
 entry (519.625 shares, order `bd9172ef-6d39-4427-8e75-eb56a915d594`,
 terminal FILLED at 2026-09-02 13:33:58.404939 UTC) produced two genuine
@@ -3417,13 +3417,33 @@ with prior normal operating range. **All four states — implemented,
 tested, pushed, deployed — independently verified, not inferred from one
 another.**
 
-**Not yet done: a live retest against the real paper account**, using a
-deliberately-constructed wash-trade scenario (a real limit order held
-open to force the rejection deterministically, rather than waiting for a
-natural partial-fill occurrence) — planned for a follow-up session, per
-claude.ai's design. Until that runs, this fix is deployed but not yet
-observed to correctly self-heal a real wash-trade rejection live; the
-409->413 unit tests are the only evidence of correctness so far.
+**UPDATE: live retest against the real paper account — CONFIRMED
+CLEAN (claude.ai session, droplet-side, guided live, 2026-09-02 during
+market hours, spec v72 §10.42).** Symbol: VNQ (chosen for zero
+pre-existing Track B position, and deliberately not AGG, to avoid
+crossing into the Track-C-shared-symbol ledger logic). A real market BUY
+(1 share VNQ, filled at avg $95.80) was followed by a real BUY limit
+order (1 share VNQ @ $70.00) submitted and deliberately left open as the
+wash-trade trigger; a background thread cancelled that limit order after
+8 seconds, mid-poll. `submit_stop_order_with_retry()` — the real
+production function, no mocks — was called directly with a custom
+`sleep_fn` logging every sleep call. **Result: stop order
+`b3b4820a-a1d0-463c-8df7-0cecc30fa35e` submitted successfully,
+`PENDING_NEW`, `stop_price=85`.** The sleep log was exactly `[5, 5]`
+seconds — the constant wash-trade poll interval, NOT the fixed backoff
+schedule `[5, 15, 30]` — the mechanism-level proof the wash-trade branch
+(`poll_order_until_terminal()` inside `submit_stop_order_with_retry()`)
+actually executed, not just that a stop eventually got submitted via some
+other path; no fixed-backoff sleep was consumed after the wash-trade
+recovery, confirming `skip_next_backoff_sleep` worked as designed.
+Cleanup confirmed complete the same session: resting stop cancelled, 1
+share VNQ sold back to flat at avg $95.80 (identical to entry price, zero
+realized P&L impact), final position check confirmed VNQ flat with no
+open orders.
+
+**Bug 5 is now fully CLOSED on the Track B track** — implemented, tested
+(413/413), pushed (`ff27464`), deployed, and live-retested clean. No
+remaining open items for this bug.
 
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
