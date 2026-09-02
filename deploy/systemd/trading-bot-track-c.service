@@ -13,7 +13,7 @@
 [Unit]
 Description=Trading bot - Track C DMSR rebalance job (one-shot, self-gates to monthly)
 Wants=network-online.target
-After=network-online.target
+After=network-online.target trading-bot-daily.service
 
 [Service]
 Type=oneshot
