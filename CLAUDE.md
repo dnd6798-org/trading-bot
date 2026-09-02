@@ -3487,6 +3487,37 @@ investigated (timestamp + diff traced it to a stale pre-2026-08-25
 backup predating the Healthchecks.io switch and `LOG_LEVEL` config),
 confirmed unreferenced in any code via grep, and removed.
 
+**UPDATE (2026-09-02, claude.ai session, spec/playbook v74): Track C
+systemd unit installation is PAUSED pending a one-line ordering fix,
+found during pre-installation re-verification, not yet applied.** Before
+installing the Track C systemd units on the droplet, claude.ai
+re-verified `deploy/systemd/trading-bot-track-c.service` and
+`deploy/systemd/trading-bot-track-c.timer` directly against `origin/paper`
+`HEAD` (`100f846bc1539e663acdeb62b61bc6d6ab4ff075`) via the GitHub MCP,
+alongside the already-deployed `trading-bot-daily.service`/`.timer` for
+comparison.
+
+1. Paths, user, and group in `trading-bot-track-c.service` are correct
+   and consistent with the deployed Track B units
+   (`WorkingDirectory=/opt/trading-bot`,
+   `EnvironmentFile=/opt/trading-bot/.env`, `User=tradingbot`,
+   `Group=tradingbot`). No path drift.
+2. `trading-bot-track-c.timer`'s `OnCalendar` (`Mon..Fri *-*-* 17:00:00
+   America/New_York`) is identical to `trading-bot-daily.timer`'s
+   schedule. The timer file's own header comment had already flagged
+   this as a race on shared AGG ledger bookkeeping between Track B's
+   daily job and a mid-rebalance Track C job, and had deferred the fix
+   to "once a droplet-side decision is made." **That decision is now
+   made: add `After=trading-bot-daily.service` to
+   `trading-bot-track-c.service`'s `[Unit]` section** (an ordering
+   dependency, not a timer offset — deterministic regardless of either
+   job's actual runtime on a given day, unlike a fixed time buffer).
+
+**Not yet implemented — a task brief for this specific one-line fix
+follows separately.** Track C systemd unit installation on the droplet
+remains paused until that fix is implemented, committed, pushed, and
+confirmed.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
