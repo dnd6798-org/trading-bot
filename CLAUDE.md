@@ -3315,7 +3315,9 @@ cumulative 2.5) reports `qty_submitted == 1` while the submitted order
 carries the correct floored qty 1.
 
 **FIFTH BUG FOUND (2026-09-02, real production incident) — fix design
-LOCKED (spec v70 §10.40), NOT YET IMPLEMENTED.** A real Track B DBC
+LOCKED (spec v70 §10.40), IMPLEMENTED, PUSHED, and DEPLOYED to the
+droplet (live-retest still pending — see UPDATE below).** A real Track B
+DBC
 entry (519.625 shares, order `bd9172ef-6d39-4427-8e75-eb56a915d594`,
 terminal FILLED at 2026-09-02 13:33:58.404939 UTC) produced two genuine
 `URGENT — UNPROTECTED POSITION` Telegram alerts (qty 135, then qty 162,
@@ -3367,8 +3369,61 @@ path in the codebase routes through (`fill_listener.py`'s
    are completely unchanged.
 
 Full write-up is in spec v70 §10.40 (chat-interface-only file, not
-available to this repo's session). **Status: DESIGNED AND LOCKED, NOT
-YET IMPLEMENTED — implementation brief pending.**
+available to this repo's session).
+
+**UPDATE: IMPLEMENTED — committed as `ff27464` on `paper`, pushed to
+`origin/paper` (confirmed local `HEAD` == `origin/paper` after push, no
+force needed).** `submit_stop_order_with_retry()`
+(`src/execution.py`) — the single shared choke point every stop-
+submission path in the codebase routes through
+(`protect_unprotected_fills()`, `submit_or_resize_stop_order_with_
+retry()`'s two branches, and `submit_entry_and_stop()`, confirmed via
+grep before implementing, not assumed) — now branches on `APIError` with
+`.code == 40310000` exactly as locked: queries `GetOrdersRequest(status=
+QueryOrderStatus.OPEN, symbols=[symbol], side=OrderSide.BUY)`, and if any
+found, polls the most-recently-submitted one (same `submitted_at`-
+descending sort convention `_find_resting_stop_order()` already uses) via
+the existing `poll_order_until_terminal()`, then retries immediately —
+skipping that iteration's fixed-delay sleep via a new `skip_next_
+backoff_sleep` flag. No open BUY order found, or any other exception/
+code, falls through byte-for-byte unchanged to the pre-existing backoff/
+retry/alert path. One small, flagged testability addition beyond the 4
+locked points: a new `wash_trade_poll_timeout_seconds=60` kwarg (default
+matches the previously-hardcoded value exactly, so no real caller's
+behavior changes) — added because the internal poll call had no way to
+be tested against a non-terminal order without a real 60-second wait.
+`floor_qty` behavior, the URGENT-alert text, and the return contract are
+all confirmed untouched by the diff. 4 new tests in
+`tests/test_execution.py` (poll-then-immediate-retry succeeds once the
+injected BUY order goes terminal, asserting zero sleeps recorded; a BUY
+order stuck at `NEW` forever still exhausts the existing retry budget and
+alerts rather than hanging, using the new timeout kwarg to keep the test
+fast; a wash-trade error with no matching open BUY order falls through
+with the normal fixed sleeps un-skipped; a different APIError code never
+even queries `get_orders()`) — plus the 5 pre-existing `submit_stop_
+order_with_retry` tests (transient-failure recovery, total-exhaustion
+alert, fractional-qty flooring, sub-1-share alert) rerun and confirmed
+still passing unmodified. **Full suite 409 -> 413 passing.**
+
+**UPDATE: droplet deployment CONFIRMED, independently of push state, per
+RULES.md §4.** `git log -1 --oneline` on the droplet (as `tradingbot`):
+`ff27464 (HEAD -> paper, origin/paper, origin/HEAD)` — matches
+`origin/paper` exactly. `trading-bot-listener.service` (the long-running
+process that imports `execution.py`, and therefore does NOT pick up new
+code from a `git pull` alone until restarted) was manually restarted;
+confirmed stable 24+ seconds post-restart — active/running, no crash, no
+traceback or import error in `journalctl`, memory (104.5M) consistent
+with prior normal operating range. **All four states — implemented,
+tested, pushed, deployed — independently verified, not inferred from one
+another.**
+
+**Not yet done: a live retest against the real paper account**, using a
+deliberately-constructed wash-trade scenario (a real limit order held
+open to force the rejection deterministically, rather than waiting for a
+natural partial-fill occurrence) — planned for a follow-up session, per
+claude.ai's design. Until that runs, this fix is deployed but not yet
+observed to correctly self-heal a real wash-trade rejection live; the
+409->413 unit tests are the only evidence of correctness so far.
 
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
