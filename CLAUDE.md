@@ -3314,6 +3314,62 @@ New test: a fractional top-up increment of 1.5 (total_protected 1.0,
 cumulative 2.5) reports `qty_submitted == 1` while the submitted order
 carries the correct floored qty 1.
 
+**FIFTH BUG FOUND (2026-09-02, real production incident) — fix design
+LOCKED (spec v70 §10.40), NOT YET IMPLEMENTED.** A real Track B DBC
+entry (519.625 shares, order `bd9172ef-6d39-4427-8e75-eb56a915d594`,
+terminal FILLED at 2026-09-02 13:33:58.404939 UTC) produced two genuine
+`URGENT — UNPROTECTED POSITION` Telegram alerts (qty 135, then qty 162,
+both citing Alpaca error code `40310000`, "potential wash trade
+detected... opposite side market/stop order exists", `existing_order_id`
+= the BUY order itself) before self-resolving via two independent
+`fill_listener` protections (qty 162 + qty 357 = 519, correctly
+`floor(519.625)`) shortly after the BUY reached terminal status.
+
+**Root cause, confirmed via direct order-history inspection against the
+real paper account:** Alpaca delivered `partial_fill` WebSocket events
+progressively as the BUY order filled in increments — exactly the
+scenario the existing top-up model
+(`submit_or_resize_stop_order_with_retry()`) already exists to handle.
+Each `partial_fill` event triggered an immediate protective-stop
+submission attempt WHILE the parent BUY order was still
+`PARTIALLY_FILLED` (non-terminal) — Alpaca's wash-trade guard correctly
+rejected the new opposite-side SELL stop in that state, citing the
+still-active BUY order. Once the BUY reached terminal FILLED status, the
+guard cleared and later events succeeded. The bug:
+`submit_stop_order_with_retry()`'s existing fixed backoff (0, 5, 15, 30s
+≈ 50s total) has no way to distinguish this specific, checkable,
+waitable condition from a generic unknown failure — this incident only
+self-resolved via luck (an independent redelivered event through a
+different call path), not by design.
+
+**Locked fix design (architecture decision made in claude.ai, per
+RULES.md §3):** modify `submit_stop_order_with_retry()` in
+`src/execution.py` — the single shared choke point every stop-submission
+path in the codebase routes through (`fill_listener.py`'s
+`submit_or_resize_stop_order_with_retry()`, and `execution.py`'s own
+`submit_entry_and_stop()`/`protect_unprotected_fills()` paths).
+1. On catching an `APIError` with `.code == 40310000` specifically
+   (separate from the existing generic `except Exception` catch-all) —
+   BEFORE consuming the next fixed-backoff delay — query Alpaca for any
+   still-OPEN order on `symbol` with `side=BUY` (reuse the existing
+   `GetOrdersRequest`/`QueryOrderStatus.OPEN` pattern already used
+   elsewhere in this file, e.g. `_find_resting_stop_order()`).
+2. If such an order exists, wait for it to reach a terminal status via
+   the already-existing `poll_order_until_terminal()` (bounded, 60s
+   timeout, matching the entry flow's own default), then retry the stop
+   submission immediately (the poll itself is the wait — no additional
+   fixed sleep needed after it).
+3. If no open BUY order is found for the symbol (edge case, implies a
+   different cause), fall through UNCHANGED to the existing generic
+   backoff/retry/alert behavior.
+4. Every other exception type, the floor-to-whole-share behavior
+   (FIXes 1/3/4 above), and the URGENT-alert-on-total-failure behavior
+   are completely unchanged.
+
+Full write-up is in spec v70 §10.40 (chat-interface-only file, not
+available to this repo's session). **Status: DESIGNED AND LOCKED, NOT
+YET IMPLEMENTED — implementation brief pending.**
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
