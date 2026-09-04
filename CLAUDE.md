@@ -5673,6 +5673,54 @@ cleared, but this is now a real, adequately-sampled result, not a
 sizing-floor or slippage-calibration artifact. No adopt/reject verdict
 rendered — decision on Track C's put credit spread deferred to the user.
 
+## Session update (claude.ai, 2026-09-04 — spec/playbook v76)
+
+**Monitoring/alerting redesign: Tier 1 build items locked; Tier 2
+explicitly NOT started.** Continues the two open items flagged at the end
+of the v75 session (Track C heartbeat gap, broader monitoring/alerting
+redesign).
+
+**Track C Healthchecks.io heartbeat gap — resolved as a pure ops action,
+zero code needed.** `get_track_c_heartbeat_config()`, `send_track_c_
+heartbeat()`, and `.env.example`'s `HEALTHCHECKS_TRACK_C_HEARTBEAT_URL`
+placeholder were all already fully built and deployed (confirmed by
+direct code read in the claude.ai session, not assumed). The user is
+creating the Healthchecks.io monitor and adding the real URL to the
+droplet's `.env` directly — droplet-side/account-side action, not a
+Claude Code task.
+
+**Two new Tier 1 build items LOCKED this session, NOT yet implemented —
+a milestone brief is coming in a following message:**
+(a) Telegram alerts on `trading-bot-listener.service` start/stop, via new
+    systemd `ExecStartPost`/`ExecStopPost` hooks calling a new
+    `scripts/service_alert.py` — reuses `src/telegram_bot.send_message()`
+    unchanged, no new alerting mechanism.
+(b) A new daily Telegram digest via new `trading-bot-digest.service`/
+    `.timer` + new `src/daily_digest.py`.
+
+**Tier 2 (headless Claude Code with standing droplet SSH access for
+autonomous log diagnosis) was discussed but deliberately NOT locked or
+briefed this session — do not start any work on this.** Architecture
+direction only, recorded for continuity: an externally-triggered
+(Windows Task Scheduler — Claude Code has no native cron/scheduling
+feature) headless `claude -p` run, scoped by a strict read-only
+`--allowedTools` allowlist (no git push/commit, no `systemctl restart`,
+no order-submission-adjacent commands), producing a draft diagnosis for
+human/claude.ai review — never self-remediating. The exact
+`--allowedTools` syntax still needs verification before this becomes
+buildable — that verification is flagged as a future claude.ai-session
+opener, not started here.
+
+**Locked boundary reaffirmed (unchanged, restated for continuity): order
+submission, position sizing, guardrail numbers, and strategy logic remain
+permanently human/claude.ai-gated**, regardless of what Tier 2 eventually
+becomes.
+
+No code was written this session — this is a decision record only, per
+this file's own "update whenever a real decision is made" rule. The
+Tier 1 milestone brief (items a/b above) is expected as the next message
+in this session.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
