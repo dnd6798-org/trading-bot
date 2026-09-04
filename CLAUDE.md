@@ -3518,6 +3518,46 @@ follows separately.** Track C systemd unit installation on the droplet
 remains paused until that fix is implemented, committed, pushed, and
 confirmed.
 
+## Session update (claude.ai, 2026-09-02/03/04 — spec/playbook v75)
+
+**Track C systemd unit installation is now fully CLOSED and live-fire
+verified.** Commit `83e2031` (the `After=trading-bot-daily.service` fix)
+was diff-verified, pulled to the droplet (confirmed via `git log -1`
+matching `origin/paper` HEAD), installed to `/etc/systemd/system/`,
+enabled via `systemctl enable --now trading-bot-track-c.timer`, and
+confirmed active with both timers correctly set to fire at the same
+instant (2026-09-03 21:00:00 UTC) — the exact race scenario the fix
+targets.
+
+That firing happened and was verified via `journalctl`:
+`trading-bot-daily.service` ran 21:00:02-21:00:08, and
+`trading-bot-track-c.service` started at 21:00:08 — correctly ordered
+after, not concurrent. Track C correctly identified 2026-09-03 as a
+non-rebalance day, took the no-op branch, ledger unchanged, no errors.
+**The fix works correctly in production on its first real occurrence of
+the race it was designed to prevent. This milestone is closed.**
+
+**Two new open items surfaced this session, NOT yet designed or briefed
+— do not start on these without a locked brief from claude.ai first:**
+1. Track C has no Healthchecks.io heartbeat coverage
+   (`send_track_c_heartbeat` logged `"HEALTHCHECKS_TRACK_C_HEARTBEAT_URL
+   not set — skipping heartbeat ping"` on its first live run). Only
+   Track B currently has dead-man's-switch monitoring.
+2. A broader monitoring/alerting/self-healing redesign was requested and
+   scoped at a high level (not designed) — Tier 1: unconditional
+   Telegram alerts on listener restarts + a daily automated digest;
+   Tier 2: evaluating scheduled/headless Claude Code runs with standing
+   droplet SSH access for autonomous log review and diagnosis. Explicit
+   boundary already agreed: order submission, sizing, and strategy logic
+   remain human/claude.ai-gated always, regardless of what Tier 2
+   becomes. Full design is next session's single topic in claude.ai.
+
+**Also this session (unrelated, investigated per the "unexplained
+service events get investigated" rule): three `trading-bot-listener.
+service` restarts this week were traced and closed** — two to
+unattended-upgrades/needrestart (benign), one to a deliberate manual
+restart with a typo'd unit name corrected. No defect, no action needed.
+
 The Track C backtest artifacts (all backtest-only, no live path): the
 DMSR backtest `scripts/backtest_sector_rotation.py` +
 `tests/test_backtest_sector_rotation.py` (spec v51 §10.21, commit
