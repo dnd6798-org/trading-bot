@@ -5796,6 +5796,27 @@ but the actual droplet install/enable is a separate, later step (same
 "committed ≠ deployed" distinction as every prior systemd-units
 milestone in this file).
 
+**UPDATE (same session, follow-up decision): deviation 2 above is now
+CLOSED, not just documented — committed as `fe7c8c6` on `paper`, pushed
+(confirmed `origin/paper` HEAD matches). `trading-bot-digest.timer`'s
+`OnCalendar=` changed from the literal `Mon..Fri 21:30:00 UTC` to
+`Mon..Fri 17:30:00 America/New_York`, mirroring `trading-bot-daily.
+timer`'s/`trading-bot-track-c.timer`'s existing timezone-relative
+anchoring exactly — eliminates the DST-drift caveat entirely rather than
+just documenting it (no fixed-UTC schedule left to drift against the
+other two jobs' `17:00 America/New_York` slot across EDT/EST). Droplet
+systemd is confirmed 255 (systemd-units milestone droplet-side
+verification, earlier in this file) — comfortably past the `>=239` this
+per-line `OnCalendar=` timezone syntax requires, so no new risk.
+Comment/docstring-only updates alongside in `trading-bot-digest.
+service`, `deploy/systemd/README.md`, and `src/daily_digest.py`'s module
+docstring — no functional code change. Full suite still 434/434,
+reconfirmed after the change. Deviation 1 (`halt_state.load_halt_state()`/
+`load_track_c_halt()` vs. the brief's nonexistent `load_halt()`) is
+unaffected by this update and remains as recorded above — that was a
+naming correction in the original implementation, not something to
+"fix" further.**
+
 Tier 2 remains explicitly not started — see the locked-boundary
 restatement above; nothing in this update changes that.
 
