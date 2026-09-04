@@ -4,19 +4,9 @@
 # shared 17:00 America/New_York post-close slot so both daily jobs have
 # finished first.
 #
-# UPDATE (follow-up decision, same session): the original implementation
-# used a literal, fixed `21:30:00 UTC` OnCalendar= line, which this
-# file's own prior header flagged as only a true 30-minute offset from
-# the other two jobs' timezone-aware `17:00:00 America/New_York` schedule
-# during Eastern Daylight Time — during Eastern Standard Time the digest
-# would have fired 30 minutes BEFORE, not after, the daily jobs it's
-# meant to follow. Resolved by switching to the same
-# `America/New_York`-relative anchoring trading-bot-daily.timer /
-# trading-bot-track-c.timer already use, eliminating the drift entirely
-# rather than just documenting it. Droplet systemd is confirmed 255 (see
-# CLAUDE.md "Current status", systemd-units milestone droplet-side
-# verification) — comfortably past the >=239 this per-line OnCalendar=
-# timezone syntax requires, so no new risk from this change.
+# Anchored to America/New_York, matching trading-bot-daily.timer's and
+# trading-bot-track-c.timer's own anchoring exactly, so the 30-minute
+# offset holds year-round with no DST drift between them.
 #
 # Requires systemd >= 239 for the per-line OnCalendar= timezone suffix —
 # see trading-bot-daily.timer's header for the older-systemd fallback.
