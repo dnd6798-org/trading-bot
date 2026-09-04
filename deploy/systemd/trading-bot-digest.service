@@ -14,10 +14,9 @@
 # (track_positions_state.json, halt_state.json, track_c_halt_state.json)
 # — it does not need either daily job's process to still be running, only
 # for their state to have already been written for the day, which
-# trading-bot-digest.timer's 21:30 UTC slot (30 minutes after both daily
-# jobs' shared 21:00 UTC slot) is intended to guarantee. See
-# trading-bot-digest.timer's own header for a flagged caveat on that
-# 30-minute offset assumption.
+# trading-bot-digest.timer's 17:30 America/New_York slot (30 minutes
+# after both daily jobs' shared 17:00 America/New_York slot, same
+# timezone-relative anchoring, no DST drift) is intended to guarantee.
 [Unit]
 Description=Trading bot - daily automated Telegram digest (one-shot)
 Wants=network-online.target

@@ -12,7 +12,7 @@ Track B/Track C's own daily self-heal already trusts as ground truth
 execution.heal_track_b_ownership_ledger() / track_positions.
 heal_track_c_ownership_ledger(), both of which already run once per
 weekday as part of the daily/track-c jobs before this digest's own
-21:30 UTC slot) — reused directly via track_positions.get_track_qty(),
+17:30 America/New_York slot) — reused directly via track_positions.get_track_qty(),
 per the milestone brief, rather than reimplementing position lookups
 against Alpaca from scratch.
 

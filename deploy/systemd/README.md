@@ -26,12 +26,13 @@ case needed). `trading-bot-digest.service` / `.timer` (also Tier 1) run
 positions per track, halt status, and three sections explicitly flagged
 "not yet available": today's fills, today's errors, listener restart
 count — see `src/daily_digest.py`'s module docstring for why each has no
-real data source yet). The timer fires a literal `21:30:00 UTC`,
-weekdays only — see the `.timer` file's own header for a flagged DST-drift
-caveat versus the other two timers' `America/New_York`-anchored schedule.
-Neither the digest job's units nor the listener's new alert hooks have
-been installed/enabled on the droplet as of this milestone — see
-"Install" below.
+real data source yet). The timer fires `17:30 America/New_York`,
+weekdays only — the same timezone-relative anchoring as the other two
+timers (30 minutes after their shared `17:00 America/New_York` slot),
+not a fixed-UTC schedule, so there's no DST drift between them. Neither
+the digest job's units nor the listener's new alert hooks have been
+installed/enabled on the droplet as of this milestone — see "Install"
+below.
 
 ## Before installing — verify, don't assume
 
