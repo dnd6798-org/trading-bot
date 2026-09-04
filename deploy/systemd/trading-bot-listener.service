@@ -27,6 +27,14 @@ Group=tradingbot
 WorkingDirectory=/opt/trading-bot
 EnvironmentFile=/opt/trading-bot/.env
 ExecStart=/opt/trading-bot/venv/bin/python -m src.fill_listener
+# Tier 1 monitoring redesign (CLAUDE.md "Session update ... 2026-09-04,
+# spec/playbook v76") — Telegram alert on every start/stop/restart of
+# this service via scripts/service_alert.py. Absolute python path (not
+# -m), matching scripts/service_alert.py's own sys.path-insert import
+# convention (scripts/ has no __init__.py). EnvironmentFile above already
+# covers both hooks' access to TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID.
+ExecStartPost=/opt/trading-bot/venv/bin/python /opt/trading-bot/scripts/service_alert.py --event=starting
+ExecStopPost=/opt/trading-bot/venv/bin/python /opt/trading-bot/scripts/service_alert.py --event=stopped
 Restart=always
 RestartSec=10
 StandardOutput=journal

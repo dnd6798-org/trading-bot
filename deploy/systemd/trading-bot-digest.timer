@@ -1,0 +1,34 @@
+# Tier 1 monitoring redesign (CLAUDE.md "Session update ... 2026-09-04,
+# spec/playbook v76") — fires trading-bot-digest.service at 21:30 UTC,
+# weekdays only, per the milestone brief ("30 minutes after Track B/
+# Track C's shared 21:00 UTC slot, so both daily jobs have finished
+# first").
+#
+# FLAGGED, NOT SILENTLY RESOLVED: this is a literal, fixed-UTC schedule —
+# unlike trading-bot-daily.timer / trading-bot-track-c.timer, which are
+# both anchored to `17:00:00 America/New_York` (a timezone-aware
+# OnCalendar= that stays pinned to market close year-round). 17:00
+# America/New_York is 21:00 UTC only during Eastern Daylight Time (UTC-4,
+# roughly mid-March to early November); during Eastern Standard Time
+# (UTC-5), the two daily jobs actually fire at 22:00 UTC, not 21:00. A
+# fixed 21:30 UTC digest slot is therefore only genuinely "30 minutes
+# after" the other two jobs during EDT — during EST it would fire 30
+# minutes BEFORE they run, defeating the ordering this timer exists to
+# guarantee. The milestone brief specified 21:30 UTC literally, so that
+# is what's implemented here — this comment records the DST-drift
+# consequence for a droplet-side/claude.ai decision on whether to switch
+# this to the same `America/New_York`-relative anchoring the other two
+# timers use, rather than silently "fixing" it unbriefed.
+#
+# Requires systemd >= 239 for the per-line OnCalendar= timezone suffix —
+# see trading-bot-daily.timer's header for the older-systemd fallback.
+[Unit]
+Description=Run trading-bot-digest.service every weekday, 30 minutes after the shared daily post-close slot
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 21:30:00 UTC
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

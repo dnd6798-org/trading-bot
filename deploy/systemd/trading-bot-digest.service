@@ -1,0 +1,35 @@
+# Tier 1 monitoring redesign (CLAUDE.md "Session update ... 2026-09-04,
+# spec/playbook v76") — daily automated Telegram digest (oneshot).
+#
+# [Service] section shape mirrors trading-bot-daily.service's exactly —
+# same User/Group, same WorkingDirectory, same EnvironmentFile. Same
+# PATH ASSUMPTION as every other unit in this directory: /opt/trading-bot
+# with its venv at /opt/trading-bot/venv (see trading-bot-daily.service's
+# header comment) — not independently reverified here.
+#
+# No After=trading-bot-daily.service/trading-bot-track-c.service ordering
+# dependency: unlike trading-bot-track-c.service's dependency on
+# trading-bot-daily.service (a same-instant-timer race on shared ledger
+# state), this job only READS already-persisted local files
+# (track_positions_state.json, halt_state.json, track_c_halt_state.json)
+# — it does not need either daily job's process to still be running, only
+# for their state to have already been written for the day, which
+# trading-bot-digest.timer's 21:30 UTC slot (30 minutes after both daily
+# jobs' shared 21:00 UTC slot) is intended to guarantee. See
+# trading-bot-digest.timer's own header for a flagged caveat on that
+# 30-minute offset assumption.
+[Unit]
+Description=Trading bot - daily automated Telegram digest (one-shot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/trading-bot
+EnvironmentFile=/opt/trading-bot/.env
+ExecStart=/opt/trading-bot/venv/bin/python -m src.daily_digest
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
