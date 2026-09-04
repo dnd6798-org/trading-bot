@@ -5721,6 +5721,84 @@ this file's own "update whenever a real decision is made" rule. The
 Tier 1 milestone brief (items a/b above) is expected as the next message
 in this session.
 
+**UPDATE: Tier 1 milestone EXECUTED — committed as `d4ea47a` on `paper`,
+pushed (confirmed `origin/paper` HEAD matches). Full suite 413 -> 434
+passing (21 new tests: 10 `tests/test_service_alert.py`, 11
+`tests/test_daily_digest.py`; 0 modified).**
+
+**Part A — new `scripts/service_alert.py`.** Sends a Telegram alert via
+`src.telegram_bot.send_message()` (reused unchanged) on
+`trading-bot-listener.service` start/stop, wired via new
+`ExecStartPost=`/`ExecStopPost=` hooks added to that unit's `[Service]`
+section — a restart is a stop followed by a start under systemd, so both
+hooks fire on a restart with no separate case needed, covering the
+brief's "start/stop/restart" as one mechanism. `SERVICE_RESULT`/
+`EXIT_CODE`/`EXIT_STATUS` are read via `os.environ.get()` and degrade to
+`"unknown"` when unset OR present-but-empty (systemd/systemd#4770 — not
+reliably populated on every failure path, per the brief). The whole body
+is wrapped in try/except so a send failure can never block the
+ExecStartPost/ExecStopPost lifecycle step. Import convention mirrors
+`scripts/dry_run_execution_track_b.py` exactly (`sys.path.insert` +
+direct import, absolute python path in the unit file, not `-m`).
+
+**Part B — new `src/daily_digest.py`.** `build_digest()`/
+`run_daily_digest_job()`/`main()`, same dict-log/logging shapes as
+`execution.py`/`track_c_execution.py`. Reports current positions per
+track via `track_positions.get_track_qty()` over `execution.
+TRACK_B_UNIVERSE` / `track_c_execution.HEAL_UNIVERSE` (reused directly,
+not reimplemented) and halt status via `halt_state.load_halt_state()`/
+`load_track_c_halt()`. Pure reporting — builds no `TradingClient`, makes
+no Alpaca calls at all. New `trading-bot-digest.service` (oneshot) +
+`.timer` (`Mon..Fri 21:30:00 UTC`, 30 minutes after Track B/C's shared
+21:00 UTC slot).
+
+**Three sections have no real persisted data source as of this milestone
+and are reported literally as `"not yet available"`, per the brief's
+explicit instruction not to fabricate placeholder data:**
+1. **Today's fills** — `src/journaling.py` is still 100%
+   `NotImplementedError` (`aggregate_day()`/`format_journal_message()`
+   never built). No persisted fill record exists anywhere in this repo.
+2. **Today's errors** — `run_daily_execution_job()`/
+   `run_track_c_execution_job()` both return a `run_log` dict with an
+   `"errors"` list, but neither module persists it anywhere; each job's
+   own `main()` only logs it to journald (per `execution.py`'s own
+   docstring: "the caller is responsible for persisting it" — spec §3.2
+   journaling, still a separate, not-yet-built milestone). This digest
+   runs as its own separate systemd invocation with no access to another
+   process's journald output or in-memory `run_log`.
+3. **Listener restart count today** — Part A alerts on every start/stop
+   but persists no running tally.
+
+**Two deviations from the brief, flagged rather than silently
+resolved:**
+1. `halt_state.py`'s real function names are `load_halt_state()` and
+   `load_track_c_halt()` — the brief wrote `halt_state.load_halt()`
+   (doesn't exist). Verified against the real source before writing any
+   code (`src/halt_state.py`) and used the real names.
+2. The digest timer's literal `21:30:00 UTC` (as explicitly briefed) is
+   only a true 30-minute offset from Track B/Track C's shared
+   `17:00:00 America/New_York` slot during Eastern Daylight Time
+   (UTC-4). During Eastern Standard Time (UTC-5, roughly early November
+   to mid-March), the other two jobs actually fire at 22:00 UTC — a
+   fixed 21:30 UTC digest slot would then fire 30 minutes BEFORE them
+   instead of after, undermining the ordering guarantee the offset
+   exists for. Implemented exactly as briefed (a literal UTC schedule,
+   not `America/New_York`-relative), with the DST-drift consequence
+   documented in `trading-bot-digest.timer`'s own header comment for a
+   droplet-side/claude.ai decision on whether to switch it to
+   `America/New_York`-relative anchoring like the other two timers —
+   not silently "fixed" unbriefed.
+
+**Not yet deployed to the droplet** — neither the digest units nor the
+listener's new alert hooks have been installed/enabled there yet;
+`deploy/systemd/README.md` updated with the new install-step commands
+but the actual droplet install/enable is a separate, later step (same
+"committed ≠ deployed" distinction as every prior systemd-units
+milestone in this file).
+
+Tier 2 remains explicitly not started — see the locked-boundary
+restatement above; nothing in this update changes that.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
