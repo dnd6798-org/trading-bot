@@ -78,17 +78,38 @@ def test_parse_args_rejects_extra_arguments():
 def test_run_action_calls_the_runner_with_the_exact_built_command():
     calls = []
 
-    def fake_runner(command, capture_output, text):
-        calls.append((command, capture_output, text))
+    def fake_runner(command, **kwargs):
+        calls.append((command, kwargs))
         return _fake_result(stdout="ok\n")
 
     droplet_diag.run_action("status", runner=fake_runner)
 
-    assert calls == [(["ssh", "trading-bot-droplet", "status"], True, True)]
+    assert calls == [(
+        ["ssh", "trading-bot-droplet", "status"],
+        {"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"},
+    )]
+
+
+def test_run_action_pins_utf8_decoding_not_the_local_locale_codepage():
+    # Regression: text=True alone decodes with the LOCAL machine's
+    # default codepage (cp1252 on Windows), which crashes on real UTF-8
+    # remote output (e.g. systemctl status's "●"/"○" bullet characters)
+    # — encoding must be pinned explicitly, not left to the platform
+    # default.
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append(kwargs)
+        return _fake_result(stdout="ok\n")
+
+    droplet_diag.run_action("status", runner=fake_runner)
+
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
 
 
 def test_run_action_prints_stdout_and_returns_the_real_returncode(capsys):
-    fake_runner = lambda command, capture_output, text: _fake_result(stdout="hello from droplet\n", returncode=0)
+    fake_runner = lambda command, **kwargs: _fake_result(stdout="hello from droplet\n", returncode=0)
 
     code = droplet_diag.run_action("disk", runner=fake_runner)
 
@@ -99,7 +120,7 @@ def test_run_action_prints_stdout_and_returns_the_real_returncode(capsys):
 def test_run_action_prints_stderr_and_propagates_a_nonzero_returncode(capsys):
     # systemctl status legitimately returns non-zero when a queried unit
     # is inactive — not an SSH/auth failure, must not be swallowed.
-    fake_runner = lambda command, capture_output, text: _fake_result(
+    fake_runner = lambda command, **kwargs: _fake_result(
         stdout="some output\n", stderr="some warning\n", returncode=3,
     )
 
@@ -114,7 +135,7 @@ def test_run_action_prints_stderr_and_propagates_a_nonzero_returncode(capsys):
 def test_run_action_never_forwards_extra_text_to_the_runner():
     calls = []
 
-    def fake_runner(command, capture_output, text):
+    def fake_runner(command, **kwargs):
         calls.append(command)
         return _fake_result()
 

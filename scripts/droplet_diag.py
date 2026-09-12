@@ -46,7 +46,20 @@ def build_ssh_command(action: str) -> list[str]:
 
 
 def run_action(action: str, runner=subprocess.run) -> int:
-    result = runner(build_ssh_command(action), capture_output=True, text=True)
+    # encoding/errors pinned explicitly: subprocess's text=True alone
+    # decodes with the LOCAL machine's default locale codepage (cp1252
+    # on this Windows box), which cannot decode the UTF-8 output real
+    # remote commands like `systemctl status` produce (e.g. the
+    # "●"/"○" bullet characters) — pin utf-8 (the droplet's own
+    # locale) and never crash on an unexpected byte.
+    result = runner(build_ssh_command(action), capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # sys.stdout/stderr are ALSO subject to the local machine's default
+    # codepage (cp1252 on this Windows box) independent of the decoding
+    # fix above — writing a real decoded character like "●" would still
+    # raise UnicodeEncodeError without this. reconfigure() is a no-op
+    # cost, safe to call every time.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     if result.stdout:
         sys.stdout.write(result.stdout)
     if result.stderr:
