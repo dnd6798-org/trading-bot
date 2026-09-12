@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"D:\\Journal\\trade\\trading-bot\\scripts\\tier2_permission_hook.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"D:\\Journal\\trade\\trading-bot\\scripts\\tier2_permission_hook.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
