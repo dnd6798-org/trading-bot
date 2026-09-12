@@ -5820,6 +5820,47 @@ naming correction in the original implementation, not something to
 Tier 2 remains explicitly not started — see the locked-boundary
 restatement above; nothing in this update changes that.
 
+## Session update (claude.ai, 2026-09-12 — spec/playbook v77)
+
+**Tier 2 (headless Claude Code + standing droplet SSH, read-only
+diagnosis) design LOCKED.** Verified exact `--allowedTools` syntax
+against current Claude Code docs before locking this design — the
+verification step the v76 record flagged as still outstanding.
+
+**Key decisions:**
+1. **`--permission-mode dontAsk`, not the default mode.** Auto-denies
+   any unlisted tool call with no prompt — correct for an unattended
+   scheduled run with no human present to answer a permission prompt.
+   `bypassPermissions` was considered and rejected per the docs' own
+   restriction of that mode to isolated containers/VMs, which a droplet
+   with standing SSH access to production is not.
+2. **No wildcards in the trust boundary.** The official docs warn that
+   `Bash` patterns constraining command arguments (their own example:
+   `Bash(curl http://github.com/*)`) are bypassable via option
+   reordering, protocol changes, redirects, or variable substitution — a
+   wildcarded SSH remote-command pattern is the same fragile shape.
+   Design instead uses a fixed wrapper script,
+   `scripts/droplet_diag.py`, exposing six enumerated read-only actions
+   (`status`, `listener-log`, `digest-log`, `git-head`, `halt-state`,
+   `disk`), each running one hardcoded SSH command with no Claude-
+   supplied text ever reaching the remote shell. `--allowedTools` lists
+   each action as a literal exact-match rule, no wildcards anywhere.
+3. **Windows Task Scheduler is the external trigger** (Basic Task,
+   "Start a program") — Claude Code has no native scheduler (GitHub
+   issue #4785, confirmed still open at verification time).
+
+**Non-negotiable order/strategy boundary reaffirmed, and now
+structurally enforced by the exact-match allowlist itself, not just
+prompt instruction** — order submission, position sizing, guardrail
+numbers, and strategy logic remain permanently human/claude.ai-gated;
+the six allowed actions are all read-only by construction, so there is
+no tool-call surface through which a headless run could touch any of
+those, independent of what the prompt says.
+
+**Not yet implemented — an implementation brief follows in this
+session's second message.** Full reasoning: `trading-bot-spec-v77.md`
+§10.47 (project knowledge, not this repo).
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
