@@ -5861,6 +5861,168 @@ those, independent of what the prompt says.
 session's second message.** Full reasoning: `trading-bot-spec-v77.md`
 §10.47 (project knowledge, not this repo).
 
+**UPDATE (same day): Tier 2 IMPLEMENTED — committed as `2eb1748` on
+`paper`, pushed (confirmed `origin/paper` HEAD matches). Full suite
+434 -> 457 passing (23 new tests, `tests/test_droplet_diag.py`; 0
+modified).** This is genuinely new capability (first standing droplet
+SSH access for an autonomous Claude Code session), and the actual SSH
+setup surfaced three real, unanticipated blockers before any of it
+worked — none were guessed past, all were verified and resolved
+live this session, in order:
+
+1. **No SSH alias/config existed on this machine at all** — the v77
+   design assumed one did (per manual droplet sessions in this file's
+   own history); a fresh check found no `~/.ssh/config` anywhere
+   (user or system-wide) and zero `ssh` usage in PowerShell/Bash
+   history. The one lead (`67.205.164.36` in `~/.ssh/known_hosts`, a
+   DigitalOcean-range IP) was flagged as unconfirmed rather than
+   assumed — the user independently confirmed it against the real
+   DigitalOcean dashboard before it was used. `~/.ssh/config` now has
+   a `trading-bot-droplet` Host entry (`HostName 67.205.164.36`, `User
+   tradingbot`) — this file lives outside the repo, not committed.
+2. **This machine's only existing key (`id_rsa`) was not authorized for
+   `tradingbot`** on the droplet — `Permission denied
+   (publickey,password)`. Per instruction, no new key was generated
+   without first checking whether an already-authorized one simply
+   wasn't referenced by any local config — none was found. A new,
+   dedicated ed25519 keypair (`~/.ssh/trading_bot_tier2`, comment
+   `tier2-diag-readonly`) was generated FOR THIS PURPOSE ONLY; `~/.ssh/
+   config`'s `trading-bot-droplet` entry uses it exclusively
+   (`IdentitiesOnly yes`). The user added the public key to the
+   droplet's `tradingbot` `authorized_keys` directly.
+3. **`tradingbot`'s shell is `/usr/sbin/nologin` by design** (this
+   file's own systemd-units milestone record: "No login shell, not in
+   sudoers"), which structurally blocks ANY SSH command execution —
+   confirmed via `sshd`'s own debug output (`This account is currently
+   not available.`, exit 1) even after key auth succeeded. **Real
+   architecture finding, not a config bug:** OpenSSH always executes a
+   command — forced or client-supplied — via the account's login shell
+   (`<shell> -c "<command>"`); a forced-command restriction in
+   `authorized_keys` does NOT bypass this. **Locked resolution
+   (user's own design, an improvement on the original plan, not a
+   workaround):** `tradingbot`'s shell was changed to `/bin/bash` on
+   the droplet (confirmed by the user), but the actual "only these six
+   read-only actions, nothing else" boundary is enforced by a
+   `command=` forced-command restriction in `authorized_keys` pointing
+   at a new droplet-side dispatcher, `scripts/droplet_diag_dispatch.sh`
+   (droplet-only file, not in this repo — edited directly by the user,
+   Claude Code has no droplet shell access of its own). The dispatcher
+   reads `$SSH_ORIGINAL_COMMAND` and `case`-matches it against the six
+   literal action names, rejecting anything else with exit 1. **This
+   means the read-only boundary is now enforced TWICE, independently:**
+   once client-side by `--allowedTools`'s exact-match rules (v77
+   design), and once server-side by the dispatcher's own allowlist —
+   even a misconfigured `--allowedTools` could never reach anything
+   beyond the six fixed commands, since the droplet itself refuses
+   everything else regardless of what SSH command text arrives.
+   **Consequence for `scripts/droplet_diag.py`: it sends the BARE
+   action name as the SSH remote command** (`ssh trading-bot-droplet
+   status`, not a full shell command string) — the dispatcher, not this
+   script, owns translating the action name into the real command.
+
+**Live connectivity verified for the `status` action only, through the
+full real chain (key auth -> bash shell -> forced-command dispatcher ->
+real `systemctl status` output)** — `ssh trading-bot-droplet status`
+returned genuine live output for all four queried units
+(`trading-bot-listener.service` active, `trading-bot-daily.service`/
+`trading-bot-digest.service` both correctly `inactive (dead)` between
+scheduled runs, `trading-bot-track-c.timer` active/waiting), exit code 3
+(normal `systemctl status` behavior when any queried unit is inactive,
+not an error). **`listener-log`/`digest-log`/`git-head`/`disk` were
+NOT live-tested this session** — the user confirmed the droplet-side
+dispatcher already implements all four (added alongside `status` before
+this session's `halt-state` question came up), and `droplet_diag.py`'s
+Python-side logic is uniform across all six actions (same
+`build_ssh_command()`/`run_action()`, difference is only which literal
+string is sent), but per the standing instruction not to run a live
+end-to-end test outside the planned joint session, these four were not
+independently exercised against the real droplet this turn — worth
+confirming together in the first live joint test, alongside `halt-state`
+(genuinely new, see below).
+
+**FACT #2 (halt-state mechanism) confirmed by reading `src/
+halt_state.py` directly, not assumed:** two plain JSON files, not a DB
+— `halt_state.json` (Track B/global, spec §2/§4.5/§7) and
+`track_c_halt_state.json` (Track C, spec v55 §10.25), both resolved
+relative to CWD by default (`HALT_STATE_PATH`/`TRACK_C_HALT_STATE_PATH`,
+neither overridden in the droplet's `.env` per this file's own record),
+i.e. `/opt/trading-bot/halt_state.json` /
+`/opt/trading-bot/track_c_halt_state.json` given the systemd units'
+`WorkingDirectory=/opt/trading-bot`. A missing file means "never
+halted" — `load_halt_state()`'s/`load_track_c_halt()`'s own documented
+default — so the read-only check must tolerate a missing file, not
+treat it as an error. **Exact case block given to the user to add to
+`scripts/droplet_diag_dispatch.sh` (droplet-side edit, not performed by
+Claude Code — no droplet shell access of its own):**
+
+```bash
+  halt-state)
+    echo "--- Track B / global halt (halt_state.json) ---"
+    cat /opt/trading-bot/halt_state.json 2>/dev/null || echo "(no file — never halted, per halt_state.py's load_halt_state() default)"
+    echo "--- Track C halt (track_c_halt_state.json) ---"
+    cat /opt/trading-bot/track_c_halt_state.json 2>/dev/null || echo "(no file — never halted, per halt_state.py's load_track_c_halt() default)"
+    ;;
+```
+
+Entirely read-only (`echo`/`cat` only, absolute paths, no writes, no
+CWD dependency) — matches every other dispatcher arm's read-only
+property.
+
+**Deliverables landed (`2eb1748`):**
+- `scripts/droplet_diag.py` — `ACTIONS` = the six locked names;
+  `build_ssh_command(action)` returns exactly `["ssh",
+  "trading-bot-droplet", action]`; `run_action()` takes an injectable
+  `runner` (defaults to `subprocess.run`) so tests never make a real
+  SSH call; `argparse` with `choices=ACTIONS` rejects anything else at
+  the CLI layer too (a third, redundant layer of the same boundary,
+  alongside `--allowedTools` and the droplet dispatcher).
+- `scripts/send_tier2_alert.py` — thin stdin-reading shim so the
+  PowerShell wrapper can call `telegram_bot.send_message()` unchanged
+  (avoids reimplementing the Telegram send logic in PowerShell, and
+  avoids fragile PowerShell/argv quoting for a large JSON-derived
+  summary).
+- `scripts/run_tier2_diag.ps1` — runs `claude -p "..." --allowedTools
+  "Bash(python scripts/droplet_diag.py status),Bash(python
+  scripts/droplet_diag.py listener-log),Bash(python
+  scripts/droplet_diag.py digest-log),Bash(python
+  scripts/droplet_diag.py git-head),Bash(python
+  scripts/droplet_diag.py halt-state),Bash(python
+  scripts/droplet_diag.py disk)" --permission-mode dontAsk
+  --output-format json`, logs to `logs/tier2-diag-<timestamp>.json`
+  (already gitignored), parses the JSON `result` field, and pipes a
+  `[TIER 2 DIAGNOSTIC -- <timestamp>]`-prefixed message to
+  `send_tier2_alert.py`. Verbatim `--allowedTools` string matches the
+  v77 lock exactly — six exact-match rules, zero wildcards.
+
+**FACT #3 (this machine's timezone) confirmed via `Get-TimeZone`:**
+`Eastern Standard Time` (the Windows zone ID for the whole US Eastern
+zone — it DOES observe DST despite the name), i.e. this machine's local
+clock already IS `America/New_York` wall-clock time year-round. **No
+offset conversion needed** — the Task Scheduler active window maps
+directly to 9:30 AM-4:15 PM LOCAL machine time.
+
+**Task Scheduler entry: PREPARED, NOT REGISTERED.** Per the explicit
+instruction to do the first live droplet-side test together, session-
+live, before ever letting Task Scheduler fire it unattended, the exact
+`schtasks` command was written and verified for correctness but
+deliberately NOT executed this session:
+
+```
+schtasks /Create /TN "TradingBot-Tier2-Diagnostic" /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"D:\Journal\trade\trading-bot\scripts\run_tier2_diag.ps1\"" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 09:30 /RI 15 /DU 0006:45 /RL LIMITED
+```
+
+Basic Task, "Start a program" (`powershell.exe`, matching the brief's
+requested action type), weekly on Mon-Fri at 09:30 local, repeating
+every 15 minutes for a 6:45 duration (09:30 -> 16:15 local = 9:30
+AM-4:15 PM America/New_York, per FACT #3). Registration is a one-line
+command away once the joint live test passes.
+
+**Not yet done:** droplet-side `droplet_diag_dispatch.sh`'s `halt-state`
+case arm (case block given above, droplet-side edit); the first live
+joint test of all six actions end-to-end through `run_tier2_diag.ps1`
+(including a real Telegram message reaching the account); Task
+Scheduler registration itself.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
