@@ -6023,6 +6023,44 @@ joint test of all six actions end-to-end through `run_tier2_diag.ps1`
 (including a real Telegram message reaching the account); Task
 Scheduler registration itself.
 
+## Session close-out (claude.ai, 2026-09-14 — spec/playbook v78)
+
+**Tier 2 (headless Claude Code + standing droplet SSH, read-only
+diagnosis) BUILT, LIVE-VALIDATED, and NOT YET SCHEDULED.**
+
+Full six-action diagnostic (`status`, `listener-log`, `digest-log`,
+`git-head`, `halt-state`, `disk`) confirmed working end-to-end against
+the real droplet: droplet-side forced-command dispatcher
+(`droplet_diag_dispatch.sh`) + dedicated SSH key (`tier2-diag-readonly`)
++ client-side `PreToolUse` permission hook (`tier2_permission_hook.py`,
+replacing a plain `--allowedTools` exact-match that failed its first
+live run — see commits `2eb1748`, `a64fc65`, `f23612e` for the full
+incident chain, above). Real Telegram delivery confirmed by the user
+directly.
+
+**Tier 2's own diagnostic run surfaced two genuine findings, both real,
+neither fabricated:**
+1. **An unexplained `trading-bot-listener` restart at `06:55:12–06:55:44
+   UTC` on 2026-09-12 — NOT YET INVESTIGATED.** Queued as next session's
+   SOLE topic, per RULES.md's standing "positively identify, don't
+   assume benign" rule for unscheduled service events (the same rule
+   the v49 daily-job investigation and the v75 listener-restart
+   investigation both already applied) — this restart has NOT yet been
+   through that process.
+2. **Droplet git HEAD is 4 commits behind `origin/paper`** (`b3cf46c` vs
+   `a64fc65`) — no functional trading impact per Tier 2's own read
+   (diagnostic-tooling/docs commits only, none touching `execution.py`/
+   `fill_listener.py`/`track_c_execution.py`/`daily_digest.py`/
+   `risk_filter.py`), but the pull itself is still open.
+
+**Windows Task Scheduler registration for Tier 2 is deliberately NOT
+done — a sequencing decision, not a leftover task.** The listener-
+restart anomaly above gets resolved first; only after that does
+scheduling an autonomous, unattended diagnostic run make sense.
+
+Full session record: `trading-bot-spec-v78.md` §10.48 (project
+knowledge, not this repo).
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
