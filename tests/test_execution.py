@@ -13,7 +13,10 @@ hand-built FakeTradingClient (no network calls):
   - order-flow plumbing: fill polling/classification (poll_order_until_
     terminal/confirm_entry_fill, including partial fills), and the
     unprotected-window safeguard (submit_stop_order_with_retry — retries
-    with backoff then fires a distinct Telegram alert on total failure).
+    with backoff then fires a distinct Telegram alert on total failure;
+    CLAUDE.md v81 additionally fires a lower-severity WARNING once, on
+    the first failed attempt, so a mid-retry process kill still leaves a
+    Telegram trace even if the exhaustion alert is never reached).
   - the full per-candidate entry flow (submit_entry_and_stop), including
     a simulated unprotected-window failure end to end: entry fills, then
     every stop-submission attempt fails.
@@ -677,7 +680,66 @@ def test_submit_stop_order_with_retry_recovers_after_transient_failures(captured
 
     assert order is not None
     assert attempts["n"] == 3
-    assert captured_telegram_messages == []  # recovered — no urgent alert needed
+    # CLAUDE.md v81: recovering still fires the new first-failure WARNING
+    # (it already happened by the time recovery is known) but never the
+    # URGENT exhaustion alert, and only ONCE despite 2 failed attempts.
+    assert len(captured_telegram_messages) == 1
+    assert "WARNING" in captured_telegram_messages[0]
+    assert "URGENT" not in captured_telegram_messages[0]
+
+
+def test_submit_stop_order_with_retry_fires_warning_alert_on_first_failed_attempt(captured_telegram_messages):
+    # CLAUDE.md v81 (motivated by v80's SIGTERM/restart-safety finding):
+    # no signal.signal() handler exists anywhere in this codebase, so a
+    # process restart landing mid-retry kills the loop before the
+    # exhaustion alert below is ever reached. This WARNING exists
+    # specifically to leave a Telegram trace at the moment of the FIRST
+    # failure, not only once every attempt is exhausted.
+    attempts = {"n": 0}
+
+    def submit_order(req):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("simulated transient API failure")
+        return FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    client = FakeTradingClient()
+    client.submit_order_fn = submit_order
+
+    order = submit_stop_order_with_retry(client, "SPY", 10.0, 435.0, backoff_seconds=(0,), sleep_fn=_no_sleep)
+
+    assert order is not None
+    assert attempts["n"] == 2
+    assert len(captured_telegram_messages) == 1
+    warning = captured_telegram_messages[0]
+    assert "WARNING" in warning
+    assert "URGENT" not in warning  # distinct severity from the exhaustion alert
+    assert "SPY" in warning
+    assert "first attempt" in warning
+
+
+def test_submit_stop_order_with_retry_first_failure_alert_does_not_double_fire_on_later_retries(captured_telegram_messages):
+    # 4 consecutive failed attempts before eventual success — the WARNING
+    # must fire exactly ONCE (on attempt 1), not once per failed attempt.
+    attempts = {"n": 0}
+
+    def submit_order(req):
+        attempts["n"] += 1
+        if attempts["n"] < 5:
+            raise RuntimeError("simulated transient API failure")
+        return FakeOrder(id="stop-1", status=OrderStatus.NEW, stop_price=req.stop_price)
+
+    client = FakeTradingClient()
+    client.submit_order_fn = submit_order
+
+    order = submit_stop_order_with_retry(
+        client, "SPY", 10.0, 435.0, backoff_seconds=(0, 0, 0, 0), sleep_fn=_no_sleep,
+    )
+
+    assert order is not None
+    assert attempts["n"] == 5  # initial attempt + 4 failed retries before success
+    assert len(captured_telegram_messages) == 1  # not 4 — fires once, on the first failure only
+    assert "WARNING" in captured_telegram_messages[0]
 
 
 def test_submit_stop_order_with_retry_exhausts_all_attempts_fires_urgent_alert_and_returns_none(captured_telegram_messages):
@@ -688,8 +750,11 @@ def test_submit_stop_order_with_retry_exhausts_all_attempts_fires_urgent_alert_a
 
     assert order is None
     assert len(client.submitted_orders) == 3  # initial attempt + 2 backoff retries
-    assert len(captured_telegram_messages) == 1
-    alert = captured_telegram_messages[0]
+    # CLAUDE.md v81: exhaustion still fires the URGENT alert, additive to
+    # (not replacing) the new first-failure WARNING — 2 messages total.
+    assert len(captured_telegram_messages) == 2
+    warning, alert = captured_telegram_messages
+    assert "WARNING" in warning and "URGENT" not in warning
     assert "URGENT" in alert
     assert "UNPROTECTED" in alert
     assert "SPY" in alert
@@ -756,7 +821,12 @@ def test_submit_stop_order_with_retry_polls_open_buy_order_and_retries_immediate
 
     assert order is not None
     assert attempts["n"] == 2
-    assert captured_telegram_messages == []  # recovered — no urgent alert needed
+    # CLAUDE.md v81: the wash-trade rejection is still a failed first
+    # attempt — fires the new WARNING, but never the URGENT exhaustion
+    # alert (this recovers).
+    assert len(captured_telegram_messages) == 1
+    assert "WARNING" in captured_telegram_messages[0]
+    assert "URGENT" not in captured_telegram_messages[0]
     assert sleeps == []  # the normal first backoff delay (5s) was skipped — the poll was the wait instead
 
 
@@ -782,8 +852,10 @@ def test_submit_stop_order_with_retry_falls_through_to_generic_retry_if_open_buy
 
     assert order is None
     assert len(client.submitted_orders) == 3  # initial attempt + 2 backoff retries, all rejected the same way
-    assert len(captured_telegram_messages) == 1
-    alert = captured_telegram_messages[0]
+    # CLAUDE.md v81: additive first-failure WARNING + the exhaustion URGENT alert.
+    assert len(captured_telegram_messages) == 2
+    warning, alert = captured_telegram_messages
+    assert "WARNING" in warning and "URGENT" not in warning
     assert "URGENT" in alert and "UNPROTECTED" in alert and "DBC" in alert
 
 
@@ -806,7 +878,10 @@ def test_submit_stop_order_with_retry_wash_trade_error_with_no_open_buy_order_fa
     assert order is None
     assert len(client.submitted_orders) == 3  # initial attempt + 2 backoff retries
     assert sleeps == [5, 15]  # the normal fixed-delay backoff was NOT skipped
-    assert len(captured_telegram_messages) == 1
+    # CLAUDE.md v81: additive first-failure WARNING + the exhaustion URGENT alert.
+    assert len(captured_telegram_messages) == 2
+    assert "WARNING" in captured_telegram_messages[0]
+    assert "URGENT" in captured_telegram_messages[1]
 
 
 def test_submit_stop_order_with_retry_other_api_error_code_falls_through_unchanged(captured_telegram_messages):
@@ -829,7 +904,10 @@ def test_submit_stop_order_with_retry_other_api_error_code_falls_through_unchang
     assert order is None
     assert len(client.submitted_orders) == 3
     assert sleeps == [5, 15]
-    assert len(captured_telegram_messages) == 1
+    # CLAUDE.md v81: additive first-failure WARNING + the exhaustion URGENT alert.
+    assert len(captured_telegram_messages) == 2
+    assert "WARNING" in captured_telegram_messages[0]
+    assert "URGENT" in captured_telegram_messages[1]
 
 
 # --- submit_entry_and_stop: full per-candidate flow -------------------------

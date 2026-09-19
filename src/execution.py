@@ -1075,6 +1075,31 @@ def submit_stop_order(trading_client: TradingClient, symbol: str, qty: float, st
     return trading_client.submit_order(request)
 
 
+def _send_stop_retry_first_failure_alert(symbol: str, qty: float, exc: Exception) -> None:
+    """
+    Fires exactly ONCE per submit_stop_order_with_retry() call, on the
+    FIRST failed submission attempt inside the retry loop — not on every
+    subsequent retry, and deliberately not a duplicate of the exhaustion
+    alert below (CLAUDE.md "Current status", v80 milestone). Motivation:
+    no signal.signal() handler exists anywhere in this codebase
+    (confirmed, v80) — a process restart (e.g. needrestart bouncing
+    trading-bot-listener.service) landing mid-retry kills the loop
+    immediately, before the exhaustion alert's send_message() call is
+    ever reached, so without THIS alert that scenario silently leaves a
+    filled position unprotected with nobody paged. Deliberately a lower
+    severity than "URGENT — UNPROTECTED POSITION" (WARNING, not URGENT)
+    — most first failures resolve within the retry loop itself (see
+    test_submit_stop_order_with_retry_recovers_after_transient_failures),
+    so this should read as "watch this," not "act now."
+    """
+    telegram_bot.send_message(
+        f"WARNING — stop order submission for {symbol} (qty {qty}) failed on its first attempt ({exc}). "
+        f"Retrying with backoff — this may resolve automatically. Position is currently UNPROTECTED in the "
+        f"meantime; if no further message arrives for {symbol}, the retry loop may have been interrupted "
+        f"(e.g. a process restart) before completing, and manual intervention is needed."
+    )
+
+
 def submit_stop_order_with_retry(
     trading_client: TradingClient, symbol: str, qty: float, stop_price: float,
     backoff_seconds=_STOP_RETRY_BACKOFF_SECONDS, sleep_fn=time.sleep,
@@ -1088,6 +1113,15 @@ def submit_stop_order_with_retry(
     NOT folded into generic error handling. Returns the stop Order on
     success, or None if every attempt failed (caller must NOT treat None
     as "no stop needed" — it means the position is unprotected).
+
+    FIRST-FAILURE ALERT (CLAUDE.md v80): additive to the exhaustion alert
+    below, not a replacement — _send_stop_retry_first_failure_alert()
+    fires once, on the first failed attempt, specifically so a mid-retry
+    process kill (no SIGTERM handler exists anywhere in this codebase)
+    still leaves a Telegram trace even though the exhaustion alert's own
+    send_message() call would never be reached in that scenario. A run
+    that recovers still fires this WARNING (it already happened by the
+    time recovery is known) but never the URGENT exhaustion alert.
 
     FRACTIONAL-QTY / GTC LIMITATION (2026-08-28 finding, confirmed via a
     real API error: APIError 42210000, "stop/stop_limit fractional GTC
@@ -1127,6 +1161,7 @@ def submit_stop_order_with_retry(
 
     last_error = None
     skip_next_backoff_sleep = False
+    first_failure_alerted = False
     for delay in (0,) + tuple(backoff_seconds):
         if delay and not skip_next_backoff_sleep:
             sleep_fn(delay)
@@ -1135,6 +1170,9 @@ def submit_stop_order_with_retry(
             return submit_stop_order(trading_client, symbol, floored_qty, stop_price)
         except APIError as exc:
             last_error = exc
+            if not first_failure_alerted:
+                _send_stop_retry_first_failure_alert(symbol, qty, exc)
+                first_failure_alerted = True
             # 2026-09-02 finding (real production incident, spec v70
             # §10.40): Alpaca delivers partial_fill events progressively
             # as an entry BUY order fills in increments. Each one triggers
@@ -1170,6 +1208,9 @@ def submit_stop_order_with_retry(
                     skip_next_backoff_sleep = True
         except Exception as exc:  # noqa: BLE001 — must never crash the caller, this IS the alerting path
             last_error = exc
+            if not first_failure_alerted:
+                _send_stop_retry_first_failure_alert(symbol, qty, exc)
+                first_failure_alerted = True
     telegram_bot.send_message(
         f"URGENT — UNPROTECTED POSITION: stop order for {symbol} (qty {qty}) failed after "
         f"{len(backoff_seconds) + 1} attempts (last error: {last_error}). This position has NO resting "
