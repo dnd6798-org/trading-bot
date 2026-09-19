@@ -342,8 +342,10 @@ account equity. This is the ONLY behavioral change from that milestone:
 signal generation, entry logic, stop-loss/ratchet logic, and the
 account-level HALT guardrails (daily-loss/drawdown, which halt the whole
 bot and correctly still see full-account equity) are all untouched.
-Track C has no execution code yet — this milestone only makes Track B
-partition-aware so it is ready for it.
+Track C now has its own live execution code and monthly-rebalance systemd
+timer (src/track_c_execution.py, trading-bot-track-c.timer) — this
+milestone only made Track B partition-aware ahead of that; see
+src/track_c_execution.py's own docstring for Track C's execution design.
 
 =============================================================================
 POSITION-OWNERSHIP LEDGER (spec v55 §10.25, Milestone 2). Alpaca reports
