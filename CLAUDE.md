@@ -6104,6 +6104,28 @@ restart would lose. This determines whether the override_rc change is
 precautionary margin or is closing a real gap. See next Claude Code
 brief.
 
+## [v80] Listener SIGTERM/restart-safety gap found and independently verified
+
+Your investigation into fill_listener.py's restart safety was
+independently re-verified this session by pulling fill_listener.py and
+execution.py directly from origin/paper (not accepted on the report
+alone). All core findings confirmed: the listener is stateless by design
+and does no reconciliation on startup; handle_trade_update() runs
+synchronously inside the async _handler(), sharing the event loop;
+submit_stop_order_with_retry()'s backoff (5, 15, 30s) plus the
+wash-trade poll (60s, up to ~4x) can block up to ~290s; no
+signal.signal( call exists anywhere in either file, so SIGTERM kills the
+process immediately mid-retry with no alert sent (the URGENT alert only
+fires after the retry loop completes).
+
+Decision, split by size (RULES.md §6): a small, scoped fix is locked and
+briefed separately this session — fire the URGENT retry alert on the
+FIRST failed attempt, not only after exhaustion. The larger fix (an
+actual SIGTERM handler + moving blocking I/O off the event loop) is
+deliberately NOT decided this session — queued as next session's
+dedicated claude.ai design topic, not to be implemented until that
+design is locked.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
