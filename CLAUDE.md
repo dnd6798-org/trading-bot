@@ -6126,6 +6126,29 @@ deliberately NOT decided this session — queued as next session's
 dedicated claude.ai design topic, not to be implemented until that
 design is locked.
 
+## [v81] Listener retry-alert fix — implemented, tested, pushed
+
+Commit `08b2aae` (pushed to origin/paper alongside `794264c`/`ba13cd1`,
+the v79/v80 CLAUDE.md entries) — execution.py's
+submit_stop_order_with_retry() now fires a WARNING-tier Telegram alert
+on the FIRST failed stop-submission attempt, not only after all retries
+exhaust. The existing URGENT "UNPROTECTED POSITION" exhaustion alert is
+unchanged in wording, trigger, and content. Retry logic, backoff
+schedule (5, 15, 30s), and the wash-trade poll are byte-for-byte
+unchanged. Tests: 483/483 passing before, 485/485 after (2 new, 6
+pre-existing updated for the now-additive alert count — exhaustion-alert
+test content assertions unchanged, only message-count assertions updated
+from 1 to 2, since two distinct alerts can now fire per call).
+
+Not yet deployed to the droplet — origin/paper's new HEAD has not been
+checked against the droplet's own `git log -1` yet. Do not treat this as
+live/protecting anything until that's confirmed, per RULES.md's
+pushed-vs-deployed rule.
+
+Still open: the larger fix (SIGTERM handler + moving fill_listener.py's
+blocking I/O off the event loop) — queued as its own dedicated claude.ai
+design session, not yet started.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
