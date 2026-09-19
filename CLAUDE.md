@@ -6061,6 +6061,49 @@ scheduling an autonomous, unattended diagnostic run make sense.
 Full session record: `trading-bot-spec-v78.md` §10.48 (project
 knowledge, not this repo).
 
+## [v79] Listener restart anomaly (06:55:12–06:55:44 UTC, 2026-09-12) — investigated and closed
+
+**Finding:** Both listener restarts in this window are attributable to
+`needrestart`, invoked automatically via unattended-upgrades' APT
+post-invoke hook (`nrconf{restart}='a'` under the APT hook context —
+confirmed in `/etc/needrestart/needrestart.conf`'s own documentation
+comment). `needrestart` detected `trading-bot-listener.service` as
+linked against just-upgraded libraries in two separate dpkg batches —
+`python3.12`/`libpython3.12*` (patch .15→.17, completed
+06:55:08–06:55:10) and `libc6`/`locales`/`libc-bin` (8.8→8.9, completed
+06:55:33–06:55:37) — and issued `systemctl restart trading-bot-
+listener.service` for each, 2–3 seconds after each batch's config
+completed. Confirmed directly in `/var/log/unattended-upgrades/
+unattended-upgrades-dpkg.log`, which explicitly names
+`trading-bot-listener.service` in the "Restarting services..." block
+for both batches. Same log shows this is recurring, pre-existing
+behavior (same pattern on 2026-09-01 and 2026-09-05), not new to this
+cycle.
+
+**No anomaly, no unauthorized actor, no crash.** `NRestarts=0`,
+`Result=success` on the unit; no sudo-audit entries; no OOM. Closed per
+RULES.md's positive-identification standard.
+
+**Decision:** Add `trading-bot-listener.service` to needrestart's
+`override_rc` (via a new `/etc/needrestart/conf.d/50-trading-bot.conf`,
+not the shipped config) so future library-patch cycles no longer
+auto-bounce this service silently, paired with a deliberate manual
+restart cadence after any deferred patch. Rationale: the listener owns
+Track B's ATR trailing-stop fill-handling; broker-side stop orders
+survive the restart gap, but a fill landing inside the 2–3s window
+could be missed by the listener's own handling logic until reconnect.
+Deferring glibc/libc6 reloads costs nothing (already-mapped shared
+libraries stay loaded in the running process regardless of on-disk
+version) — this affects only future forks/execs, not the current
+process.
+
+**Open follow-up (not yet done):** confirm whether `trading-bot-
+listener.service`'s startup logic fully reconstructs working state from
+the Alpaca API, or holds anything critical only in memory that a
+restart would lose. This determines whether the override_rc change is
+precautionary margin or is closing a real gap. See next Claude Code
+brief.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
