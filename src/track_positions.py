@@ -248,8 +248,10 @@ def heal_track_c_ownership_ledger(trading_client, universe) -> dict:
     above RECONCILE_EPSILON) for the run log, same shape as
     execution.heal_track_b_ownership_ledger()'s return value.
 
-    Not wired into any live/scheduled path yet (Track C has no execution
-    module or scheduled job — that's Milestone 4).
+    Wired into the live path: src/track_c_execution.py's
+    run_track_c_execution_job() calls this at both the start and end of
+    every run (its own monthly-rebalance systemd timer,
+    trading-bot-track-c.timer).
     """
     healed = {}
     for symbol in universe:

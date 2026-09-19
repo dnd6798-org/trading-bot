@@ -10,8 +10,9 @@ trading client (no network):
     mismatch (URGENT Telegram alert + Track C halt via halt_state, and
     NOT Track B's halt — the two are independent).
 
-Track C has no execution code yet (that's Milestone 3), so track_c-side
-ledger state is set directly here with fake data, per the brief.
+Track C now has live execution code (Milestone 4, src/track_c_
+execution.py), but these are isolated unit tests, so track_c-side ledger
+state is still set directly here with fake data, per the brief.
 """
 from types import SimpleNamespace
 
