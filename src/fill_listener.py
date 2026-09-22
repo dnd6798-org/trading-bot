@@ -137,6 +137,7 @@ synchronously before the event loop starts, exactly as before.
 """
 import asyncio
 import logging
+import signal
 import time
 from datetime import datetime, timezone
 
@@ -159,6 +160,9 @@ log = logging.getLogger(__name__)
 _ALERT_THRESHOLD = 5
 _MAX_BACKOFF_SECONDS = 300
 _HEARTBEAT_INTERVAL_SECONDS = 300  # 5 minutes (listener-heartbeat design session)
+_SHUTDOWN_GRACE_SECONDS = 300  # comfortably exceeds submit_stop_order_with_retry()'s
+                               # confirmed ~290s worst case (execution.py, up to 4
+                               # wash-trade polls x 60s + backoff) — spec v82 §10.52.
 _TRACKED_EVENT_VALUES = {TradeEvent.FILL.value, TradeEvent.PARTIAL_FILL.value}
 
 
@@ -480,9 +484,59 @@ def run_listener(trading_client: TradingClient = None, universe=None, sleep_fn=t
     _run_forever() in its own asyncio.run(), which cannot be nested inside
     another coroutine's asyncio.gather(). Instead this drives
     stream._run_forever() directly, gathered together with
-    heartbeat_loop(), inside one asyncio.run(main()) call. The
-    KeyboardInterrupt handling TradingStream.run() used to provide is
-    reproduced here directly, for parity.
+    heartbeat_loop(), inside one asyncio.run(main()) call.
+
+    SIGTERM HANDLING + EVENT-LOOP FIX (locked design session, spec v82
+    §10.52 — closes §10.50/v80's two flagged gaps): _handler() below now
+    runs handle_trade_update() via asyncio.to_thread() instead of
+    synchronously, so a long stop-order retry (confirmed up to ~290s,
+    execution.py's submit_stop_order_with_retry() docstring) no longer
+    blocks heartbeat_loop() or this stream's own WebSocket read/keepalive.
+    main() installs SIGTERM/SIGINT handlers via loop.add_signal_handler()
+    (asyncio-safe, unlike raw signal.signal()): on either signal, the
+    stream/heartbeat tasks are cancelled (both pure-asyncio, safe to
+    interrupt) and any in-flight fill handler is given up to
+    _SHUTDOWN_GRACE_SECONDS to finish before the process exits — turning a
+    restart landing mid-retry (e.g. needrestart's systemctl restart, the
+    confirmed root cause in §10.49) from an unconditional kill into a
+    bounded wait for the retry to actually complete. Falls back to the
+    pre-existing bare KeyboardInterrupt handling if add_signal_handler()
+    raises NotImplementedError (non-POSIX only — this listener's real
+    deployment target is the Linux droplet, module docstring).
+
+    VERIFIED AGAINST INSTALLED alpaca-py SOURCE (0.43.5,
+    venv/Lib/site-packages/alpaca/trading/stream.py), per this session's
+    "verify, don't guess" convention:
+      - TradingStream._run_forever() (via _consume()/_dispatch()) AWAITS
+        each trade-update handler to completion before reading the next
+        WS frame — dispatch is sequential, not concurrent. This fix does
+        not change that sequencing; what it changes is that the EVENT
+        LOOP itself is no longer frozen while a handler is mid-retry, so
+        heartbeat_loop() and the underlying websockets library's own
+        ping/keepalive task (both independent asyncio tasks on the same
+        loop) can still run during that window. The next WS frame still
+        waits for the current handler to finish either way — that's a
+        pre-existing alpaca-py characteristic, not something this fix
+        touches.
+      - Cancelling the task running stream._run_forever() does NOT
+        cleanly close the underlying WebSocket. _run_forever()'s only
+        explicit self.close() calls are inside its
+        `except websockets.WebSocketException` branch and _consume()'s
+        stop_ws()-queue path — a CancelledError (a BaseException, not
+        caught by _run_forever()'s `except Exception`) propagates through
+        neither of those, so self._ws is left referencing an open
+        connection object with no explicit close(). Cleanup relies on the
+        server side timing the connection out via its own ping_timeout
+        (180s, MonitoredTradingStream's websocket_params) or the process
+        actually exiting. Not fixed here — the locked design only covers
+        the retry/signal-handling gap, not this pre-existing
+        cancellation-cleanup characteristic; flagged for awareness.
+
+    DROPLET-SIDE DEPENDENCY, not enforced by this code: this grace period
+    is only honored if trading-bot-listener.service's TimeoutStopSec
+    exceeds it — systemd's 90s default would SIGKILL before 300s of grace
+    can complete. TimeoutStopSec=330 is a locked, separate droplet-side
+    change (spec v82 §10.52), not yet made as of this commit.
     """
     if trading_client is None:
         trading_client = _build_trading_client()
@@ -490,20 +544,83 @@ def run_listener(trading_client: TradingClient = None, universe=None, sleep_fn=t
         universe = TRACK_B_UNIVERSE
 
     stream = _build_stream()
+    inflight_tasks: set[asyncio.Task] = set()
 
     async def _handler(trade_update):
+        task = asyncio.current_task()
+        inflight_tasks.add(task)
         try:
-            handle_trade_update(trading_client, trade_update, universe=universe, sleep_fn=sleep_fn)
+            await asyncio.to_thread(
+                handle_trade_update, trading_client, trade_update, universe=universe, sleep_fn=sleep_fn,
+            )
         except Exception as exc:  # noqa: BLE001 — one bad event must never kill the listener process
             log.exception("fill_listener: unhandled error processing a trade update")
             telegram_bot.send_message(
                 f"fill_listener: unhandled error processing a trade update ({exc}) — listener is still running."
             )
+        finally:
+            inflight_tasks.discard(task)
 
     stream.subscribe_trade_updates(_handler)
 
     async def main():
-        await asyncio.gather(stream._run_forever(), heartbeat_loop(stream))
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+        signal_handling_installed = True
+        try:
+            loop.add_signal_handler(signal.SIGTERM, shutdown_event.set)
+            loop.add_signal_handler(signal.SIGINT, shutdown_event.set)
+        except NotImplementedError:
+            signal_handling_installed = False
+            log.warning(
+                "fill_listener: loop.add_signal_handler unavailable on this platform — "
+                "SIGTERM will terminate immediately, not gracefully."
+            )
+
+        run_forever_task = asyncio.ensure_future(stream._run_forever())
+        heartbeat_task = asyncio.ensure_future(heartbeat_loop(stream))
+        tasks = {run_forever_task, heartbeat_task}
+
+        shutdown_task = None
+        if signal_handling_installed:
+            shutdown_task = asyncio.ensure_future(shutdown_event.wait())
+            tasks.add(shutdown_task)
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        if shutdown_task is not None and shutdown_task in done:
+            log.info("fill_listener: SIGTERM/SIGINT received, shutting down gracefully.")
+            run_forever_task.cancel()
+            heartbeat_task.cancel()
+            for t in (run_forever_task, heartbeat_task):
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # noqa: BLE001 — a cleanup-time error must not block graceful shutdown
+                    log.warning("fill_listener: error while shutting down %s: %s", t, exc)
+            if inflight_tasks:
+                log.info(
+                    "fill_listener: waiting up to %ss for %d in-flight fill handler(s) to finish.",
+                    _SHUTDOWN_GRACE_SECONDS, len(inflight_tasks),
+                )
+                _, still_pending = await asyncio.wait(inflight_tasks, timeout=_SHUTDOWN_GRACE_SECONDS)
+                if still_pending:
+                    telegram_bot.send_message(
+                        f"WARNING — fill_listener: shutting down (SIGTERM/SIGINT) with {len(still_pending)} fill "
+                        f"handler(s) still in flight after a {_SHUTDOWN_GRACE_SECONDS}s grace period. An affected "
+                        f"position may be mid-retry with no resting stop yet — protect_unprotected_fills() will "
+                        f"catch it on the next daily job run, up to ~1 trading day later."
+                    )
+            log.info("fill_listener: graceful shutdown complete.")
+            return
+
+        for t in pending:
+            t.cancel()
+        for t in done:
+            exc = t.exception()
+            if exc is not None:
+                raise exc
 
     try:
         asyncio.run(main())

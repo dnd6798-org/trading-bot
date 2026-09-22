@@ -12,6 +12,12 @@ WebSocket connection):
     tracked-vs-untracked symbol, non-decodable client_order_id, zero
     filled_qty) and its full pass-through to submit_or_resize_stop_
     order_with_retry() for a genuine buy fill/partial fill.
+  - run_listener()'s SIGTERM/SIGINT handling + event-loop fix (spec v82
+    §10.52): the real _handler closure and main() coroutine are exercised
+    via run_listener() itself, with _build_stream()/heartbeat_loop()/
+    asyncio.get_running_loop() all monkeypatched to fakes — no real
+    WebSocket connection, no real OS signal delivery (not reliably
+    testable cross-platform; see _FakeLoopCapturingHandlers below).
 
 No test here exercises a real Alpaca WebSocket connection or the paper
 account — that's the separate, one-off integration/restart-safety scripts
@@ -19,6 +25,8 @@ per the milestone brief ("an integration test against the paper account"
 / "a restart-safety test"), not meant to run as part of the automated suite.
 """
 import asyncio
+import signal
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -28,7 +36,7 @@ from alpaca.trading.enums import OrderSide, OrderStatus, OrderType, TradeEvent
 from alpaca.trading.requests import StopOrderRequest
 from alpaca.trading.stream import TradingStream
 
-from src import telegram_bot
+from src import fill_listener, telegram_bot
 from src.execution import ATR_MULTIPLIER, encode_client_order_id, submit_entry_and_stop
 from src.fill_listener import (
     MonitoredTradingStream,
@@ -693,3 +701,222 @@ def test_heartbeat_loop_skips_send_fn_while_connection_is_unhealthy():
         asyncio.run(heartbeat_loop(stream, interval_seconds=300, sleep_fn=fake_sleep, send_fn=lambda: send_calls.append(1)))
 
     assert send_calls == []
+
+
+# --- run_listener(): SIGTERM/SIGINT handling + event-loop fix (spec v82
+# §10.52) ----------------------------------------------------------------
+#
+# These drive the REAL run_listener()/_handler()/main() code — not a
+# reimplementation — via monkeypatched _build_stream()/heartbeat_loop()/
+# asyncio.get_running_loop(). Real OS signal delivery isn't reliably
+# testable cross-platform (e.g. Windows' ProactorEventLoop never supports
+# loop.add_signal_handler() at all — that's exactly what the
+# NotImplementedError-fallback test below exercises for real, on this
+# dev machine). _FakeLoopCapturingHandlers stands in for the running loop
+# so a "signal" can be simulated by invoking the captured callback
+# directly; main() never calls anything else on `loop`.
+
+class _FakeLoopCapturingHandlers:
+    def __init__(self):
+        self.handlers = {}
+
+    def add_signal_handler(self, sig, callback):
+        self.handlers[sig] = callback
+
+
+class _FakeLoopRaisingNotImplemented:
+    def add_signal_handler(self, sig, callback):
+        raise NotImplementedError("add_signal_handler unavailable on this platform")
+
+
+def _never_ending(*_a, **_k):
+    async def _sleep_forever():
+        await asyncio.sleep(1000)
+    return _sleep_forever()
+
+
+async def _completed_immediately():
+    return
+
+
+def test_handler_offloads_handle_trade_update_to_a_thread_not_blocking_the_event_loop(monkeypatch):
+    # If _handler() called handle_trade_update() synchronously instead of
+    # via asyncio.to_thread(), a blocking call (e.g. a real time.sleep()
+    # backoff mid-retry) would freeze the WHOLE event loop for its
+    # duration — a concurrently-scheduled quick task couldn't even start
+    # until the blocking call returned. Proven by capturing the REAL
+    # _handler closure and racing it against an independent quick task.
+    state = {"started": False, "finished": False}
+
+    def blocking_handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=time.sleep):
+        state["started"] = True
+        time.sleep(0.15)
+        state["finished"] = True
+        return {"action": "protected"}
+
+    monkeypatch.setattr(fill_listener, "handle_trade_update", blocking_handle_trade_update)
+
+    handler_holder = {}
+
+    class FakeStream:
+        def subscribe_trade_updates(self, handler):
+            handler_holder["handler"] = handler
+
+        async def _run_forever(self):
+            return  # completes immediately so run_listener() returns quickly
+
+    monkeypatch.setattr(fill_listener, "_build_stream", lambda: FakeStream())
+    monkeypatch.setattr(fill_listener, "heartbeat_loop", lambda stream: _completed_immediately())
+
+    fill_listener.run_listener(trading_client=FakeTradingClient())
+    handler = handler_holder["handler"]
+    assert handler is not None
+
+    order = []
+
+    async def quick_task():
+        await asyncio.sleep(0.01)
+        order.append("quick")
+
+    async def run_both():
+        t1 = asyncio.ensure_future(handler(_trade_update()))
+        t2 = asyncio.ensure_future(quick_task())
+        await asyncio.gather(t1, t2)
+        order.append("handler")
+
+    asyncio.run(run_both())
+
+    assert state["started"] is True
+    assert state["finished"] is True
+    # the quick task (0.01s) finished WHILE the thread-offloaded blocking
+    # call (0.15s) was still running — proves the event loop stayed free
+    assert order == ["quick", "handler"]
+
+
+def test_sigterm_during_an_inflight_handler_waits_for_it_before_exiting(monkeypatch):
+    fake_loop = _FakeLoopCapturingHandlers()
+    monkeypatch.setattr(fill_listener.asyncio, "get_running_loop", lambda: fake_loop)
+
+    state = {"started": False, "finished": False}
+
+    def blocking_handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=time.sleep):
+        state["started"] = True
+        time.sleep(0.2)
+        state["finished"] = True
+        return {"action": "protected"}
+
+    monkeypatch.setattr(fill_listener, "handle_trade_update", blocking_handle_trade_update)
+
+    handler_holder = {}
+
+    class FakeStream:
+        def subscribe_trade_updates(self, handler):
+            handler_holder["handler"] = handler
+
+        async def _run_forever(self):
+            # Simulate: a fill event arrives (kicking off the in-flight
+            # handler task via _handler), then SIGTERM arrives mid-retry.
+            asyncio.ensure_future(handler_holder["handler"](_trade_update()))
+            while not state["started"]:
+                await asyncio.sleep(0.005)
+            fake_loop.handlers[signal.SIGTERM]()
+            await asyncio.sleep(1000)  # pretend the stream keeps running until cancelled
+
+    monkeypatch.setattr(fill_listener, "_build_stream", lambda: FakeStream())
+    monkeypatch.setattr(fill_listener, "heartbeat_loop", _never_ending)
+
+    fill_listener.run_listener(trading_client=FakeTradingClient())  # must return, not hang or raise
+
+    assert state["started"] is True
+    # main() waited for the in-flight handler to actually finish before
+    # exiting — the retry was NOT killed mid-flight by the signal.
+    assert state["finished"] is True
+
+
+def test_sigterm_grace_period_exceeded_alerts_and_still_exits(monkeypatch, captured_telegram_messages):
+    monkeypatch.setattr(fill_listener, "_SHUTDOWN_GRACE_SECONDS", 0.03)
+
+    fake_loop = _FakeLoopCapturingHandlers()
+    monkeypatch.setattr(fill_listener.asyncio, "get_running_loop", lambda: fake_loop)
+
+    state = {"started": False, "finished": False}
+
+    def blocking_handle_trade_update(trading_client, trade_update, universe=None, sleep_fn=time.sleep):
+        state["started"] = True
+        time.sleep(0.2)  # comfortably longer than the (patched) 0.03s grace period
+        state["finished"] = True
+        return {"action": "protected"}
+
+    monkeypatch.setattr(fill_listener, "handle_trade_update", blocking_handle_trade_update)
+
+    handler_holder = {}
+
+    class FakeStream:
+        def subscribe_trade_updates(self, handler):
+            handler_holder["handler"] = handler
+
+        async def _run_forever(self):
+            asyncio.ensure_future(handler_holder["handler"](_trade_update()))
+            while not state["started"]:
+                await asyncio.sleep(0.005)
+            fake_loop.handlers[signal.SIGTERM]()
+            await asyncio.sleep(1000)
+
+    monkeypatch.setattr(fill_listener, "_build_stream", lambda: FakeStream())
+    monkeypatch.setattr(fill_listener, "heartbeat_loop", _never_ending)
+
+    fill_listener.run_listener(trading_client=FakeTradingClient())  # must still return, not hang
+
+    warnings = [m for m in captured_telegram_messages if m.startswith("WARNING — fill_listener: shutting down")]
+    assert len(warnings) == 1
+    assert "1 fill handler(s) still in flight" in warnings[0]
+    assert "0.03s grace period" in warnings[0]
+    assert "protect_unprotected_fills()" in warnings[0]
+
+
+def test_add_signal_handler_notimplementederror_falls_back_cleanly(monkeypatch):
+    # e.g. Windows' ProactorEventLoop, which never supports
+    # loop.add_signal_handler() — main() must fall back to the
+    # pre-existing behavior (no graceful-shutdown branch available) and
+    # still run/exit cleanly, not crash.
+    monkeypatch.setattr(fill_listener.asyncio, "get_running_loop", lambda: _FakeLoopRaisingNotImplemented())
+
+    class FakeStream:
+        def subscribe_trade_updates(self, handler):
+            pass
+
+        async def _run_forever(self):
+            return  # stream "stops" almost immediately
+
+    monkeypatch.setattr(fill_listener, "_build_stream", lambda: FakeStream())
+    monkeypatch.setattr(fill_listener, "heartbeat_loop", _never_ending)
+
+    fill_listener.run_listener(trading_client=FakeTradingClient())  # must not raise or hang
+
+
+def test_run_listener_behaves_normally_when_no_signal_is_received(monkeypatch):
+    # Regression check: with signal handling installed but never fired,
+    # run_listener() must behave exactly as before this milestone —
+    # stream._run_forever() completing on its own ends main() via the
+    # ordinary "cancel the other pending task" path, not the new
+    # graceful-shutdown branch, and no shutdown-related Telegram message
+    # is ever sent.
+    fake_loop = _FakeLoopCapturingHandlers()
+    monkeypatch.setattr(fill_listener.asyncio, "get_running_loop", lambda: fake_loop)
+
+    class FakeStream:
+        def subscribe_trade_updates(self, handler):
+            pass
+
+        async def _run_forever(self):
+            return  # the stream stops on its own, no signal involved
+
+    monkeypatch.setattr(fill_listener, "_build_stream", lambda: FakeStream())
+    monkeypatch.setattr(fill_listener, "heartbeat_loop", _never_ending)
+
+    fill_listener.run_listener(trading_client=FakeTradingClient())  # must return, not hang or raise
+
+    # signal handling WAS installed (proves that path still runs), it just
+    # never fired in this scenario.
+    assert signal.SIGTERM in fake_loop.handlers
+    assert signal.SIGINT in fake_loop.handlers
