@@ -6149,7 +6149,7 @@ Still open: the larger fix (SIGTERM handler + moving fill_listener.py's
 blocking I/O off the event loop) — queued as its own dedicated claude.ai
 design session, not yet started.
 
-## [v82] SIGTERM handler + event-loop fix for fill_listener.py — designed and locked
+## [v82] SIGTERM handler + event-loop fix for fill_listener.py — implemented, tested, pushed
 
 Closes the two gaps §10.50/v80 investigated and left flagged: no
 signal.signal() handler exists anywhere in this codebase (a restart landing
@@ -6199,8 +6199,12 @@ session's "verify, don't guess" convention):
   the underlying WebSocket, or leaves the server side to time it out.
   Confirm and note in the commit.
 
-Not yet implemented — implementation is message 2, sent after this
-CLAUDE.md update is confirmed.
+Implemented and pushed as commit `badd12a` on `paper` (origin/paper HEAD
+confirmed matching after push). Tests: 490/490 passing (485 before this
+milestone, 5 new in tests/test_fill_listener.py — to_thread offloading,
+graceful wait on SIGTERM with an in-flight handler, grace-period-exceeded
+alerting, the NotImplementedError fallback, and the no-signal regression
+case).
 
 ## Hard rules — never do these
 
