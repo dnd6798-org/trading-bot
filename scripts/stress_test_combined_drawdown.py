@@ -486,10 +486,13 @@ def main():
               f"already-reported pooled max drawdown figure), full history: {trade_close_dd:.2f}%  "
               f"(diff from expected {diff_trade_close:.2f}pp"
               f"{' -- WITHIN TOLERANCE, confirms the expected figure is on the TRADE-CLOSE basis, not daily mark-to-market' if diff_trade_close <= SANITY_TOLERANCE_PP else ''})")
+        track_b_full_dates = [d for d, _ in daily_curve_b]
+        track_b_worst = compute_global_max_drawdown(track_b_full_dates, track_b_full_values)
         print(f"    EXPLANATION: the {diff_b:.2f}pp gap is a basis difference, not a discrepancy in the underlying "
               f"trade list or reconstruction — the trade-close curve is blind to unrealized drawdown while a "
               f"position is still open. The daily mark-to-market curve's true worst drawdown "
-              f"({track_b_dd:.2f}%) occurred 2025-10-20 -> 2025-12-31 (peak $17,566.28 -> trough $15,895.43), "
+              f"({track_b_dd:.2f}%) occurred {track_b_worst['peak_date']} -> {track_b_worst['trough_date']} "
+              f"(peak ${track_b_worst['peak_value']:,.2f} -> trough ${track_b_worst['trough_value']:,.2f}), "
               f"entirely invisible to the trade-close-only measure because no trade closed during that decline.")
 
     track_c_values = [v for _, v in run_c.daily_curve]
