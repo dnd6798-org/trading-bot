@@ -6296,6 +6296,71 @@ changed.**
   per-track `evaluate_for_promotion()`; paper -> main promotion flow +
   Telegram approve step.
 
+**v86 (2026-09-22): v85 analysis milestone VALIDATED and ACCEPTED
+(178ddab); drawdown thresholds LOCKED; go-live criterion B5 corrected;
+Stage 1 capital recommended. Design only — no code changed.**
+
+- VALIDATION: `178ddab` (parent `65db7a9`) verified via Git MCP —
+  exactly 4 new files (+1309/-0), no `src/` change, tests 490 -> 527.
+  Method and two Part B figures independently reproduced. ONE DEFECT to
+  fix (separate brief): `scripts/stress_test_combined_drawdown.py`
+  `main()` prints a HARDCODED literal ("occurred 2025-10-20 ->
+  2025-12-31 (peak $17,566.28 -> trough $15,895.43)") instead of
+  computed values — values are consistent with the data, but must be
+  computed. ACCEPTED DEVIATION: Part C made two read-only GETs instead
+  of one. 220 vs 219 trades accepted (open DBC entry 2026-09-01).
+- FINDINGS: (1) Track B true historical max drawdown is 9.51% on a
+  DAILY MARK-TO-MARKET basis (2016-01-04 -> 2026-09-22; worst
+  2025-10-20 -> 2025-12-31). The 5.70% figure is the TRADE-CLOSE-ONLY
+  basis and is blind to open-position drawdown — never use it as a live
+  drawdown threshold. (2) Combined 70/30 max drawdown 11.94% (overlap
+  2019-07-01 -> 2026-09-22, daily): peak 2020-02-19, trough 2020-03-23,
+  recovered 2020-08-26; Track B 2.84pp, Track C 9.10pp. Zero combined
+  episodes >= 12%. Track C standalone 33.21% reproduced; monthly
+  correlation 0.4207. (3) The allocation-based sub-balance (70% of total
+  equity) is the WRONG basis for a per-track halt — Track B's rebalanced
+  sub-balance hit 10.14% in 2020 because monthly re-splits transfer
+  Track C losses into it. Per-track drawdown must be measured on each
+  track's OWN P&L-attributed equity (realized + unrealized, daily MTM).
+  (4) The existing 10% global check would NEVER have fired historically:
+  0 of 220 Track B entries fell on a >= 10% combined-drawdown day —
+  breakout signals don't fire in crashes, and the check only runs on
+  Track B signal days. (5) alpaca-py 0.43.5 supports cashflow
+  adjustment: `GetPortfolioHistoryRequest.cashflow_types`
+  (`Optional[str]`) and `PortfolioHistory.cashflow`
+  (`Dict[ActivityType, List[float]]`).
+- UNVERIFIED (verification brief follows): Part C returned
+  `base_value=100000.0`, suggesting the paper account started at
+  $100,000, not the $10,000 "paper-validation notional" recorded in the
+  v85 entry. Do not treat either figure as confirmed until verified.
+- THRESHOLDS LOCKED:
+  G1 (implementable, not yet briefed): ACCOUNT-LEVEL BACKSTOP — 20%
+  drawdown of total account equity, cashflow-adjusted (exclude CSD, CSW,
+  JNLC; DIV counts as return), evaluated on EVERY trading day
+  independent of Track B signals. On breach: set the existing global
+  halt (`halt_state.json` — blocks new Track B entries only) + URGENT
+  Telegram alert. Never blocks Track C rebalances; no automatic
+  liquidation. REPLACES the existing 10% signal-day-only check.
+  G2 (after the journaling slice): TRACK B OWN HALT — 15% of Track B
+  P&L-attributed equity, blocks new Track B entries only. TRACK C ALERT
+  — > 33.21% of Track C P&L-attributed equity, alert-only.
+  INTERIM: the existing 10% check stays exactly as-is until G1 is
+  briefed, implemented and deployed. Do not change it.
+- GO-LIVE CRITERION B5 CORRECTED: review trigger is Track B
+  P&L-attributed drawdown > 9.51% (daily MTM basis), replacing 5.70%.
+  All other v85 go-live criteria unchanged.
+- STAGE 1 CAPITAL RECOMMENDATION: $10,000 total ($7,000 Track B /
+  $3,000 Track C), CONTINGENT on whole-share entry sizing being
+  implemented first; spend approval is the product owner's at the
+  go-live gate. Basis (prices 2026-09-22): minimum total equity for
+  >= 1 whole share at every symbol's 10th-percentile trade is $5,603.12
+  (QQQ binds); at $10,000, 0 of 220 trades floor to zero.
+- GO-LIVE BLOCKERS, updated order: live entry-sizing design
+  (whole-share sizing + `estimate_pre_fill_qty()` confirmation) -> G1 ->
+  journaling slice (per-track P&L-attributed equity) -> G2 +
+  `evaluate_for_promotion()` -> paper -> main promotion flow + Telegram
+  approve step.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
