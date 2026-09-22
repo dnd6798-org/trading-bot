@@ -44,6 +44,10 @@ income — $100 was never going to produce meaningful monthly income at any
 realistic return rate. Treat "starting capital" language elsewhere in this
 file as referring to the old $100-only framing where it hasn't been
 updated yet; the $10,000/$100 split above is the current decision.
+**UPDATE v85 (2026-09-22): the $100 real-money go-live figure is
+RETIRED — structurally incompatible with Track B's whole-share GTC
+stops. Stage 1 capital will be set from a whole-share-viability
+quantification; see the v85 status entry.**
 
 **NOTE (2026-08 session, finding 10): the BTC/USD + ETH/USD-only universe
 described above is being reopened** — see "Current status" and finding 10
@@ -6205,6 +6209,92 @@ milestone, 5 new in tests/test_fill_listener.py — to_thread offloading,
 graceful wait on SIGTERM with an in-flight handler, grace-period-exceeded
 alerting, the NotImplementedError fallback, and the no-signal regression
 case).
+
+**v85 (2026-09-22): Promotion-to-live framework LOCKED; $100 go-live
+RETIRED; drawdown-halt findings recorded. Design only — no code
+changed.**
+
+- THREE DISTINCT GATES. (1) Go-live gate (Stage 0 -> Stage 1): first
+  real-money deployment. (2) Capital-scaling gate (Stage 1 -> 2+):
+  statistical performance bars belong here; numbers deferred. (3)
+  Code-change gate: `src/promotion/criteria.py`'s ORIGINAL docstring
+  scope (a paper-tested code change before paper -> main); numbers
+  deferred. Capital stages are named "Stage 0/1/2" (NOT "Tier" — Tier
+  1/Tier 2 remain the monitoring tiers).
+- GO-LIVE GATE CRITERIA (Stage 0 -> Stage 1), all pass/fail must pass,
+  whichever binds last sets the date:
+  B1 Track B: >=120 calendar days since the 2026-09-01 soak-start marker
+  (earliest 2026-12-30).
+  B2 Track B: >=6 closed round-trips (entry fill -> exit fill) since
+  2026-09-01.
+  B3 Track B: >=1 closed round-trip whose exit was a resting-stop fill
+  after >=1 successful ratchet of that stop.
+  B4 Track B: signal parity 100% — every live entry matches a backtest
+  replay of the soak window (same symbol, same signal date); every
+  replay signal not entered live is explained by a logged guardrail or
+  duplicate-guard skip.
+  B5 Track B (REVIEW TRIGGER, not auto-fail): Track B drawdown on its
+  own attributed equity > 5.70%.
+  B6 Track B (REVIEW TRIGGER, not auto-fail): any closed trade with
+  realized risk > 2.0% of Track B equity.
+  C1 Track C: >=3 completed rebalance-day runs (`rebalance_day=True`)
+  on/after 2026-09-01, each with target holdings matching a backtest
+  replay.
+  C2 Track C: >=1 of those rebalances changed holdings (>=1 sell and
+  >=1 buy filled) and its deferred `reconcile_symbol()` pass completed
+  with no Track C halt.
+  S1 zero unresolved URGENT alerts; every halt (either halt file)
+  investigated and closed.
+  S2 all three Healthchecks.io heartbeats green at evaluation time.
+  S3 `override_rc` guard exercised by >=1 real unattended-upgrades run
+  without restarting `trading-bot-listener.service`.
+  S4 every metric produced automatically (journaling slice), evaluated
+  by `evaluate_for_promotion()`, then the Telegram approve step.
+  S5 every go-live blocker (listed below) closed.
+- `PromotionCriteria` becomes PER-TRACK carrying the criteria above;
+  `evaluate_for_promotion()` implements the go-live gate. NOT to be
+  implemented until the journaling minimum slice exists and an
+  implementation brief is issued.
+- **$100 REAL-MONEY GO-LIVE FIGURE RETIRED.** Reason: since the
+  2026-08-28 fractional-GTC finding, stop qty is floored to whole
+  shares; at $100 total equity every Track B entry is sub-1-share
+  (e.g. SPY mean capped notional ~34.1% of the $70 Track B sub-balance
+  ~= $24; AGG capped at 55% = $38.50) -> no stop possible. Stage 1
+  capital must be whole-share viable; amount to be quantified. The
+  $10,000 paper-validation notional is unchanged.
+- DRAWDOWN-HALT FINDINGS (verified in code at `f569cc6`): (a)
+  `risk_filter.check_drawdown_limit()` runs only inside `evaluate()`,
+  i.e. only on days with a Track B entry candidate — no check and no
+  alert on other days; (b) its halt writes `halt_state.json`, which
+  Track C never reads (it reads only `track_c_halt_state.json`) — the
+  global halt blocks Track B entries only; (c) `execution.py` docstring
+  statements that account-level halts "halt the whole bot" are STALE
+  since Track C went live (documentation only, not fixed yet); (d)
+  `execution.get_peak_equity()` is not cashflow-adjusted (a live
+  withdrawal would read as drawdown, a deposit raises the peak). Track
+  C's realized 12m backtest max drawdown is 33.21% (not the 35%
+  ceiling): x0.30 = 9.96% of account; combined with Track B (5.70%
+  x0.70 ~= 3.99%) bounded ~10%-13.95%. The v32 10% global halt and
+  Track C were never co-designed.
+- DRAWDOWN REDESIGN, structure locked, numbers pending a stress test:
+  (1) Track C is NEVER subject to a drawdown halt that freezes
+  rebalancing (that would disable its risk-off switch to AGG); Track C
+  drawdown monitoring is alert-only beyond its 33.21% backtest max. (2)
+  Track B gets its own drawdown halt on Track B attributed equity,
+  blocking new Track B entries only. (3) An account-level catastrophic
+  backstop evaluated EVERY trading day, independent of Track B signals,
+  with its own alert. (4) Peak equity must be cashflow-adjusted
+  (exclude CSD/CSW/JNLC external flows; DIV counts as return) before any
+  live capital. (5) INTERIM: the existing 10% global check stays exactly
+  as-is during paper — no code change until the redesign is locked and
+  briefed.
+- GO-LIVE BLOCKERS (open): read-only analysis milestone (next task);
+  live entry-sizing design (whole-share entry sizing + confirmation of
+  the `estimate_pre_fill_qty()` `close_T` proxy, still flagged "NOT
+  confirmed with the user"); drawdown guardrail implementation;
+  `journaling.py` minimum slice incl. per-track P&L attribution;
+  per-track `evaluate_for_promotion()`; paper -> main promotion flow +
+  Telegram approve step.
 
 ## Hard rules — never do these
 
