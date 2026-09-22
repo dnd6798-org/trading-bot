@@ -6149,6 +6149,59 @@ Still open: the larger fix (SIGTERM handler + moving fill_listener.py's
 blocking I/O off the event loop) — queued as its own dedicated claude.ai
 design session, not yet started.
 
+## [v82] SIGTERM handler + event-loop fix for fill_listener.py — designed and locked
+
+Closes the two gaps §10.50/v80 investigated and left flagged: no
+signal.signal() handler exists anywhere in this codebase (a restart landing
+mid-retry — e.g. needrestart's `systemctl restart`, the confirmed v79 root
+cause — kills the process immediately, before submit_stop_order_with_retry()'s
+retry loop can finish or its exhaustion alert can fire), and
+handle_trade_update() runs synchronously inside the async _handler() wrapper,
+sharing the event loop with heartbeat_loop() and stream._run_forever()'s own
+WebSocket read/keepalive for the full duration of any retry (confirmed up to
+~290s worst case, execution.py's submit_stop_order_with_retry() docstring).
+
+Design (full detail: spec v82 §10.52):
+1. _handler() now runs handle_trade_update() via asyncio.to_thread() instead
+   of synchronously — the event loop is no longer blocked during a retry.
+2. run_listener()'s main() installs SIGTERM/SIGINT handlers via
+   loop.add_signal_handler() (asyncio-safe; not raw signal.signal()). On
+   either signal: cancel stream._run_forever() and heartbeat_loop() (both
+   pure-asyncio, safe to cancel), then bounded-wait up to
+   _SHUTDOWN_GRACE_SECONDS = 300 (derived from the confirmed ~290s worst
+   case, rounded up like the existing _MAX_BACKOFF_SECONDS = 300) for any
+   in-flight fill handler to finish before exiting. If the grace period
+   expires with handlers still in flight, sends a new WARNING Telegram
+   alert naming the risk (position may be mid-retry with no resting stop;
+   protect_unprotected_fills() catches it on the next daily run) before
+   exiting anyway.
+3. Falls back to the pre-existing KeyboardInterrupt-only behavior if
+   loop.add_signal_handler() raises NotImplementedError (non-POSIX
+   platforms only — not an expected production path; this listener's only
+   real deployment target is the Linux droplet, per the module docstring).
+
+Droplet-side consequence, NOT part of this commit (separate, already-planned
+droplet session): trading-bot-listener.service needs TimeoutStopSec=330
+added to its [Service] section, or systemd's default 90s TimeoutStopSec
+SIGKILLs the process before the new 300s grace period can complete,
+defeating this fix. Bundle with the already-planned override_rc guard +
+git-pull-to-current-HEAD session (playbook v82 §10.B). KillSignal needs no
+change — systemd's default (SIGTERM) is already what needrestart and a
+manual systemctl stop/restart send.
+
+Flagged for verification during implementation, non-blocking (this
+session's "verify, don't guess" convention):
+- Whether alpaca-py's TradingStream._run_forever() awaits each trade-update
+  handler before reading the next WS frame, or dispatches concurrently.
+  Confirm against the installed alpaca-py source and note the answer in the
+  commit — it doesn't change this fix's correctness either way.
+- Whether cancelling the task running stream._run_forever() cleanly closes
+  the underlying WebSocket, or leaves the server side to time it out.
+  Confirm and note in the commit.
+
+Not yet implemented — implementation is message 2, sent after this
+CLAUDE.md update is confirmed.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
