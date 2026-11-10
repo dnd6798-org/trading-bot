@@ -6361,6 +6361,24 @@ Stage 1 capital recommended. Design only — no code changed.**
   `evaluate_for_promotion()` -> paper -> main promotion flow + Telegram
   approve step.
 
+## v87 — Project frozen (2026-11-10)
+- Product-owner decision: the project's goal was re-scoped to "steady
+  $1,000/month after-tax secondary income." Capital analysis (spec v87
+  §10.58): blended 70/30 backtest return ~7.2%/yr (Track B ~5.1%/yr from
+  +71.24% over 2016-01-04 -> 2026-09-22; Track C 10.9%-14.1% across
+  lookbacks); ~5%/yr planning figure after backtest-to-live haircut; ~28%
+  assumed combined marginal tax (short-term gains) -> ~$16,700/yr pre-tax
+  required -> ~$232,000-$333,000 capital required. Product owner does not
+  have that capital. The bot cannot meet the goal; development is stopped.
+- All go-live blockers DEFERRED (not cancelled): live entry sizing, G1
+  account-level backstop, journaling slice, G2, evaluate_for_promotion(),
+  paper -> main promotion flow. v86 follow-up brief CANCELLED.
+- Paper soak on the droplet continues unattended, unchanged.
+- Hard review date: 2027-03-01. Default outcome is shutdown (droplet
+  destroyed, repo archived) unless the product owner then has capital to
+  commit. No work on this repo before that date unless an operational
+  alert requires it.
+
 ## Hard rules — never do these
 
 - **Never commit directly to `main`.** All work happens on `paper` or a
